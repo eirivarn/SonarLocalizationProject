@@ -8,6 +8,13 @@ import cv2
 import yaml
 from rosbags.highlevel import AnyReader
 
+from datetime import datetime, timezone
+try:
+    from zoneinfo import ZoneInfo  # Python 3.9+
+except Exception:
+    ZoneInfo = None
+
+
 from .core import (
     sanitize_topic, base_msgtype, find_video_bags, stamp_seconds, to_native,
     ensure_types_from_reader,   # <-- add this
@@ -214,25 +221,42 @@ def export_camera_topic_to_png_sequence(
     out_dir: Union[str, Path],
     stride: int = 1,
     limit: Optional[int] = None,
-    zero_pad: int = 6,
+    zero_pad: int = 6,                 # kept for optional ordinal suffix if collisions occur
     resize_to: Optional[Tuple[int, int]] = None,  # (W, H)
+    *,
+    timestamp_tz: str = "Europe/Oslo", # filename timezone
+    timestamp_fmt: str = "%Y%m%d_%H%M%S_%f%z",    # filename format (safe)
+    timestamp_source: str = "auto",    # "auto"|"header"|"bag"
+    write_index_csv: bool = True,      # also write an index.csv with timestamps
 ) -> Dict[str, Union[str, int]]:
     """
-    Export frames of a camera topic as PNGs:
-        out_dir/<bag-stem>__<topic_sanitized>/frame_000001.png
+    Export frames of a camera topic as PNGs, one file per frame with timestamped filenames:
+
+        exports/frames/<bag-stem>__<topic_sanitized>/<YYYYmmdd_HHMMSS_micro+TZ>.png
+
+    - Timestamp choice:
+        * "auto": header stamp if present, else bag receive time
+        * "header": force Header.stamp (may be None)
+        * "bag": force bag receive time
+    - Writes index.csv with per-frame t_header/t_bag and the chosen ts.
     """
     bagpath = Path(bagpath)
     topic_tag = sanitize_topic(topic)
     seq_dir = Path(out_dir) / f"{bagpath.stem}__{topic_tag}"
     seq_dir.mkdir(parents=True, exist_ok=True)
 
+    # index rows (optional)
+    index_rows: List[Dict] = []
+
     frames_written = 0
     with AnyReader([bagpath]) as reader:
+        _ = ensure_types_from_reader(reader)
         cons = [c for c in reader.connections if c.topic == topic]
         if not cons:
             raise ValueError(f"Topic {topic!r} not found in {bagpath.name}")
         con = cons[0]
         mt = base_msgtype(con.msgtype)
+
         idx = 0
         for _, t_ns, raw in reader.messages(connections=[con]):
             if limit is not None and frames_written >= limit:
@@ -240,18 +264,72 @@ def export_camera_topic_to_png_sequence(
             if idx % stride != 0:
                 idx += 1
                 continue
+
             msg = reader.deserialize(raw, con.msgtype)
             img = _decode_compressed_to_bgr(msg) if mt == "CompressedImage" else _decode_raw_to_bgr(msg)
             idx += 1
             if img is None:
                 continue
+
+            # choose timestamp
+            t_hdr, t_bag, t_auto = _extract_times(msg, t_ns)
+            if timestamp_source == "header":
+                ts = t_hdr
+            elif timestamp_source == "bag":
+                ts = t_bag
+            else:
+                ts = t_auto
+
+            # filename (timestamped)
+            ts_str = _format_ts(ts, tz_name=timestamp_tz, fmt=timestamp_fmt)
+
+            # avoid collisions if two frames format to the same name
+            base_name = ts_str
+            fname = seq_dir / f"{base_name}.png"
+            bump = 1
+            while fname.exists():
+                # append an ordinal suffix
+                fname = seq_dir / f"{base_name}__{bump:0{zero_pad}d}.png"
+                bump += 1
+
+            # optional resize
             if resize_to:
                 W, H = resize_to
                 if img.shape[1] != W or img.shape[0] != H:
                     img = cv2.resize(img, (W, H), interpolation=cv2.INTER_AREA)
-            fname = seq_dir / f"frame_{frames_written:0{zero_pad}d}.png"
+
+            # write the image
             cv2.imwrite(str(fname), img)
             frames_written += 1
+
+            # index row
+            if write_index_csv:
+                dt_utc = datetime.fromtimestamp(ts, tz=timezone.utc) if ts is not None else None
+                if ZoneInfo is not None and ts is not None:
+                    try:
+                        dt_loc = dt_utc.astimezone(ZoneInfo(timestamp_tz))
+                    except Exception:
+                        dt_loc = dt_utc
+                else:
+                    dt_loc = dt_utc
+                index_rows.append({
+                    "bag": bagpath.stem,
+                    "topic": topic,
+                    "file": str(fname.relative_to(seq_dir)),
+                    "t_use": ts,
+                    "t_header": t_hdr,
+                    "t_bag": t_bag,
+                    "ts_utc": dt_utc.isoformat() if dt_utc else None,
+                    "ts_local": dt_loc.isoformat() if dt_loc else None,
+                })
+
+    # write index.csv next to the frames
+    if write_index_csv and index_rows:
+        idx_path = seq_dir / "index.csv"
+        pd.DataFrame(index_rows).to_csv(idx_path, index=False)
+        print(f"Wrote {frames_written} PNGs to {seq_dir} with index: {idx_path}")
+    else:
+        print(f"Wrote {frames_written} PNGs to {seq_dir}.")
 
     return {
         "bag": bagpath.stem,
@@ -381,3 +459,41 @@ def export_all_video_bags_to_png(
     idx.to_csv(idx_path, index=False)
     print(f"\nIndex written: {idx_path} ({len(idx)} rows).")
     return idx
+
+def _extract_times(msg, t_ns):
+    """Return (t_header, t_bag, t_use) in seconds (float)."""
+    # bag receive time
+    t_bag = float(t_ns) * 1e-9 if t_ns is not None else None
+
+    # header time (ROS1/ROS2 compatible)
+    t_hdr = None
+    for p in (("header","stamp","sec","nanosec"), ("header","stamp","secs","nsecs")):
+        try:
+            sec = getattr(getattr(getattr(msg, p[0]), p[1]), p[2])
+            nsc = getattr(getattr(getattr(msg, p[0]), p[1]), p[3])
+            t_hdr = float(sec) + float(nsc) * 1e-9
+            break
+        except Exception:
+            pass
+
+    t_use = t_hdr if (t_hdr is not None and t_hdr > 0) else t_bag
+    return t_hdr, t_bag, t_use
+
+def _format_ts(ts_sec, tz_name="Europe/Oslo", fmt="%Y%m%d_%H%M%S_%f%z"):
+    """
+    Format a POSIX timestamp (seconds) into a filename-safe string.
+    Default tz: Europe/Oslo. Fallback to UTC if tz data is unavailable.
+    """
+    if ts_sec is None:
+        return "unknown_ts"
+    dt_utc = datetime.fromtimestamp(ts_sec, tz=timezone.utc)
+    if ZoneInfo is not None:
+        try:
+            tz = ZoneInfo(tz_name)
+            dt_loc = dt_utc.astimezone(tz)
+        except Exception:
+            dt_loc = dt_utc  # fallback to UTC
+    else:
+        dt_loc = dt_utc     # fallback to UTC
+    s = dt_loc.strftime(fmt)  # no ":" so it's filesystem-safe
+    return s

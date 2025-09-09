@@ -36,7 +36,7 @@ def bag_topic_to_dataframe(
 ) -> pd.DataFrame:
     """
     Read a single topic from a bag into a DataFrame with:
-      columns: t, t0, t_rel, bag, bag_file, topic, [flattened fields...]
+      columns: t, t0, t_rel, ts_utc, ts_oslo, t_header, t_bag, t_src, bag, bag_file, topic, [...]
     """
     bagpath = Path(bagpath)
     rows: List[Dict] = []
@@ -49,12 +49,16 @@ def bag_topic_to_dataframe(
 
         for con, t_ns, raw in reader.messages(connections=conns):
             msg = reader.deserialize(raw, con.msgtype)
+            t_hdr, t_bag, t_use, t_src = _extract_times(msg, t_ns)
 
             # ---- SonoptixECHO: Float32MultiArray -> 2D 'image' (or flat 'data') ----
             if base_msgtype(con.msgtype) == "SonoptixECHO" and hasattr(msg, "array_data"):
                 labels, sizes, strides, payload, shape = decode_float32_multiarray(msg.array_data)
                 rec = {
-                    "t": stamp_seconds(msg, t_ns),
+                    "t": t_use,                 # chosen time (header if present else bag)
+                    "t_header": t_hdr,          # keep both for auditing
+                    "t_bag": t_bag,
+                    "t_src": t_src,             # "header" | "bag"
                     "bag": bagpath.stem,
                     "bag_file": bagpath.name,
                     "topic": topic,
@@ -62,12 +66,12 @@ def bag_topic_to_dataframe(
                     "dim_sizes":  json.dumps(sizes, ensure_ascii=False),
                     "dim_strides": json.dumps(strides, ensure_ascii=False),
                 }
-                if shape is not None:   # (H, W) detected -> store as image
+                if shape is not None:
                     H, W = shape
                     rec["rows"] = int(H)
                     rec["cols"] = int(W)
-                    rec["image"] = json.dumps(payload, ensure_ascii=False)  # 2D list
-                else:                    # fallback: flat vector
+                    rec["image"] = json.dumps(payload, ensure_ascii=False)
+                else:
                     rec["data"] = json.dumps(payload, ensure_ascii=False)
                     rec["len"]  = len(payload)
                 rows.append(rec)
@@ -75,43 +79,34 @@ def bag_topic_to_dataframe(
 
             # ---- Ping360-like: bearing + bins/intensities array ----
             if ("ping360" in topic.lower()) or (base_msgtype(con.msgtype) in ("Ping360", "Ping")):
-                # Try common field names
                 bearing = None
                 for cand in ("bearing", "angle", "azimuth", "theta", "heading"):
                     if hasattr(msg, cand):
-                        try:
-                            bearing = float(getattr(msg, cand))
-                        except Exception:
-                            bearing = getattr(msg, cand)
+                        try:    bearing = float(getattr(msg, cand))
+                        except: bearing = getattr(msg, cand)
                         break
                 bins = None
                 for cand in ("bins", "ranges", "samples", "intensities", "echo", "intensity"):
                     if hasattr(msg, cand):
                         v = getattr(msg, cand)
-                        if isinstance(v, (list, tuple)):
-                            bins = [float(x) for x in v]
+                        if isinstance(v, (list, tuple)): bins = [float(x) for x in v]
                         break
                 if (bearing is not None) or (bins is not None):
                     rec = {
-                        "t": stamp_seconds(msg, t_ns),
-                        "bag": bagpath.stem,
-                        "bag_file": bagpath.name,
-                        "topic": topic,
+                        "t": t_use, "t_header": t_hdr, "t_bag": t_bag, "t_src": t_src,
+                        "bag": bagpath.stem, "bag_file": bagpath.name, "topic": topic,
                     }
-                    if bearing is not None:
-                        rec["bearing_deg"] = bearing
+                    if bearing is not None: rec["bearing_deg"] = bearing
                     if bins is not None:
                         rec["bins"] = json.dumps(bins, ensure_ascii=False)
                         rec["n_bins"] = len(bins)
                     rows.append(rec)
                     continue
 
-            # ---- Generic fallback for everything else ----
+            # ---- Generic fallback ----
             rec = {
-                "t": stamp_seconds(msg, t_ns),
-                "bag": bagpath.stem,
-                "bag_file": bagpath.name,
-                "topic": topic,
+                "t": t_use, "t_header": t_hdr, "t_bag": t_bag, "t_src": t_src,
+                "bag": bagpath.stem, "bag_file": bagpath.name, "topic": topic,
             }
             flatten_msg(msg, rec, arrays_as=arrays_as)
             rows.append(rec)
@@ -120,8 +115,17 @@ def bag_topic_to_dataframe(
         return pd.DataFrame()
 
     df = pd.DataFrame(rows).dropna(subset=["t"]).sort_values("t").reset_index(drop=True)
-    df["t0"] = df["t"].iloc[0]
+
+    # relative time & readable timestamps
+    df["t0"]    = df["t"].iloc[0]
     df["t_rel"] = df["t"] - df["t0"]
+    df["ts_utc"]  = pd.to_datetime(df["t"], unit="s", utc=True)
+    # Europe/Oslo (handles DST automatically if tz data is available)
+    try:
+        df["ts_oslo"] = df["ts_utc"].dt.tz_convert("Europe/Oslo")
+    except Exception:
+        df["ts_oslo"] = df["ts_utc"]  # fallback if tz database missing
+
     return df
 
 # ------------------------------ Save helpers ------------------------------
@@ -265,3 +269,23 @@ def save_all_topics_from_data_bags(
     print(f"\nIndex written to {idx_path} with {len(index_df)} entries.")
     return index_df
 
+def _extract_times(msg, t_ns):
+    """Return (t_header, t_bag, t_use, t_src) in seconds."""
+    # bag receive time (from rosbags)
+    t_bag = float(t_ns) * 1e-9 if t_ns is not None else None
+
+    # try ROS1/ROS2 header fields
+    t_hdr = None
+    for p in (("header","stamp","sec","nanosec"), ("header","stamp","secs","nsecs")):
+        try:
+            sec = getattr(getattr(getattr(msg, p[0]), p[1]), p[2])
+            nsc = getattr(getattr(getattr(msg, p[0]), p[1]), p[3])
+            t_hdr = float(sec) + float(nsc) * 1e-9
+            break
+        except Exception:
+            pass
+
+    # choose
+    if t_hdr is not None and t_hdr > 0:
+        return t_hdr, t_bag, t_hdr, "header"
+    return t_hdr, t_bag, t_bag, "bag"
