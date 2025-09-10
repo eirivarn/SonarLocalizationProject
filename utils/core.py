@@ -1,4 +1,5 @@
 from __future__ import annotations
+import hashlib
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union, Iterable, Any
 import base64
@@ -161,100 +162,135 @@ def ensure_types_from_reader(reader) -> int:
 
 # --- Float32MultiArray helpers (Sonoptix etc.) ---
 
-def _to_py_floats(seq):
-    """Convert numpy scalars to built-in float for JSON safety."""
-    return [float(x) for x in seq]
+def _sha256_floats32(data: np.ndarray) -> str:
+    b = np.asarray(data, dtype=np.float32).tobytes(order="C")
+    return hashlib.sha256(b).hexdigest()
 
-def decode_float32_multiarray(ma):
+def _safe_int(x, default=0, max_digits=20):
+    """Safely convert to int; guard against giant strings / bad values."""
+    try:
+        if isinstance(x, str) and len(x) > max_digits:
+            return default
+        return int(x)
+    except Exception:
+        return default
+
+def decode_float32_multiarray(
+    ma,
+    *,
+    allow_heuristics: bool = False,          # default SAFE: no guessing
+    allow_trailing_channel1: bool = True,    # common H×W×1 → H×W
+) -> Tuple[
+    List[str], List[int], List[int],
+    List[float] | List[List[float]],
+    Optional[Tuple[int, int]],
+    Dict[str, Any]
+]:
     """
-    Strict ROS MultiArrayLayout decoder.
-    Returns: labels, sizes, strides, payload (list or 2D list), shape or None
-    - honors layout.data_offset
-    - uses dims in outer-most -> inner-most order
-    - prefers 2D (H,W) view when possible; keeps full shape otherwise
+    Lossless, auditable decoder for Float32MultiArray-like messages.
+
+    Returns:
+      labels, sizes, strides, payload(list or 2D list), shape(H,W)|None, meta(dict)
+    Meta contains:
+      data_offset, dtype, payload_sha256, len_data, used_shape, policy, warnings[list]
     """
-    # Extract layout
+    # ----- layout -----
     dims = list(getattr(ma.layout, "dim", []) or [])
     labels  = [str(getattr(d, "label", "") or "") for d in dims]
-    sizes   = [int(getattr(d, "size", 0) or 0) for d in dims]
-    strides = [int(getattr(d, "stride", 0) or 0) for d in dims]
-    data_off = int(getattr(ma.layout, "data_offset", 0) or 0)
+    sizes   = [_safe_int(getattr(d, "size", 0),   default=0) for d in dims]
+    strides = [_safe_int(getattr(d, "stride", 0), default=0) for d in dims]
+    data_off = _safe_int(getattr(ma.layout, "data_offset", 0), default=0)
 
-    # Flat data with offset applied
-    data = [float(x) for x in getattr(ma, "data", [])]
+    # ----- flat data (apply offset only) -----
+    raw = getattr(ma, "data", [])
+    data = np.asarray(raw, dtype=np.float32)
     if data_off > 0:
         data = data[data_off:]
 
-    # If no dims given → return flat vector (legacy/minimal publishers)
-    if not sizes:
-        return labels, sizes, strides, data, None
+    meta: Dict[str, Any] = {
+        "data_offset": data_off,
+        "dtype": "float32",
+        "len_data": int(data.size),
+        "policy": "flat",          # updated below if we reshape
+        "used_shape": None,
+        "warnings": [],
+    }
+    meta["payload_sha256"] = _sha256_floats32(data)
 
-    # Validate size product (ignore trailing singleton channel=1)
+    # No dims → return flat as-is
+    if not sizes:
+        return labels, sizes, strides, data.tolist(), None, meta
+
+    # Compute dimension product conservatively
     prod = 1
     for s in sizes:
         prod *= max(s, 1)
-    if len(data) < prod:
-        # publisher might be dropping a trailing 1-dim or misreporting; try to be lenient
-        prod = len(data)
 
-    # Derive a canonical shape (outer->inner)
-    shape = tuple(sizes)
-    # Prefer a 2D image view if recognizable:
-    # H ∈ {"height","rows","beams"} and W ∈ {"width","cols","bins","range","samples"}
-    lab_l = [l.lower() for l in labels]
-    def find_idx(keys):
-        for k in reversed(range(len(lab_l))):  # prefer last match (often width/bins last)
-            if any(key in lab_l[k] for key in keys):
-                return k
-        return None
-    hi = find_idx({"height","rows","beams"})
-    wi = find_idx({"width","cols","bins","range","samples"})
+    # STRICT: only reshape when product matches
+    if data.size != prod:
+        # Special tolerance: H×W×1 declared but data is H×W (publisher may drop the channel array)
+        if allow_trailing_channel1 and len(sizes) >= 3 and sizes[-1] == 1 and data.size == (prod // max(sizes[-1], 1)):
+            # treat as if true product is H×W
+            shape_tuple = tuple(sizes[:-1])
+        else:
+            meta["warnings"].append(
+                f"Size mismatch: len(data)={data.size} vs ∏sizes={prod}. Returning flat."
+            )
+            return labels, sizes, strides, data.tolist(), None, meta
+    else:
+        shape_tuple = tuple(sizes)
 
-    arr = np.asarray(data, dtype=float)
-
+    # Attempt reshape with the computed shape (row-major)
     try:
-        arr = arr.reshape(shape, order='C')  # ROS layout uses standard row-major with given dims
-    except Exception:
-        # Fallback: if shape seems off, assume 2D by inferring H×W from product
-        # Prefer last two dims if there are >=2 dims
-        if len(sizes) >= 2:
-            H, W = sizes[-2], sizes[-1]
-            if H*W == len(data):
-                arr = arr.reshape((H, W))
-                labels2 = [labels[-2], labels[-1]]
-                sizes2  = [H, W]
-                strides2 = strides[-2:] if strides else []
-                return labels2, sizes2, strides2, arr.tolist(), (H, W)
-        # As a last resort, return flat
-        return labels, sizes, strides, data, None
+        arr = np.asarray(data, dtype=np.float32).reshape(shape_tuple, order="C")
+    except Exception as e:
+        meta["warnings"].append(f"reshape({shape_tuple}) failed: {e}. Returning flat.")
+        return labels, sizes, strides, data.tolist(), None, meta
 
-    # If we found plausible H/W labels, collapse other dims if they are singleton or "channel"
-    if hi is not None and wi is not None and hi != wi:
-        H, W = sizes[hi], sizes[wi]
-        if H > 0 and W > 0 and H*W == arr.size:
-            arr2 = arr.reshape((H, W))
-            return labels, sizes, strides, arr2.tolist(), (H, W)
+    # If 2D already → done
+    if arr.ndim == 2:
+        meta["policy"] = "reshape_exact" if tuple(sizes) == shape_tuple else "reshape_squeezed_c1"
+        meta["used_shape"] = arr.shape
+        if not np.array_equal(arr.ravel(order="C"), data):
+            meta["warnings"].append("Round-trip mismatch after 2D reshape; falling back to flat.")
+            return labels, sizes, strides, data.tolist(), None, meta
+        return labels, sizes, strides, arr.tolist(), (arr.shape[0], arr.shape[1]), meta
 
-    # Common 3D case: H×W×C with C=1 or C small; favor returning H×W
-    if arr.ndim == 3:
-        H, W, C = arr.shape
-        if C == 1:
-            return labels, sizes, strides, arr[..., 0].tolist(), (H, W)
-        # If dims are (C,H,W) or (H,C,W), try to detect H/W by label/size
-        if hi is not None and wi is not None:
+    # If 3D H×W×1 and allowed → squeeze last channel
+    if arr.ndim == 3 and allow_trailing_channel1 and arr.shape[-1] == 1:
+        arr2 = arr[..., 0]
+        meta["policy"] = "reshape_squeeze_c1"
+        meta["used_shape"] = arr2.shape
+        if not np.array_equal(arr2.ravel(order="C"), data.reshape(arr.shape, order="C")[..., 0].ravel(order="C")):
+            meta["warnings"].append("Round-trip mismatch after squeeze; returning flat.")
+            return labels, sizes, strides, data.tolist(), None, meta
+        return labels, sizes, strides, arr2.tolist(), (arr2.shape[0], arr2.shape[1]), meta
+
+    # Heuristic H×W detection (only if explicitly allowed)
+    if allow_heuristics and arr.ndim >= 2:
+        lab_l = [l.lower() for l in labels]
+        def find_idx(keys):
+            for k in reversed(range(len(lab_l))):
+                if any(key in lab_l[k] for key in keys):
+                    return k
+            return None
+        hi = find_idx({"height","rows","beams"})
+        wi = find_idx({"width","cols","bins","range","samples"})
+        if hi is not None and wi is not None and hi != wi:
             Hs, Ws = sizes[hi], sizes[wi]
-            if {Hs, Ws}.issubset(set(arr.shape)):
-                # move axes so H,W are first two
-                axes = list(range(arr.ndim))
-                # map current axes to H and W positions
-                h_ax = arr.shape.index(Hs)
-                w_ax = arr.shape.index(Ws)
-                axes.remove(h_ax); axes.remove(w_ax)
-                new_order = [h_ax, w_ax] + axes
-                arr2 = np.transpose(arr, new_order)
-                # collapse the rest (e.g., channel) by taking mean or first; here we take first
-                arr2 = arr2[..., 0]
-                return labels, sizes, strides, arr2.tolist(), (Hs, Ws)
+            if Hs > 0 and Ws > 0 and Hs * Ws == data.size:
+                arr2 = np.asarray(data, dtype=np.float32).reshape((Hs, Ws), order="C")
+                meta["policy"] = "heuristic_hw_from_labels"
+                meta["used_shape"] = (Hs, Ws)
+                if not np.array_equal(arr2.ravel(order="C"), data):
+                    meta["warnings"].append("Heuristic reshape round-trip mismatch; returning flat.")
+                    return labels, sizes, strides, data.tolist(), None, meta
+                return labels, sizes, strides, arr2.tolist(), (Hs, Ws), meta
 
-    # If nothing matched cleanly, return full shape (caller can still use it)
-    return labels, sizes, strides, arr.tolist(), tuple(arr.shape)
+    # Couldn’t confidently form 2D → return full-shape as nested lists (lossless)
+    meta["policy"] = "reshape_nd"
+    meta["used_shape"] = tuple(arr.shape)
+    if not np.array_equal(np.asarray(arr, dtype=np.float32).ravel(order="C"), data):
+        meta["warnings"].append("ND reshape round-trip mismatch; returning flat.")
+        return labels, sizes, strides, data.tolist(), None, meta
+    return labels, sizes, strides, arr.tolist(), tuple(arr.shape), meta

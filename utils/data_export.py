@@ -53,7 +53,13 @@ def bag_topic_to_dataframe(
 
             # ---- SonoptixECHO: Float32MultiArray -> 2D 'image' (or flat 'data') ----
             if base_msgtype(con.msgtype) == "SonoptixECHO" and hasattr(msg, "array_data"):
-                labels, sizes, strides, payload, shape = decode_float32_multiarray(msg.array_data)
+                res = decode_float32_multiarray(msg.array_data)  # new returns 6, old returns 5
+                if isinstance(res, tuple) and len(res) == 6:
+                    labels, sizes, strides, payload, shape, meta = res
+                else:
+                    labels, sizes, strides, payload, shape = res
+                    meta = {}
+
                 rec = {
                     "t": t_use,                 # chosen time (header if present else bag)
                     "t_header": t_hdr,          # keep both for auditing
@@ -66,6 +72,18 @@ def bag_topic_to_dataframe(
                     "dim_sizes":  json.dumps(sizes, ensure_ascii=False),
                     "dim_strides": json.dumps(strides, ensure_ascii=False),
                 }
+
+                # optional meta fields for auditability (present with new decoder)
+                if meta:
+                    rec["data_offset"]     = meta.get("data_offset")
+                    rec["dtype"]           = meta.get("dtype")
+                    rec["len_data"]        = meta.get("len_data")
+                    rec["payload_sha256"]  = meta.get("payload_sha256")
+                    rec["used_shape"]      = json.dumps(list(meta.get("used_shape") or []))
+                    rec["policy"]          = meta.get("policy")
+                    # store warnings as JSON so nothing is lost
+                    rec["warnings"]        = json.dumps(meta.get("warnings", []), ensure_ascii=False)
+
                 if shape is not None:
                     H, W = shape
                     rec["rows"] = int(H)
@@ -74,8 +92,10 @@ def bag_topic_to_dataframe(
                 else:
                     rec["data"] = json.dumps(payload, ensure_ascii=False)
                     rec["len"]  = len(payload)
+
                 rows.append(rec)
                 continue
+
 
             # ---- Ping360-like: bearing + bins/intensities array ----
             if ("ping360" in topic.lower()) or (base_msgtype(con.msgtype) in ("Ping360", "Ping")):
@@ -170,16 +190,17 @@ def save_all_topics_from_data_bags(
     by_bag_dir.mkdir(parents=True, exist_ok=True)
 
     # camera frames excluded by default
-    default_exclude = {
-        "sensor_msgs/Image",
-        "sensor_msgs/msg/Image",
-        "sensor_msgs/CompressedImage",
-        "sensor_msgs/msg/CompressedImage",
-    }
-    if exclude_msgtypes is None and include_msgtypes is None:
-        exclude_msgtypes = default_exclude
+    # default_exclude = {
+    #     "sensor_msgs/Image",
+    #     "sensor_msgs/msg/Image",
+    #     "sensor_msgs/CompressedImage",
+    #     "sensor_msgs/msg/CompressedImage",
+    # }
+    # if exclude_msgtypes is None and include_msgtypes is None:
+    #     exclude_msgtypes = default_exclude
 
     sonar_whitelist = {
+        "/sensor/sonoptix_echo/image"
         "sensors/msg/SonoptixECHO",
         "sensors/msg/Ping360",
         "sensors/msg/Ping",
