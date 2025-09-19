@@ -17,3 +17,13 @@ from .reporting import (
     load_data_index, list_exported_bag_stems, overview_by_bag, overview_by_datetime,
     topics_in_bag_df, topics_overview_dir,
 )
+
+# Optional zero-shot model utilities (requires additional dependencies)
+try:
+    from .zero_shot_utils import (
+        analyze_cone_run_with_zero_shot, clip_score_cone_objects,
+        check_model_availability, get_installation_commands
+    )
+except ImportError:
+    # Zero-shot utilities unavailable (missing transformers/torch/segment-anything)
+    pass
