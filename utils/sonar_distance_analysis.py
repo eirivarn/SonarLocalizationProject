@@ -1079,7 +1079,9 @@ def create_enhanced_sonar_plot_with_measurements(
     figsize: Tuple[int, int] = (16, 12),
     show_range_rings: bool = True,
     show_bearing_lines: bool = True,
-    title_prefix: str = "Enhanced Sonar Visualization"
+    title_prefix: str = "Enhanced Sonar Visualization",
+    net_angle_rad: float = 0.0,
+    angle_source: str = "default"
 ):
     """
     Create enhanced sonar visualization with distance measurement overlays.
@@ -1095,6 +1097,8 @@ def create_enhanced_sonar_plot_with_measurements(
         show_range_rings: Whether to show range rings
         show_bearing_lines: Whether to show bearing lines
         title_prefix: Prefix for plot title
+        net_angle_rad: Net heading angle in radians (0.0 = straight ahead)
+        angle_source: Description of angle data source
         
     Returns:
         matplotlib Figure object
@@ -1104,6 +1108,9 @@ def create_enhanced_sonar_plot_with_measurements(
     
     # Display the sonar cone
     im = ax.imshow(cone, extent=extent, cmap='viridis', origin='lower', alpha=0.8)
+    
+    # Convert angle to degrees for display
+    net_angle_deg = np.degrees(net_angle_rad)
     
     # Add distance measurement lines
     if distance_data:
@@ -1145,24 +1152,121 @@ def create_enhanced_sonar_plot_with_measurements(
             
             # Only draw if within sonar range
             if distance <= sonar_params['rmax']:
-                # Draw horizontal line (forward distance)
-                ax.axhline(
-                    y=distance + current_offset,
-                    color=color,
-                    linewidth=line_width,
-                    linestyle=style,
-                    alpha=line_alpha
-                )
                 
-                # Add point marker
-                ax.plot(0, distance + current_offset, 'o', 
-                       color=color, markersize=marker_size, 
-                       markeredgecolor='white', markeredgewidth=1)
-                
-                # Add to legend
-                label = f"{emoji} {name}: {distance:.2f}m"
-                legend_elements.append(plt.Line2D([0], [0], color=color, lw=line_width, 
-                                                linestyle=style, label=label))
+                # For Navigation NetDistance, use the actual net angle
+                if 'Navigation' in name and 'NetDistance' in name:
+                    # Calculate end point using net angle
+                    x_end = distance * np.sin(net_angle_rad)
+                    y_end = distance * np.cos(net_angle_rad)
+                    
+                    # Draw angled line to net
+                    ax.plot([0, x_end], [0, y_end], color=color, linewidth=line_width+1, 
+                           linestyle=style, alpha=line_alpha)
+                    ax.plot(x_end, y_end, 'o', color=color, markersize=marker_size+2, 
+                           markeredgecolor='white', markeredgewidth=2)
+                    
+                    # Add angle arc indicator if angle is significant
+                    if abs(net_angle_deg) > 2:
+                        arc_angles = np.linspace(0, net_angle_rad, 20)
+                        arc_radius = distance * 0.15  # 15% of distance
+                        arc_x = arc_radius * np.sin(arc_angles)
+                        arc_y = arc_radius * np.cos(arc_angles)
+                        ax.plot(arc_x, arc_y, color=color, linestyle='--', alpha=0.6, linewidth=2)
+                    
+                    # Special label for angled measurement
+                    label = f"{emoji} {name}: {distance:.2f}m @ {net_angle_deg:.1f}°"
+                    legend_elements.append(plt.Line2D([0], [0], color=color, lw=line_width+1, 
+                                                    linestyle=style, label=label))
+                else:
+                    # Other measurements - draw horizontal line (forward distance)
+                    ax.axhline(
+                        y=distance + current_offset,
+                        color=color,
+                        linewidth=line_width,
+                        linestyle=style,
+                        alpha=line_alpha
+                    )
+                    
+                    # Add point marker
+                    ax.plot(0, distance + current_offset, 'o', 
+                           color=color, markersize=marker_size, 
+                           markeredgecolor='white', markeredgewidth=1)
+                    
+                    # Add to legend
+                    label = f"{emoji} {name}: {distance:.2f}m"
+                    legend_elements.append(plt.Line2D([0], [0], color=color, lw=line_width, 
+                                                    linestyle=style, label=label))
+    
+    # Add range rings
+    if show_range_rings:
+        range_rings = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5]
+        for r in range_rings:
+            if r <= extent[3]:  # Don't exceed sonar range
+                circle = patches.Circle((0, 0), r, fill=False, color='cyan', 
+                                      alpha=0.3, linewidth=0.8, linestyle='--')
+                ax.add_patch(circle)
+                ax.text(0.1, r-0.05, f'{r}m', color='cyan', fontsize=9, alpha=0.7)
+    
+    # Add bearing lines
+    if show_bearing_lines:
+        angles = np.arange(-60, 61, 15)  # -60 to +60 degrees every 15 degrees
+        for angle in angles:
+            if angle != 0:  # Skip center line
+                angle_rad = np.radians(angle)
+                x_end = extent[3] * np.sin(angle_rad)
+                y_end = extent[3] * np.cos(angle_rad)
+                ax.plot([0, x_end], [0, y_end], color='cyan', alpha=0.2, 
+                       linewidth=0.5, linestyle=':')
+                if abs(angle) == 30 or abs(angle) == 60:  # Label major angles
+                    ax.text(x_end*0.9, y_end*0.9, f'{angle}°', color='cyan', 
+                           fontsize=8, alpha=0.7, ha='center', va='center')
+    
+    # Formatting
+    ax.set_xlabel('Cross-track Distance (m)', fontsize=12)
+    ax.set_ylabel('Forward Distance (m)', fontsize=12)
+    
+    # Create title with angle information
+    title = f"{title_prefix} - Frame {frame_idx}"
+    if timestamp:
+        title += f"\nTime: {timestamp}"
+    if abs(net_angle_deg) > 0.1:
+        title += f" | Net Heading: {net_angle_deg:.1f}° ({angle_source})"
+    if distance_data:
+        title += f" | {len(distance_data)} Distance Sources"
+    if sonar_params:
+        title += f" | rmax={sonar_params.get('rmax', 'N/A')}m"
+    
+    ax.set_title(title, fontsize=14, fontweight='bold')
+    
+    # Add legend
+    if 'legend_elements' in locals() and legend_elements:
+        legend = ax.legend(handles=legend_elements, loc='upper right', 
+                          fontsize=10, framealpha=0.9)
+        legend.get_frame().set_facecolor('white')
+    
+    # Add grid and colorbar
+    ax.grid(True, alpha=0.3)
+    cbar = plt.colorbar(im, ax=ax, shrink=0.8)
+    cbar.set_label('Sonar Intensity', fontsize=11)
+    
+    # Set equal aspect ratio and limits
+    ax.set_xlim(extent[0], extent[1])
+    ax.set_ylim(extent[2], extent[3])
+    
+    # Add info text box with angle information
+    if abs(net_angle_deg) > 0.1:
+        info_text = f"Net Angle Info:\n"
+        info_text += f"• Heading: {net_angle_deg:.1f}°\n"
+        info_text += f"• Source: {angle_source}\n"
+        info_text += f"• Range: {sonar_params.get('rmin', 0):.1f}-{sonar_params.get('rmax', 0):.1f}m"
+        
+        ax.text(0.02, 0.98, info_text, transform=ax.transAxes, fontsize=9,
+                verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    
+    ax.set_aspect('equal')
+    plt.tight_layout()
+    
+    return fig
     
     # Add range rings
     if show_range_rings:
@@ -1222,6 +1326,36 @@ def create_enhanced_sonar_plot_with_measurements(
     plt.tight_layout()
     
     return fig
+
+
+def extract_net_heading_at_timestamp(timestamp, nav_data, max_time_diff=2.0):
+    """
+    Extract net heading angle from navigation data at a specific timestamp.
+    
+    Args:
+        timestamp: Target timestamp (pandas Timestamp)
+        nav_data: Navigation dataframe with NetHeading column
+        max_time_diff: Maximum time difference in seconds to consider valid
+        
+    Returns:
+        Tuple of (net_angle_rad, net_angle_deg, angle_source, time_offset)
+    """
+    if nav_data is None or 'NetHeading' not in nav_data.columns:
+        return 0.0, 0.0, "default (no nav data)", 0.0
+    
+    # Find closest navigation measurement
+    nav_time_diffs = abs(nav_data['timestamp'] - timestamp)
+    min_time_diff = nav_time_diffs.min()
+    
+    if min_time_diff <= pd.Timedelta(f'{max_time_diff}s'):
+        nav_idx = nav_time_diffs.idxmin()
+        net_angle_rad = nav_data.loc[nav_idx, 'NetHeading']
+        net_angle_deg = np.degrees(net_angle_rad)
+        time_offset = min_time_diff.total_seconds()
+        angle_source = f"navigation data (Δt: {time_offset:.2f}s)"
+        return net_angle_rad, net_angle_deg, angle_source, time_offset
+    else:
+        return 0.0, 0.0, f"default (nav data too old: {min_time_diff.total_seconds():.1f}s)", min_time_diff.total_seconds()
 
 
 def analyze_distance_measurements_clustering(
@@ -1381,10 +1515,11 @@ def create_comprehensive_sonar_visualization(
     exports_folder: str = "/Users/eirikvarnes/code/SOLAQUA/exports",
     figsize: Tuple[int, int] = (16, 12),
     analysis_tolerance: float = 0.1,
-    show_analysis_report: bool = True
+    show_analysis_report: bool = True,
+    include_net_angle: bool = True
 ):
     """
-    Create comprehensive sonar visualization with full analysis.
+    Create comprehensive sonar visualization with full analysis and net angle support.
     
     Args:
         target_bag: Bag identifier
@@ -1394,6 +1529,7 @@ def create_comprehensive_sonar_visualization(
         figsize: Figure size
         analysis_tolerance: Tolerance for clustering analysis
         show_analysis_report: Whether to print analysis report
+        include_net_angle: Whether to include net heading angle visualization
         
     Returns:
         Tuple of (matplotlib Figure, analysis results dict)
@@ -1402,6 +1538,7 @@ def create_comprehensive_sonar_visualization(
     print(f"🎨 CREATING COMPREHENSIVE SONAR VISUALIZATION")
     print(f"   🎯 Target: {target_bag}, Frame: {frame_idx}")
     print(f"   📏 rmax: {rmax if rmax else 'auto-detect'}")
+    print(f"   🧭 Net angle: {'enabled' if include_net_angle else 'disabled'}")
     print("=" * 60)
     
     # Extract sonar data
@@ -1421,6 +1558,18 @@ def create_comprehensive_sonar_visualization(
     sonar_df = pd.read_csv(sonar_csv_file)
     sonar_timestamp = pd.to_datetime(sonar_df.loc[frame_idx, 'ts_utc'])
     
+    # Extract net heading angle if enabled
+    net_angle_rad = 0.0
+    net_angle_deg = 0.0
+    angle_source = "default (disabled)"
+    
+    if include_net_angle:
+        net_angle_rad, net_angle_deg, angle_source, time_offset = extract_net_heading_at_timestamp(
+            sonar_timestamp, raw_data.get('navigation')
+        )
+        if abs(net_angle_deg) > 0.1:
+            print(f"🧭 Net heading: {net_angle_deg:.1f}° ({angle_source})")
+    
     # Collect synchronized measurements
     distance_data = collect_distance_measurements_at_timestamp(
         sonar_timestamp, raw_data.get('navigation'), raw_data.get('guidance'), distance_measurements
@@ -1428,12 +1577,14 @@ def create_comprehensive_sonar_visualization(
     
     print(f"📊 Found {len(distance_data)} synchronized measurements")
     
-    # Create visualization
+    # Create visualization with angle support
     fig = create_enhanced_sonar_plot_with_measurements(
         cone, extent, distance_data, sonar_params,
         frame_idx=frame_idx,
         timestamp=sonar_timestamp.strftime('%H:%M:%S'),
         figsize=figsize,
+        net_angle_rad=net_angle_rad,
+        angle_source=angle_source,
         title_prefix=f"Comprehensive Sonar Analysis - {target_bag}"
     )
     
@@ -1442,6 +1593,11 @@ def create_comprehensive_sonar_visualization(
         distance_data, tolerance=analysis_tolerance,
         reference_measurement='Navigation NetDistance' if 'Navigation NetDistance' in distance_data else None
     )
+    
+    # Add angle information to results
+    analysis_results['net_angle_rad'] = net_angle_rad
+    analysis_results['net_angle_deg'] = net_angle_deg
+    analysis_results['angle_source'] = angle_source
     
     # Print analysis report
     if show_analysis_report and distance_data:

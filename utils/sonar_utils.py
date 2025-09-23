@@ -909,5 +909,40 @@ __all__ = [
     # cone run saving/loading
     "iter_cone_frames", 
     "save_cone_run_npz", 
-    "load_cone_run_npz"
+    "load_cone_run_npz",
+    # utility functions
+    "load_png_bgr",
+    "to_local_tz",
+    "ts_for_filename",
+    "put_text_overlay"
 ]
+
+
+# Additional utility functions for video generation
+def load_png_bgr(path) -> np.ndarray:
+    """Load PNG image as BGR array."""
+    img = cv2.imread(str(path), cv2.IMREAD_COLOR)
+    if img is None:
+        raise FileNotFoundError(path)
+    return img
+
+
+def to_local_tz(ts, tz_name="Europe/Oslo"):
+    """Convert timestamp to local timezone."""
+    try: 
+        return ts.tz_convert(tz_name)
+    except Exception: 
+        return ts
+
+
+def ts_for_filename(ts, tz_name="Europe/Oslo"):
+    """Format timestamp for filename."""
+    if pd.isna(ts): 
+        ts = pd.Timestamp.utcnow().tz_localize("UTC")
+    return to_local_tz(ts, tz_name).strftime("%Y%m%d_%H%M%S_%f%z")
+
+
+def put_text_overlay(bgr, text, y, x=10, scale=0.55):
+    """Add text overlay with white text and black outline."""
+    cv2.putText(bgr, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, (255,255,255), 2, cv2.LINE_AA)
+    cv2.putText(bgr, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, (0,0,0), 1, cv2.LINE_AA)
