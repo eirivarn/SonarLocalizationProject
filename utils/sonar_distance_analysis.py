@@ -17,6 +17,9 @@ import matplotlib.patches as patches
 from typing import Dict, Tuple, Optional, List
 import warnings
 
+# Import sonar utilities
+import utils.sonar_utils as sonar_utils
+
 def load_all_distance_data_for_bag(target_bag: str, exports_folder: str = "/Users/eirikvarnes/code/SOLAQUA/exports") -> Tuple[Dict, Dict]:
     """
     Load all distance measurement data for a specific bag.
@@ -366,7 +369,7 @@ def create_sonar_visualization(target_bag, frame_idx, raw_nav_data, raw_guidance
         sonar_params = {
             'fov_deg': 120,
             'rmin': 0.0,
-            'rmax': 30.0,
+            'rmax': 20.0,
             'y_zoom': 5.0,  # 5m range!
             'grid': ConeGridSpec(img_w=900, img_h=700),
             'enhanced': True
@@ -646,3 +649,804 @@ def quick_sonar_analysis(target_bag, frame_idx=500, exports_folder="/Users/eirik
         plt.show()
     
     return fig, {"raw_data": raw_data, "distance_measurements": distance_measurements}
+
+
+def get_configurable_sonar_parameters(target_bag: str, rmax: float = None) -> Dict:
+    """
+    Get configurable sonar parameters for a specific bag.
+    You can manually specify the rmax or let it default to 20.0m.
+    
+    Args:
+        target_bag: Bag identifier (e.g., "2024-08-22_14-29-05")
+        rmax: Manual override for maximum range (if None, defaults to 20.0m)
+        
+    Returns:
+        Dictionary with sonar parameters
+    """
+    
+    # Import here to avoid circular imports
+    from utils.sonar_utils import ConeGridSpec
+    
+    # Use provided rmax or default to 20.0m
+    if rmax is None:
+        rmax = 20.0
+        range_source = "default"
+    else:
+        range_source = "manual"
+    
+    # Determine run type from bag name for description
+    if "2024-08-20" in target_bag:
+        run_type = "calibration"
+        description = "Stereo camera calibration runs"
+    elif "2024-08-22_14-06" in target_bag:
+        run_type = "multi_dvl_early"
+        description = "NFH, 2m depth, 0.5-1.0m distance, 0.2 m/s speed"
+    elif "2024-08-22_14-29" in target_bag or "2024-08-22_14-47" in target_bag:
+        run_type = "multi_dvl_later"
+        description = "NFH, 2m depth, refined distance control"
+    else:
+        run_type = "unknown"
+        description = "Unknown experimental configuration"
+    
+    sonar_params = {
+        'fov_deg': 120.0,
+        'rmin': 0.0,
+        'rmax': float(rmax),
+        'y_zoom': 5.0,  # 5m visualization range
+        'grid': ConeGridSpec(img_w=900, img_h=700),
+        'enhanced': True,
+        'run_type': run_type,
+        'description': description,
+        'range_source': range_source
+    }
+    
+    return sonar_params
+
+
+def analyze_sonar_data_range(target_bag: str, exports_folder: str = "/Users/eirikvarnes/code/SOLAQUA/exports") -> Dict:
+    """
+    Analyze the raw sonar data to help determine appropriate rmax settings.
+    This will help you manually determine what range was actually used.
+    
+    Args:
+        target_bag: Bag identifier
+        exports_folder: Path to exports folder
+        
+    Returns:
+        Dictionary with analysis results to help determine rmax
+    """
+    
+    import utils.sonar_utils as sonar_utils
+    
+    print(f"🔍 ANALYZING SONAR DATA RANGE FOR BAG: {target_bag}")
+    print("=" * 50)
+    
+    # Load sonar data
+    sonar_csv_file = Path(exports_folder) / "by_bag" / f"sensor_sonoptix_echo_image__{target_bag}_video.csv"
+    
+    if not sonar_csv_file.exists():
+        return {"error": f"Sonar data file not found: {sonar_csv_file}"}
+    
+    try:
+        print(f"📡 Loading sonar data from: {sonar_csv_file.name}")
+        sonar_df = pd.read_csv(sonar_csv_file)
+        print(f"   ✅ Loaded {len(sonar_df)} sonar frames")
+    except Exception as e:
+        return {"error": f"Error loading sonar data: {e}"}
+    
+    # Analyze a sample of frames
+    sample_size = min(50, len(sonar_df))
+    sample_indices = np.linspace(0, len(sonar_df)-1, sample_size, dtype=int)
+    
+    print(f"🔬 Analyzing {sample_size} sample frames...")
+    
+    matrix_shapes = []
+    matrix_ranges = []
+    max_beam_counts = []
+    max_range_counts = []
+    
+    for i, idx in enumerate(sample_indices):
+        try:
+            M = sonar_utils.get_sonoptix_frame(sonar_df, idx)
+            if M is not None:
+                matrix_shapes.append(M.shape)
+                matrix_ranges.append((M.min(), M.max()))
+                
+                # Assume rows = range bins, cols = beams
+                max_range_counts.append(M.shape[0])  # Number of range bins
+                max_beam_counts.append(M.shape[1])   # Number of beams
+                
+        except Exception as e:
+            print(f"   ⚠️  Error processing frame {idx}: {e}")
+    
+    if not matrix_shapes:
+        return {"error": "Could not extract any sonar frames"}
+    
+    # Analysis results
+    analysis = {
+        'bag': target_bag,
+        'total_frames': len(sonar_df),
+        'analyzed_frames': len(matrix_shapes),
+        'matrix_shapes': {
+            'most_common': max(set(matrix_shapes), key=matrix_shapes.count),
+            'all_shapes': list(set(matrix_shapes))
+        },
+        'range_bins': {
+            'min': min(max_range_counts),
+            'max': max(max_range_counts),
+            'most_common': max(set(max_range_counts), key=max_range_counts.count)
+        },
+        'beam_count': {
+            'min': min(max_beam_counts),
+            'max': max(max_beam_counts),
+            'most_common': max(set(max_beam_counts), key=max_beam_counts.count)
+        },
+        'intensity_range': {
+            'min_value': min([r[0] for r in matrix_ranges]),
+            'max_value': max([r[1] for r in matrix_ranges]),
+            'typical_range': (
+                np.mean([r[0] for r in matrix_ranges]),
+                np.mean([r[1] for r in matrix_ranges])
+            )
+        }
+    }
+    
+    # Suggest possible rmax values based on range bins
+    common_range_bins = analysis['range_bins']['most_common']
+    
+    # Common sonar range configurations
+    possible_ranges = []
+    if common_range_bins >= 1000:
+        possible_ranges.extend([30.0, 50.0, 100.0])
+    elif common_range_bins >= 500:
+        possible_ranges.extend([20.0, 30.0])
+    elif common_range_bins >= 200:
+        possible_ranges.extend([10.0, 15.0, 20.0])
+    else:
+        possible_ranges.extend([5.0, 10.0])
+    
+    analysis['suggested_rmax'] = possible_ranges
+    
+    # Print analysis
+    print(f"\n📊 ANALYSIS RESULTS:")
+    print(f"   🖼️  Most common matrix shape: {analysis['matrix_shapes']['most_common']}")
+    print(f"   📏 Range bins (rows): {analysis['range_bins']['most_common']}")
+    print(f"   📡 Beam count (cols): {analysis['beam_count']['most_common']}")
+    print(f"   📊 Intensity range: {analysis['intensity_range']['typical_range'][0]:.1f} to {analysis['intensity_range']['typical_range'][1]:.1f}")
+    
+    print(f"\n💡 SUGGESTED RMAX VALUES:")
+    print(f"   Based on {analysis['range_bins']['most_common']} range bins:")
+    for rmax in analysis['suggested_rmax']:
+        range_resolution = rmax / analysis['range_bins']['most_common']
+        print(f"   • {rmax}m (resolution: {range_resolution:.3f}m per bin)")
+    
+    print(f"\n🎯 TO DETERMINE ACTUAL RMAX:")
+    print(f"   1. Check your experimental notes/configuration")
+    print(f"   2. Look at sonar hardware documentation") 
+    print(f"   3. Try different rmax values and see which gives sensible distance scaling")
+    print(f"   4. Compare with known distance measurements in your data")
+    
+    return analysis
+
+
+def extract_raw_sonar_data_with_configurable_rmax(
+    target_bag: str,
+    frame_idx: int,
+    rmax: float = None,
+    exports_folder: str = "/Users/eirikvarnes/code/SOLAQUA/exports"
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Dict, Dict]:
+    """
+    Extract raw sonar data and process it with a configurable rmax setting.
+    
+    Args:
+        target_bag: Bag identifier (e.g., "2024-08-22_14-29-05")
+        frame_idx: Frame index to extract
+        rmax: Maximum range in meters (if None, defaults to 20.0m)
+        exports_folder: Path to exports folder
+        
+    Returns:
+        Tuple of (raw_sonar_matrix, processed_cone, extent, sonar_params)
+    """
+    
+    import utils.sonar_utils as sonar_utils
+    from utils.sonar_utils import ConeGridSpec
+    
+    print(f"🔬 EXTRACTING RAW SONAR DATA WITH CONFIGURABLE RMAX")
+    print(f"   📁 Bag: {target_bag}")
+    print(f"   🖼️  Frame: {frame_idx}")
+    print(f"   📏 rmax: {rmax if rmax else 'default (20.0m)'}")
+    print("=" * 50)
+    
+    # 1. Get configurable sonar parameters
+    sonar_params = get_configurable_sonar_parameters(target_bag, rmax)
+    
+    print(f"📊 SONAR PARAMETERS:")
+    print(f"   🏷️  Run Type: {sonar_params['run_type']}")
+    print(f"   📏 Range Max: {sonar_params['rmax']}m ({sonar_params['range_source']})")
+    print(f"   📝 Description: {sonar_params['description']}")
+    
+    # 2. Load raw sonar data
+    sonar_csv_file = Path(exports_folder) / "by_bag" / f"sensor_sonoptix_echo_image__{target_bag}_video.csv"
+    
+    if not sonar_csv_file.exists():
+        print(f"❌ Sonar data file not found: {sonar_csv_file}")
+        return None, None, {}, sonar_params
+    
+    try:
+        print(f"📡 Loading sonar data from: {sonar_csv_file.name}")
+        sonar_df = pd.read_csv(sonar_csv_file)
+        print(f"   ✅ Loaded {len(sonar_df)} sonar frames")
+    except Exception as e:
+        print(f"❌ Error loading sonar data: {e}")
+        return None, None, {}, sonar_params
+    
+    # 3. Validate frame index
+    if frame_idx >= len(sonar_df):
+        print(f"❌ Frame {frame_idx} not available (only {len(sonar_df)} frames)")
+        frame_idx = min(frame_idx, len(sonar_df) - 1)
+        print(f"   🔄 Adjusted to frame: {frame_idx}")
+    
+    # 4. Extract raw sonar frame matrix
+    try:
+        print(f"🔍 Extracting raw sonar frame {frame_idx}...")
+        raw_matrix = sonar_utils.get_sonoptix_frame(sonar_df, frame_idx)
+        
+        if raw_matrix is None:
+            print(f"❌ Could not extract sonar frame {frame_idx}")
+            return None, None, {}, sonar_params
+            
+        print(f"   ✅ Raw matrix shape: {raw_matrix.shape}")
+        print(f"   📊 Value range: {raw_matrix.min():.3f} to {raw_matrix.max():.3f}")
+        
+    except Exception as e:
+        print(f"❌ Error extracting raw sonar frame: {e}")
+        return None, None, {}, sonar_params
+    
+    # 5. Process with specified rmax setting
+    try:
+        print(f"⚙️  Processing with rmax={sonar_params['rmax']}m...")
+        
+        # Enhance intensity using specified rmax
+        enhanced_matrix = sonar_utils.enhance_intensity(
+            raw_matrix, 
+            sonar_params['rmin'], 
+            sonar_params['rmax']
+        )
+        
+        # Rasterize to cone with specified parameters
+        cone, extent = sonar_utils.rasterize_cone(
+            enhanced_matrix,
+            fov_deg=sonar_params['fov_deg'],
+            rmin=sonar_params['rmin'],
+            rmax=sonar_params['rmax'], 
+            y_zoom=sonar_params['y_zoom'],
+            grid=sonar_params['grid']
+        )
+        
+        print(f"   ✅ Processed cone shape: {cone.shape}")
+        print(f"   📐 Extent: {extent}")
+        
+        # Get timestamp
+        sonar_timestamp = pd.to_datetime(sonar_df.loc[frame_idx, 'ts_utc'])
+        print(f"   🕐 Timestamp: {sonar_timestamp.strftime('%H:%M:%S')}")
+        
+        return raw_matrix, cone, extent, sonar_params
+        
+    except Exception as e:
+        print(f"❌ Error processing sonar data: {e}")
+        return raw_matrix, None, {}, sonar_params
+
+
+def create_enhanced_sonar_visualization_with_configurable_rmax(
+    target_bag: str,
+    frame_idx: int,
+    rmax: float = None,
+    raw_nav_data: pd.DataFrame = None,
+    raw_guidance_data: pd.DataFrame = None, 
+    distance_measurements: Dict = None,
+    exports_folder: str = "/Users/eirikvarnes/code/SOLAQUA/exports",
+    figsize: Tuple[int, int] = (16, 12)
+):
+    """
+    Create enhanced sonar visualization using raw data extraction with configurable rmax settings.
+    
+    Args:
+        target_bag: Bag identifier
+        frame_idx: Frame index to visualize
+        rmax: Maximum range in meters (if None, defaults to 20.0m)
+        raw_nav_data: Navigation data (optional, will load if None)
+        raw_guidance_data: Guidance data (optional, will load if None) 
+        distance_measurements: Distance measurement data (optional, will load if None)
+        exports_folder: Path to exports folder
+        figsize: Figure size tuple
+        
+    Returns:
+        matplotlib Figure object or None if failed
+    """
+    
+    print(f"🎨 CREATING ENHANCED SONAR VISUALIZATION WITH CONFIGURABLE RMAX")
+    print(f"   📏 rmax: {rmax if rmax else 'default (20.0m)'}")
+    print("=" * 60)
+    
+    # Extract raw sonar data with configurable rmax
+    raw_matrix, cone, extent, sonar_params = extract_raw_sonar_data_with_configurable_rmax(
+        target_bag, frame_idx, rmax, exports_folder
+    )
+    
+    if cone is None:
+        print(f"❌ Failed to extract sonar data")
+        return None
+    
+    # Load distance data if not provided
+    if raw_nav_data is None or distance_measurements is None:
+        print(f"📡 Loading distance measurement data...")
+        raw_data, distance_measurements = load_all_distance_data_for_bag(target_bag, exports_folder)
+        raw_nav_data = raw_data.get('navigation')
+        raw_guidance_data = raw_data.get('guidance')
+    
+    # Get sonar timestamp for synchronization
+    sonar_csv_file = Path(exports_folder) / "by_bag" / f"sensor_sonoptix_echo_image__{target_bag}_video.csv"
+    sonar_df = pd.read_csv(sonar_csv_file)
+    sonar_timestamp = pd.to_datetime(sonar_df.loc[frame_idx, 'ts_utc'])
+    
+    # Collect synchronized distance measurements
+    distance_data = collect_distance_measurements_at_timestamp(
+        sonar_timestamp, raw_nav_data, raw_guidance_data, distance_measurements
+    )
+    
+    print(f"📊 Found {len(distance_data)} synchronized measurements")
+    
+    # Create the visualization using the processed cone
+    fig, ax = plt.subplots(figsize=figsize)
+    
+    # Display the sonar cone
+    x_min, x_max, y_min, y_max = extent
+    im = ax.imshow(cone, extent=extent, origin='lower', cmap='viridis', alpha=0.8)
+    plt.colorbar(im, ax=ax, label='Sonar Intensity')
+    
+    # Add title with run information
+    range_info = f"rmax={sonar_params['rmax']}m ({sonar_params['range_source']})"
+    title = f"🎯 Enhanced Sonar Visualization - {target_bag}\n"
+    title += f"Frame {frame_idx} | {sonar_params['run_type']} | {range_info}"
+    ax.set_title(title, fontsize=14, fontweight='bold')
+    
+    # Add distance measurements as overlays
+    colors = ['red', 'green', 'blue', 'orange', 'purple', 'brown', 'pink', 'gray', 'cyan', 'magenta']
+    legend_elements = []
+    
+    for i, (name, data) in enumerate(distance_data.items()):
+        color = colors[i % len(colors)]
+        distance = data['value']
+        
+        # Draw distance line (straight ahead)
+        if distance <= sonar_params['rmax']:  # Only show if within range
+            ax.plot([0, 0], [0, distance], color=color, linewidth=3, alpha=0.8)
+            ax.plot(0, distance, 'o', color=color, markersize=8, markeredgecolor='white', markeredgewidth=1)
+            legend_elements.append(plt.Line2D([0], [0], color=color, lw=3, label=f"{name}: {distance:.2f}m"))
+    
+    # Add range rings
+    range_rings = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5] 
+    for r in range_rings:
+        if r <= sonar_params['y_zoom']:
+            circle = patches.Circle((0, 0), r, fill=False, color='cyan', alpha=0.3, linewidth=1)
+            ax.add_patch(circle)
+            ax.text(0.1, r-0.1, f"{r}m", color='cyan', fontsize=8, alpha=0.7)
+    
+    # Add angular guidelines
+    angles = np.arange(-60, 61, 15)
+    for angle in angles:
+        rad = np.radians(angle)
+        x_end = sonar_params['y_zoom'] * np.sin(rad)
+        y_end = sonar_params['y_zoom'] * np.cos(rad)
+        ax.plot([0, x_end], [0, y_end], 'white', alpha=0.2, linewidth=0.5)
+    
+    # Set equal aspect and limits
+    ax.set_aspect('equal')
+    ax.set_xlim(x_min, x_max)
+    ax.set_ylim(y_min, y_max)
+    ax.set_xlabel('Cross-track Distance (m)')
+    ax.set_ylabel('Forward Distance (m)')
+    
+    # Add legend
+    if legend_elements:
+        ax.legend(handles=legend_elements, loc='upper right', bbox_to_anchor=(1.0, 1.0))
+    
+    # Add parameter info text box
+    info_text = f"Run Parameters:\n"
+    info_text += f"• Type: {sonar_params['run_type']}\n"
+    info_text += f"• Range: {sonar_params['rmin']}-{sonar_params['rmax']}m ({sonar_params['range_source']})\n"
+    info_text += f"• FOV: {sonar_params['fov_deg']}°\n"
+    info_text += f"• Zoom: {sonar_params['y_zoom']}m\n"
+    info_text += f"• Raw matrix: {raw_matrix.shape if raw_matrix is not None else 'N/A'}"
+    
+    ax.text(0.02, 0.98, info_text, transform=ax.transAxes, fontsize=10,
+            verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    
+    plt.tight_layout()
+    
+    print(f"✅ Enhanced visualization complete with {sonar_params['range_source']} rmax={sonar_params['rmax']}m!")
+    
+    return fig
+
+
+def create_enhanced_sonar_plot_with_measurements(
+    cone: np.ndarray,
+    extent: Tuple[float, float, float, float],
+    distance_data: Dict,
+    sonar_params: Dict,
+    frame_idx: int = 0,
+    timestamp: str = None,
+    figsize: Tuple[int, int] = (16, 12),
+    show_range_rings: bool = True,
+    show_bearing_lines: bool = True,
+    title_prefix: str = "Enhanced Sonar Visualization"
+):
+    """
+    Create enhanced sonar visualization with distance measurement overlays.
+    
+    Args:
+        cone: Processed sonar cone data
+        extent: Spatial extent [x_min, x_max, y_min, y_max]
+        distance_data: Dictionary of distance measurements
+        sonar_params: Sonar processing parameters
+        frame_idx: Frame index for title
+        timestamp: Timestamp string for title
+        figsize: Figure size tuple
+        show_range_rings: Whether to show range rings
+        show_bearing_lines: Whether to show bearing lines
+        title_prefix: Prefix for plot title
+        
+    Returns:
+        matplotlib Figure object
+    """
+    
+    fig, ax = plt.subplots(figsize=figsize)
+    
+    # Display the sonar cone
+    im = ax.imshow(cone, extent=extent, cmap='viridis', origin='lower', alpha=0.8)
+    
+    # Add distance measurement lines
+    if distance_data:
+        y_offset = 0.02  # Small vertical offset to prevent overlap
+        current_offset = 0
+        legend_elements = []
+        
+        for i, (name, data) in enumerate(distance_data.items()):
+            color = data.get('color', 'red')
+            style = data.get('style', '-')
+            width = data.get('width', 2)
+            distance = data['value']
+            
+            # Special handling for different measurement types
+            if "INS" in name:
+                line_alpha = 0.9
+                line_width = width + 0.5
+                marker_size = 10
+                emoji = "🧭"
+            elif "Navigation" in name:
+                line_alpha = 0.9
+                line_width = width
+                marker_size = 8
+                emoji = "🎯"
+            elif "Guidance" in name or "Desired" in name:
+                line_alpha = 0.8
+                line_width = width
+                marker_size = 7
+                emoji = "🎮"
+            else:
+                line_alpha = 0.7
+                line_width = width
+                marker_size = 6
+                emoji = "📏"
+            
+            # Alternate offsets to spread lines
+            if i > 0:
+                current_offset = y_offset * (i % 3 - 1)
+            
+            # Only draw if within sonar range
+            if distance <= sonar_params['rmax']:
+                # Draw horizontal line (forward distance)
+                ax.axhline(
+                    y=distance + current_offset,
+                    color=color,
+                    linewidth=line_width,
+                    linestyle=style,
+                    alpha=line_alpha
+                )
+                
+                # Add point marker
+                ax.plot(0, distance + current_offset, 'o', 
+                       color=color, markersize=marker_size, 
+                       markeredgecolor='white', markeredgewidth=1)
+                
+                # Add to legend
+                label = f"{emoji} {name}: {distance:.2f}m"
+                legend_elements.append(plt.Line2D([0], [0], color=color, lw=line_width, 
+                                                linestyle=style, label=label))
+    
+    # Add range rings
+    if show_range_rings:
+        range_rings = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5]
+        for r in range_rings:
+            if r <= extent[3]:  # Don't exceed sonar range
+                circle = patches.Circle((0, 0), r, fill=False, color='cyan', 
+                                      alpha=0.3, linewidth=0.8, linestyle='--')
+                ax.add_patch(circle)
+                ax.text(0.1, r-0.05, f'{r}m', color='cyan', fontsize=9, alpha=0.7)
+    
+    # Add bearing lines
+    if show_bearing_lines:
+        angles = np.arange(-60, 61, 15)  # -60 to +60 degrees every 15 degrees
+        for angle in angles:
+            if angle != 0:  # Skip center line
+                angle_rad = np.radians(angle)
+                x_end = extent[3] * np.sin(angle_rad)
+                y_end = extent[3] * np.cos(angle_rad)
+                ax.plot([0, x_end], [0, y_end], color='cyan', alpha=0.2, 
+                       linewidth=0.5, linestyle=':')
+                if abs(angle) == 30 or abs(angle) == 60:  # Label major angles
+                    ax.text(x_end*0.9, y_end*0.9, f'{angle}°', color='cyan', 
+                           fontsize=8, alpha=0.7, ha='center', va='center')
+    
+    # Formatting
+    ax.set_xlabel('Cross-track Distance (m)', fontsize=12)
+    ax.set_ylabel('Forward Distance (m)', fontsize=12)
+    
+    # Create title
+    title = f"{title_prefix} - Frame {frame_idx}"
+    if timestamp:
+        title += f"\nTime: {timestamp}"
+    if distance_data:
+        title += f" | {len(distance_data)} Distance Sources"
+    if sonar_params:
+        title += f" | rmax={sonar_params.get('rmax', 'N/A')}m"
+    
+    ax.set_title(title, fontsize=14, fontweight='bold')
+    
+    # Add legend
+    if 'legend_elements' in locals() and legend_elements:
+        legend = ax.legend(handles=legend_elements, loc='upper right', 
+                          fontsize=10, framealpha=0.9)
+        legend.get_frame().set_facecolor('white')
+    
+    # Add grid and colorbar
+    ax.grid(True, alpha=0.3)
+    cbar = plt.colorbar(im, ax=ax, shrink=0.8)
+    cbar.set_label('Sonar Intensity', fontsize=11)
+    
+    # Set equal aspect ratio and limits
+    ax.set_aspect('equal')
+    ax.set_xlim(extent[0], extent[1])
+    ax.set_ylim(extent[2], extent[3])
+    
+    plt.tight_layout()
+    
+    return fig
+
+
+def analyze_distance_measurements_clustering(
+    distance_data: Dict,
+    tolerance: float = 0.1,
+    reference_measurement: str = None
+) -> Dict:
+    """
+    Analyze distance measurements for clustering and offsets.
+    
+    Args:
+        distance_data: Dictionary of distance measurements
+        tolerance: Distance tolerance for clustering (meters)
+        reference_measurement: Name of reference measurement for offset analysis
+        
+    Returns:
+        Dictionary with analysis results
+    """
+    
+    if not distance_data:
+        return {'error': 'No distance data provided'}
+    
+    distances = [data['value'] for data in distance_data.values()]
+    distance_names = list(distance_data.keys())
+    
+    results = {
+        'total_measurements': len(distances),
+        'range': {
+            'min': min(distances),
+            'max': max(distances),
+            'spread': max(distances) - min(distances)
+        },
+        'close_pairs': [],
+        'offsets': {},
+        'statistics': {
+            'mean': np.mean(distances),
+            'std': np.std(distances),
+            'median': np.median(distances)
+        }
+    }
+    
+    # Find close pairs
+    for i, (name1, data1) in enumerate(distance_data.items()):
+        for j, (name2, data2) in enumerate(distance_data.items()):
+            if i < j:
+                diff = abs(data1['value'] - data2['value'])
+                if diff <= tolerance:
+                    results['close_pairs'].append({
+                        'measurement1': name1,
+                        'measurement2': name2,
+                        'difference': diff,
+                        'values': [data1['value'], data2['value']]
+                    })
+    
+    # Calculate offsets relative to reference measurement
+    if reference_measurement and reference_measurement in distance_data:
+        ref_value = distance_data[reference_measurement]['value']
+        results['reference_measurement'] = reference_measurement
+        results['reference_value'] = ref_value
+        
+        for name, data in distance_data.items():
+            if name != reference_measurement:
+                offset = data['value'] - ref_value
+                results['offsets'][name] = {
+                    'absolute_offset': offset,
+                    'relative_offset_percent': (offset / ref_value) * 100 if ref_value > 0 else 0,
+                    'measurement_value': data['value']
+                }
+    
+    # Categorize measurements by type
+    results['measurement_types'] = {
+        'navigation': [name for name in distance_names if 'Navigation' in name],
+        'guidance': [name for name in distance_names if any(x in name for x in ['Guidance', 'Desired', 'Error'])],
+        'ins': [name for name in distance_names if 'INS' in name],
+        'sensors': [name for name in distance_names if not any(x in name for x in ['Navigation', 'Guidance', 'Desired', 'Error', 'INS'])]
+    }
+    
+    return results
+
+
+def print_distance_analysis_report(analysis_results: Dict, distance_data: Dict = None):
+    """
+    Print a comprehensive analysis report of distance measurements.
+    
+    Args:
+        analysis_results: Results from analyze_distance_measurements_clustering
+        distance_data: Original distance data for additional context
+    """
+    
+    if 'error' in analysis_results:
+        print(f"❌ {analysis_results['error']}")
+        return
+    
+    print(f"🔍 DISTANCE MEASUREMENT ANALYSIS REPORT")
+    print(f"=" * 50)
+    
+    # Basic statistics
+    stats = analysis_results['statistics']
+    range_info = analysis_results['range']
+    
+    print(f"📊 BASIC STATISTICS:")
+    print(f"   • Total measurements: {analysis_results['total_measurements']}")
+    print(f"   • Range: {range_info['min']:.3f}m to {range_info['max']:.3f}m")
+    print(f"   • Spread: {range_info['spread']:.3f}m")
+    print(f"   • Mean: {stats['mean']:.3f}m")
+    print(f"   • Median: {stats['median']:.3f}m")
+    print(f"   • Std Dev: {stats['std']:.3f}m")
+    
+    # Measurement types
+    types = analysis_results['measurement_types']
+    print(f"\n📋 MEASUREMENT CATEGORIES:")
+    for category, measurements in types.items():
+        if measurements:
+            emoji = {"navigation": "🎯", "guidance": "🎮", "ins": "🧭", "sensors": "📏"}
+            print(f"   {emoji.get(category, '📊')} {category.title()}: {', '.join(measurements)}")
+    
+    # Close pairs analysis
+    close_pairs = analysis_results['close_pairs']
+    print(f"\n🔍 CLUSTERING ANALYSIS:")
+    if close_pairs:
+        print(f"   📌 Measurements within tolerance:")
+        for pair in close_pairs:
+            print(f"     • {pair['measurement1']} ↔ {pair['measurement2']}: {pair['difference']:.3f}m difference")
+            print(f"       Values: {pair['values'][0]:.3f}m, {pair['values'][1]:.3f}m")
+    else:
+        print(f"   📌 No measurements within {0.1:.1f}m of each other")
+    
+    # Offset analysis
+    if 'reference_measurement' in analysis_results:
+        ref_name = analysis_results['reference_measurement']
+        ref_value = analysis_results['reference_value']
+        offsets = analysis_results['offsets']
+        
+        print(f"\n🎯 OFFSET ANALYSIS (vs {ref_name}: {ref_value:.3f}m):")
+        for name, offset_info in offsets.items():
+            abs_offset = offset_info['absolute_offset']
+            rel_offset = offset_info['relative_offset_percent']
+            emoji = "🧭" if "INS" in name else "📏"
+            print(f"   {emoji} {name}: {offset_info['measurement_value']:.3f}m (offset: {abs_offset:+.3f}m, {rel_offset:+.1f}%)")
+    
+    # Individual measurement details
+    if distance_data:
+        print(f"\n📏 INDIVIDUAL MEASUREMENTS:")
+        for name, data in distance_data.items():
+            emoji = "🧭" if "INS" in name else "🎯" if "Navigation" in name else "🎮" if any(x in name for x in ['Guidance', 'Desired']) else "📏"
+            desc = data.get('description', 'No description')
+            print(f"   {emoji} {name}: {data['value']:.3f}m")
+            print(f"     └─ {desc}")
+    
+    print(f"\n✅ Analysis complete!")
+
+
+def create_comprehensive_sonar_visualization(
+    target_bag: str,
+    frame_idx: int,
+    rmax: float = None,
+    exports_folder: str = "/Users/eirikvarnes/code/SOLAQUA/exports",
+    figsize: Tuple[int, int] = (16, 12),
+    analysis_tolerance: float = 0.1,
+    show_analysis_report: bool = True
+):
+    """
+    Create comprehensive sonar visualization with full analysis.
+    
+    Args:
+        target_bag: Bag identifier
+        frame_idx: Frame index to visualize
+        rmax: Maximum range (None for automatic detection)
+        exports_folder: Path to exports folder
+        figsize: Figure size
+        analysis_tolerance: Tolerance for clustering analysis
+        show_analysis_report: Whether to print analysis report
+        
+    Returns:
+        Tuple of (matplotlib Figure, analysis results dict)
+    """
+    
+    print(f"🎨 CREATING COMPREHENSIVE SONAR VISUALIZATION")
+    print(f"   🎯 Target: {target_bag}, Frame: {frame_idx}")
+    print(f"   📏 rmax: {rmax if rmax else 'auto-detect'}")
+    print("=" * 60)
+    
+    # Extract sonar data
+    raw_matrix, cone, extent, sonar_params = extract_raw_sonar_data_with_configurable_rmax(
+        target_bag, frame_idx, rmax, exports_folder
+    )
+    
+    if cone is None:
+        print(f"❌ Failed to extract sonar data")
+        return None, None
+    
+    # Load distance data
+    raw_data, distance_measurements = load_all_distance_data_for_bag(target_bag, exports_folder)
+    
+    # Get timestamp for synchronization
+    sonar_csv_file = Path(exports_folder) / "by_bag" / f"sensor_sonoptix_echo_image__{target_bag}_video.csv"
+    sonar_df = pd.read_csv(sonar_csv_file)
+    sonar_timestamp = pd.to_datetime(sonar_df.loc[frame_idx, 'ts_utc'])
+    
+    # Collect synchronized measurements
+    distance_data = collect_distance_measurements_at_timestamp(
+        sonar_timestamp, raw_data.get('navigation'), raw_data.get('guidance'), distance_measurements
+    )
+    
+    print(f"📊 Found {len(distance_data)} synchronized measurements")
+    
+    # Create visualization
+    fig = create_enhanced_sonar_plot_with_measurements(
+        cone, extent, distance_data, sonar_params,
+        frame_idx=frame_idx,
+        timestamp=sonar_timestamp.strftime('%H:%M:%S'),
+        figsize=figsize,
+        title_prefix=f"Comprehensive Sonar Analysis - {target_bag}"
+    )
+    
+    # Perform analysis
+    analysis_results = analyze_distance_measurements_clustering(
+        distance_data, tolerance=analysis_tolerance,
+        reference_measurement='Navigation NetDistance' if 'Navigation NetDistance' in distance_data else None
+    )
+    
+    # Print analysis report
+    if show_analysis_report and distance_data:
+        print_distance_analysis_report(analysis_results, distance_data)
+    
+    print(f"\n✅ Comprehensive visualization complete!")
+    
+    return fig, analysis_results
