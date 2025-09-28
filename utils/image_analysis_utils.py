@@ -1,14 +1,52 @@
-# classical_segmentation_utils.py
 from __future__ import annotations
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional
-import json, math
-
+import json
 import numpy as np
 import pandas as pd
 import cv2
+import matplotlib.pyplot as plt
+from scipy.signal import savgol_filter
+from scipy.ndimage import uniform_filter1d
 
-# ============================ I/O (robust) ============================
+# ============================ CONFIG (unchanged structure) ============================
+
+IMAGE_PROCESSING_CONFIG = {
+    'use_momentum_merging': True,
+    'momentum_search_radius': 3,
+    'momentum_threshold': 0.1,
+    'momentum_decay': 0.9,
+    'momentum_boost': 5.0,
+    'blur_kernel_size': (31, 31),
+    'canny_low_threshold': 40,
+    'canny_high_threshold': 120,
+    'min_contour_area': 100,
+    'morph_close_kernel': 5,
+    'edge_dilation_iterations': 2,
+}
+
+ELONGATION_CONFIG = {
+    'aspect_ratio_weight': 0.4,
+    'ellipse_elongation_weight': 0.7,
+    'solidity_weight': 0.1,
+    'extent_weight': 0.0,
+    'perimeter_weight': 0.0,
+}
+
+TRACKING_CONFIG = {
+    'aoi_boost_factor': 1000.0,
+    'aoi_expansion_pixels': 10,
+}
+
+VIDEO_CONFIG = {
+    'fps': 15,
+    'show_all_contours': True,
+    'show_ellipse': True,
+    'show_bounding_box': True,
+    'text_scale': 0.6,
+}
+
+# ============================ NPZ I/O ============================
 
 def load_cone_run_npz(path: str | Path):
     """Robust loader: returns (cones[T,H,W] float32 ∈ [0,1], ts DatetimeIndex, extent tuple, meta dict)."""
@@ -38,10 +76,11 @@ def load_cone_run_npz(path: str | Path):
         if "ts_unix_ns" in keys:
             ts = pd.to_datetime(np.asarray(z["ts_unix_ns"], dtype=np.int64), utc=True)
         elif "ts" in keys:
-            try: ts = pd.to_datetime(z["ts"], utc=True)
-            except Exception: ts = pd.to_datetime(np.asarray(z["ts"], dtype="int64"), unit="s", utc=True)
+            try:
+                ts = pd.to_datetime(z["ts"], utc=True)
+            except Exception:
+                ts = pd.to_datetime(np.asarray(z["ts"], dtype="int64"), unit="s", utc=True)
         else:
-            # try in meta
             for k in ("ts_unix_ns","ts_ns","timestamps_ns","ts"):
                 if isinstance(meta, dict) and (k in meta):
                     v = meta[k]
@@ -65,1008 +104,682 @@ def load_cone_run_npz(path: str | Path):
 
     return cones, ts, extent, meta
 
-# ============================ helpers ============================
-
-def gaussian_blur01(img01: np.ndarray, ksize: int = 5, sigma: float = 1.2) -> np.ndarray:
-    """Blur [0,1] image with Gaussian. ksize must be odd."""
-    if ksize % 2 == 0: ksize += 1
-    x = np.nan_to_num(img01, nan=0.0)
-    x = np.clip(x, 0.0, 1.0).astype(np.float32)
-    return cv2.GaussianBlur(x, (ksize, ksize), sigmaX=float(sigma), borderType=cv2.BORDER_REPLICATE)
-
-
-def extent_px_to_m(extent: Tuple[float,float,float,float], H: int, W: int, i_row: float, j_col: float):
-    x_min, x_max, y_min, y_max = extent
-    x = x_min + (x_max-x_min) * (j_col/max(W-1,1))
-    y = y_min + (y_max-y_min) * (i_row/max(H-1,1))
-    return x, y
-
-# ============================ overlay & export ============================
-
-def _cmap_rgb(name="viridis", N=256):
-    import matplotlib.cm as cm
-    lut = (cm.get_cmap(name, N)(np.linspace(0,1,N))[:, :3] * 255 + 0.5).astype(np.uint8)
-    return lut
-
-def gray01_to_rgb(img01: np.ndarray, lut: np.ndarray) -> np.ndarray:
-    x = np.nan_to_num(img01, nan=0.0)
-    x = np.clip(x, 0.0, 1.0)
-    idx = (x * (len(lut)-1)).astype(np.int32)
-    return lut[idx]
-
-def draw_component_edges(rgb: np.ndarray, seg1, seg2, color=(255,80,80)):
-    for seg in (seg1, seg2):
-        x0,y0,x1,y1,_,_ = seg
-        cv2.line(rgb, (int(x0),int(y0)), (int(x1),int(y1)), color, 2, cv2.LINE_AA)
-
-# ============================ Simple Frame Utilities ============================
 
 def get_available_npz_files(npz_dir: str = "exports/outputs") -> List[Path]:
-    """Get list of available NPZ cone files."""
     npz_dir = Path(npz_dir)
     return list(npz_dir.glob("*_cones.npz")) if npz_dir.exists() else []
 
 
-def pick_and_save_frame(npz_file_index: int = 0, frame_position: str = 'middle', 
-                       output_path: str = "sample_frame.png", npz_dir: str = "exports/outputs") -> Dict:
-    """
-    Pick a frame from NPZ file and save it locally as PNG.
-    
-    Args:
-        npz_file_index: Index of NPZ file to use (0-based)
-        frame_position: 'start', 'middle', 'end', or float (0.0-1.0) for position
-        output_path: Path to save the frame image
-        npz_dir: Directory containing NPZ files
-        
-    Returns:
-        Dictionary with frame info and saved path
-    """
-    npz_files = get_available_npz_files(npz_dir)
-    
-    if not npz_files:
-        raise FileNotFoundError(f"No NPZ files found in {npz_dir}")
-    
-    if npz_file_index >= len(npz_files):
-        raise IndexError(f"NPZ file index {npz_file_index} out of range. Available: 0-{len(npz_files)-1}")
-    
-    npz_path = npz_files[npz_file_index]
-    
-    # Load the data
-    cones, timestamps, extent, meta = load_cone_run_npz(npz_path)
-    T = cones.shape[0]
-    
-    # Determine frame index
-    if frame_position == 'start':
-        frame_index = 0
-    elif frame_position == 'end':
-        frame_index = T - 1
-    elif frame_position == 'middle':
-        frame_index = T // 2
-    elif isinstance(frame_position, (int, float)):
-        if frame_position <= 1.0:
-            frame_index = int(frame_position * T)
-        else:
-            frame_index = int(frame_position)
-        frame_index = max(0, min(frame_index, T-1))
-    else:
-        raise ValueError(f"Invalid frame_position: {frame_position}")
-    
-    # Extract and convert frame
-    frame = cones[frame_index]
-    frame_uint8 = (np.clip(frame, 0, 1) * 255).astype(np.uint8)
-    
-    # Save as PNG
-    output_path = Path(output_path)
-    cv2.imwrite(str(output_path), frame_uint8)
-    
-    info = {
-        'saved_path': str(output_path),
-        'npz_file': npz_path.name,
-        'frame_index': frame_index,
-        'total_frames': T,
-        'timestamp': timestamps[frame_index],
-        'shape': frame_uint8.shape,
-        'extent': extent
-    }
-    
-    print(f"Frame saved to: {output_path}")
-    print(f"Source: {npz_path.name}, Frame {frame_index}/{T-1}")
-    print(f"Timestamp: {timestamps[frame_index].strftime('%H:%M:%S')}")
-    print(f"Shape: {frame_uint8.shape}")
-    
-    return info
-
-
-def load_saved_frame(image_path: str) -> np.ndarray:
-    """
-    Load a saved frame image for processing.
-    
-    Args:
-        image_path: Path to the saved image
-        
-    Returns:
-        Loaded image as numpy array
-    """
-    image = cv2.imread(image_path)
-    if image is None:
-        raise FileNotFoundError(f"Could not load image from {image_path}")
-    return image
-
-
 def list_npz_files(npz_dir: str = "exports/outputs") -> None:
-    """Print information about available NPZ files."""
     npz_files = get_available_npz_files(npz_dir)
-    
     if not npz_files:
         print(f"No NPZ files found in {npz_dir}")
         return
-    
+
     print(f"Available NPZ files in {npz_dir}:")
     for i, npz_path in enumerate(npz_files):
         try:
-            cones, timestamps, extent, meta = load_cone_run_npz(npz_path)
+            cones, timestamps, _, _ = load_cone_run_npz(npz_path)
             print(f"  {i}: {npz_path.name}")
             print(f"     {cones.shape[0]} frames, {timestamps[0].strftime('%H:%M:%S')} to {timestamps[-1].strftime('%H:%M:%S')}")
         except Exception as e:
             print(f"  {i}: {npz_path.name} - Error: {e}")
 
+# ============================ Small utilities ============================
 
-# ============================ Image Processing Pipeline ============================
+def to_uint8_gray(frame01: np.ndarray) -> np.ndarray:
+    return (np.clip(frame01, 0, 1) * 255).astype(np.uint8)
 
-# Image Processing Settings
-IMAGE_PROCESSING_CONFIG = {
-    # DIRECTIONAL MOMENTUM MERGING - Novel approach to replace traditional blurring
-    # Instead of uniform Gaussian blur, merge cells that gain momentum in line directions
-    'use_momentum_merging': True,     # Enable/disable momentum-based merging
-    'momentum_search_radius': 3,      # How far to search for neighboring cells to merge (keep ≤3 for speed)
-    'momentum_threshold': 0.1,        # Minimum momentum to consider a direction valid (lowered for speed)
-    'momentum_decay': 0.9,           # How quickly momentum decays (0.7-0.9, lower = faster)
-    'momentum_boost': 5.0,           # Momentum boost when continuing in same direction
-    
-    # Traditional Gaussian Blur (used when momentum_merging is False)
-    # EFFECTS:
-    # - SMALLER values (5,5) to (15,15): Preserves fine details, may detect noise as edges
-    # - LARGER values (21,21) to (35,35): Removes noise and small details, smoother contours
-    # - TOO LARGE (>35): May blur away the shapes you want to detect
-    # COMMON VALUES: (15,15) for detailed detection, (25,25) for noisy images
-    'blur_kernel_size': (31, 31),
+def elapsed_seconds_from_timestamps(stamps: pd.Series | pd.DatetimeIndex | np.ndarray,
+                                    estimated_fps: float,
+                                    count: int) -> np.ndarray:
+    """Return elapsed seconds from timestamps if valid, else an index/fps ramp."""
+    try:
+        t = pd.to_datetime(stamps)
+        if t.isnull().all():
+            raise ValueError
+        return (t - t[0]).total_seconds()
+    except Exception:
+        return np.arange(count) / float(max(estimated_fps, 1e-6))
 
-    # Canny Edge Detection Thresholds - Controls sensitivity to edges
-    # HOW IT WORKS: Pixels with gradient > high_threshold = strong edges
-    #               Pixels between low and high = weak edges (kept if connected to strong)
-    #               Pixels < low_threshold = ignored
-    # EFFECTS:
-    # - LOWER thresholds (30, 100): Detects more edges, including noise and weak features
-    # - HIGHER thresholds (70, 200): Only strong, clear edges, may miss faint shapes
-    # - RATIO should be ~1:2 or 1:3 (low:high) for best results
-    # TUNING TIPS:
-    #   * Too many edges? Increase both values (try 70, 180)
-    #   * Missing shapes? Decrease both values (try 30, 100)  
-    #   * Noisy edges? Increase blur_kernel_size instead
-    'canny_low_threshold': 40,       
-    'canny_high_threshold': 120,     
+def apply_smoothing(series: pd.Series | np.ndarray,
+                    window_size: int = 15,
+                    polyorder: int = 3,
+                    gaussian_size: Optional[int] = None) -> Dict[str, np.ndarray]:
+    """Return multiple smoothed variants and a recommended 'primary'."""
+    x = pd.Series(series).astype(float)
+    # moving average
+    mavg = x.rolling(window=max(3, window_size), center=True, min_periods=1).mean().to_numpy()
 
-    # Minimum Contour Area - Filters out tiny detected shapes
-    # EFFECTS:
-    # - SMALLER values (20-50): Detects small details, may include noise
-    # - LARGER values (100-200): Only detects substantial shapes, cleaner results
-    # - TOO LARGE: May exclude the shapes you're looking for
-    # TUNING: Start with 50, increase if too many small noise contours appear
-    # KEEN ON LINES: Lower threshold to catch thinner lines
-    'min_contour_area': 100,
-    
-    # MORPHOLOGICAL PROCESSING - Helps connect incomplete/open edges
-    # These operations help detect net lines that don't form complete closed shapes
-    
-    # Morphological Closing Kernel Size - Connects nearby edge pixels
-    # EFFECTS:
-    # - SMALLER values (3, 5): Only connects very close edge pixels, preserves detail
-    # - LARGER values (7, 9): Connects farther gaps, may merge separate objects
-    # - 0: Disables morphological closing
-    # RECOMMENDED: 3 for thin lines, 5 for thicker connections needed
-    # KEEN ON LINES: Larger kernel to connect broken line segments
-    'morph_close_kernel': 5,
-    
-    # Edge Dilation Iterations - Thickens detected edges for better contour detection
-    # EFFECTS:  
-    # - 0: No dilation, keeps original edge thickness
-    # - 1: Slightly thickens edges, helps with thin line detection
-    # - 2-3: Significantly thickens edges, may merge nearby features
-    # RECOMMENDED: 1 for most cases, 0 if you have thick clear lines already
-    # KEEN ON LINES: More iterations to strengthen thin line edges
-    'edge_dilation_iterations': 2,
-}
+    # savgol requires odd window <= len
+    win = max(3, window_size)
+    if win % 2 == 0: win += 1
+    if len(x) > win:
+        try:
+            sv = savgol_filter(x.fillna(method='ffill').fillna(method='bfill').to_numpy(), win, polyorder)
+        except Exception:
+            sv = mavg
+    else:
+        sv = mavg
 
-# Elongation Detection Settings - Controls how "elongated-ness" is calculated
-# These weights determine what makes a shape "elongated" - they should sum to ~1.0
-ELONGATION_CONFIG = {
-    # Basic Aspect Ratio Weight - Simple width/height ratio from bounding rectangle
-    # EFFECTS:
-    # - HIGHER weight (0.4-0.6): Strongly prefers shapes with high width/height ratios
-    # - LOWER weight (0.1-0.2): Less emphasis on simple rectangular elongation
-    # LIMITATION: Doesn't consider shape orientation - a diagonal line appears square
-    # VERY KEEN ON STRAIGHT SHAPES: High weight for rectangular elongation
-    'aspect_ratio_weight': 0.4,      
+    # uniform filter as gaussian-ish
+    gs = uniform_filter1d(x.fillna(method='ffill').fillna(method='bfill').to_numpy(),
+                          size=max(1, gaussian_size or int(win*0.6)))
 
-    # Ellipse Elongation Weight - Major/minor axis ratio from fitted ellipse
-    # EFFECTS:
-    # - HIGHER weight (0.5-0.7): Best for detecting true elongated shapes regardless of orientation
-    # - LOWER weight (0.2-0.3): Less emphasis on true geometric elongation
-    # ADVANTAGE: Considers actual shape orientation, more accurate than aspect ratio
-    # RECOMMENDED: Keep this highest for best elongation detection
-    # VERY KEEN ON STRAIGHT SHAPES: Maximum weight for true geometric elongation
-    'ellipse_elongation_weight': 0.7, 
+    return {'mavg': mavg, 'savgol': sv, 'gaussian': gs, 'primary': sv}
 
-    # Solidity Weight - How "filled" the shape is (contour_area / convex_hull_area)
-    # EFFECTS:
-    # - HIGHER weight (0.2-0.4): Prefers sparse, thin shapes (lines, curves)
-    # - LOWER weight (0.0-0.1): Less preference for hollow shapes
-    # NOTE: Uses (1-solidity) so lower solidity = higher score
-    # USEFUL FOR: Distinguishing lines/ropes from filled rectangular objects
-    # KEEN ON STRAIGHT SHAPES: Higher weight to prefer thin, line-like shapes
-    'solidity_weight': 0.1,          
+def contour_rect(contour) -> Tuple[int,int,int,int]:
+    x, y, w, h = cv2.boundingRect(contour)
+    return x, y, w, h
 
-    # Extent Weight - How efficiently the shape fills its bounding rectangle
-    # EFFECTS:
-    # - HIGHER weight (0.2-0.4): Prefers shapes that fill their bounding box well
-    # - LOWER weight (0.0-0.1): Less emphasis on rectangular efficiency
-    # USEFUL FOR: Distinguishing compact shapes from sprawling irregular ones
-    # STRAIGHT SHAPES: Zero weight - we don't care about rectangular efficiency for lines
-    'extent_weight': 0.0,            
+def rects_overlap(a: Tuple[int,int,int,int], b: Tuple[int,int,int,int]) -> bool:
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    return not (ax+aw < bx or bx+bw < ax or ay+ah < by or by+bh < ay)
 
-    # Perimeter Weight - Normalized perimeter-to-area ratio
-    # EFFECTS:
-    # - HIGHER weight (0.2-0.4): Prefers shapes with complex/long perimeters
-    # - LOWER weight (0.0-0.1): Less emphasis on perimeter complexity
-    # USEFUL FOR: Detecting winding or irregular elongated shapes
-    # NOTE: Automatically capped to prevent extreme values
-    # STRAIGHT SHAPES: Zero weight - we want simple straight perimeters, not complex ones
-    'perimeter_weight': 0.0,         
-}
+# ============================ Momentum vs Blur (shared) ============================
 
-# Tracking Settings - Controls how the Area of Interest (AOI) system works
-TRACKING_CONFIG = {
-    # AOI Boost Factor - Score multiplier for contours found within the Area of Interest
-    # EFFECTS:
-    # - 1.0: No tracking preference, treats all contours equally
-    # - 2.0-3.0: Moderate preference for contours near previous detection
-    # - 4.0+: Strong tracking, may stick to suboptimal shapes in AOI
-    # TUNING:
-    #   * Tracker jumps around too much? Increase to 3.0-4.0
-    #   * Tracker stuck on wrong shape? Decrease to 1.5-2.0
-    #   * No tracking effect? Check if AOI is too small
-    # VERY KEEN TRACKING: Set to very high value for aggressive tracking continuity
-    'aoi_boost_factor': 1000.0,         
-
-    # AOI Expansion Pixels - How much to expand the search area around previous detection
-    # EFFECTS:
-    # - SMALLER values (10-20): Tight tracking, may lose fast-moving objects
-    # - LARGER values (40-60): Loose tracking, more forgiving of movement
-    # - TOO LARGE (>80): May include too much of the image, reduces tracking benefit
-    # TUNING:
-    #   * Object moves fast between frames? Increase to 40-50
-    #   * Tracker picks up nearby noise? Decrease to 15-25
-    #   * Object barely moves? Can use smaller values like 20
-    # KEEN TRACKING: Smaller expansion for tighter tracking
-    'aoi_expansion_pixels': 10,      
-}
-
-# Video Settings - Controls visual output and video properties
-VIDEO_CONFIG = {
-    # Frames Per Second - Playback speed of output video
-    # EFFECTS:
-    # - LOWER fps (5-8): Slower playback, easier to see details
-    # - HIGHER fps (15-20): Faster playback, more natural motion
-    # - FILE SIZE: Lower fps = smaller file size
-    'fps': 15,                       
-
-    # Show All Contours - Whether to draw all detected contours in light blue
-    # EFFECTS:
-    # - True: Shows complete detection context, may be cluttered
-    # - False: Cleaner view, only shows the selected best contour
-    # USEFUL: Turn off when you want to focus only on the tracking result
-    'show_all_contours': True,       
-
-    # Show Ellipse - Whether to draw fitted ellipse on the best contour
-    # EFFECTS:
-    # - True: Shows the geometric interpretation of the shape
-    # - False: Cleaner view without ellipse overlay
-    # USEFUL: Ellipse helps visualize true shape orientation and elongation
-    'show_ellipse': True,            
-
-    # Show Bounding Box - Whether to draw rectangular bounding box
-    # EFFECTS:
-    # - True: Shows the axis-aligned bounds of the shape
-    # - False: Cleaner view without rectangular overlay
-    # USEFUL: Compare ellipse vs bounding box to see orientation effects
-    'show_bounding_box': True,       
-
-    # Text Scale - Size of overlay text and labels
-    # EFFECTS:
-    # - SMALLER (0.4-0.5): Less intrusive text, may be hard to read
-    # - LARGER (0.8-1.0): More readable text, may clutter the image
-    # RECOMMENDATION: 0.6 is usually a good balance
-    'text_scale': 0.6,               
-}
-
-# ==================== PROCESSING FUNCTIONS ====================
-
-def directional_momentum_merge(frame, search_radius=3, momentum_threshold=0.2, 
-                              momentum_decay=0.8, momentum_boost=1.5):
-    """
-    SUPER-OPTIMIZED directional momentum-based cell merging system.
-    Uses pre-computed kernels and vectorized operations for maximum speed.
-    """
-    # ULTRA-FAST VERSION: Use morphological operations for line enhancement
+def directional_momentum_merge(frame, search_radius=3, momentum_threshold=0.2,
+                               momentum_decay=0.8, momentum_boost=1.5):
     if search_radius <= 2:
         return fast_directional_enhance(frame, momentum_threshold, momentum_boost)
-    
+
     result = frame.astype(np.float32)
-    
-    # Quick gradient-based energy map
     grad_x = cv2.Sobel(frame, cv2.CV_32F, 1, 0, ksize=3)
     grad_y = cv2.Sobel(frame, cv2.CV_32F, 0, 1, ksize=3)
     energy_map = np.sqrt(grad_x**2 + grad_y**2) / 255.0
-    
-    # Skip processing if no significant gradients
     if np.max(energy_map) < momentum_threshold:
         return frame
-    
-    # Use pre-computed line kernels (cached for speed)
-    kernel_size = 5  # Fixed small size for speed
+
+    kernel_size = 5
     center = 2
-    
-    # Horizontal line kernel
-    h_kernel = np.zeros((kernel_size, kernel_size), dtype=np.float32)
-    h_kernel[center, :] = [0.1, 0.2, 0.4, 0.2, 0.1]
-    
-    # Vertical line kernel  
-    v_kernel = np.zeros((kernel_size, kernel_size), dtype=np.float32)
-    v_kernel[:, center] = [0.1, 0.2, 0.4, 0.2, 0.1]
-    
-    # Diagonal kernels
-    d1_kernel = np.zeros((kernel_size, kernel_size), dtype=np.float32)
-    d2_kernel = np.zeros((kernel_size, kernel_size), dtype=np.float32)
+    h_kernel = np.zeros((kernel_size, kernel_size), dtype=np.float32); h_kernel[center, :] = [0.1, 0.2, 0.4, 0.2, 0.1]
+    v_kernel = np.zeros_like(h_kernel); v_kernel[:, center] = [0.1, 0.2, 0.4, 0.2, 0.1]
+    d1_kernel = np.zeros_like(h_kernel); d2_kernel = np.zeros_like(h_kernel)
     for i in range(kernel_size):
         d1_kernel[i, i] = 0.2
         d2_kernel[i, kernel_size-1-i] = 0.2
-    d1_kernel[center, center] = 0.4
-    d2_kernel[center, center] = 0.4
-    
-    # Apply all kernels (parallel convolutions)
+    d1_kernel[center, center] = 0.4; d2_kernel[center, center] = 0.4
+
     responses = [
         cv2.filter2D(result, -1, h_kernel),
-        cv2.filter2D(result, -1, v_kernel), 
+        cv2.filter2D(result, -1, v_kernel),
         cv2.filter2D(result, -1, d1_kernel),
-        cv2.filter2D(result, -1, d2_kernel)
+        cv2.filter2D(result, -1, d2_kernel),
     ]
-    
-    # Maximum response enhances lines in any direction
     enhanced = np.maximum.reduce(responses)
-    
-    # Apply momentum boost based on gradient energy
     boost_factor = 1.0 + momentum_boost * np.clip(energy_map, 0, 1)
     result = enhanced * boost_factor
-    
     return np.clip(result, 0, 255).astype(np.uint8)
 
 def fast_directional_enhance(frame, threshold=0.2, boost=1.5):
-    """
-    Ultra-fast directional enhancement using morphological operations.
-    Optimized for real-time processing.
-    """
-    # Use morphological opening with line-shaped kernels
-    h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 1))  # Horizontal lines
-    v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 5))  # Vertical lines
-    
-    # Enhance horizontal and vertical structures
+    h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 1))
+    v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 5))
     h_enhanced = cv2.morphologyEx(frame, cv2.MORPH_TOPHAT, h_kernel)
     v_enhanced = cv2.morphologyEx(frame, cv2.MORPH_TOPHAT, v_kernel)
-    
-    # Combine enhancements
     enhanced = np.maximum(h_enhanced, v_enhanced)
-    
-    # Boost based on local gradient
     grad = cv2.Laplacian(frame, cv2.CV_32F)
     grad_norm = np.abs(grad) / 255.0
-    
-    # Apply boost where gradients are strong
     boost_mask = grad_norm > threshold
     result = frame.astype(np.float32)
     result[boost_mask] += boost * enhanced[boost_mask]
-    
     return np.clip(result, 0, 255).astype(np.uint8)
 
-def process_frame_for_video(frame, prev_area_of_interest=None):
-    """
-    Process a single frame and return annotated result with area of interest tracking
-    Uses the configuration settings defined above for easy adjustment.
-    """
-    # Get settings from config
-    blur_size = IMAGE_PROCESSING_CONFIG['blur_kernel_size']
-    canny_low = IMAGE_PROCESSING_CONFIG['canny_low_threshold']
-    canny_high = IMAGE_PROCESSING_CONFIG['canny_high_threshold']
-    min_area = IMAGE_PROCESSING_CONFIG['min_contour_area']
-    aoi_boost_factor = TRACKING_CONFIG['aoi_boost_factor']
-    aoi_expansion = TRACKING_CONFIG['aoi_expansion_pixels']
-    
-    # Apply either momentum merging or traditional blur
-    if IMAGE_PROCESSING_CONFIG['use_momentum_merging']:
-        # Use novel directional momentum merging system
-        processed_input = directional_momentum_merge(
-            frame,
-            search_radius=IMAGE_PROCESSING_CONFIG['momentum_search_radius'],
-            momentum_threshold=IMAGE_PROCESSING_CONFIG['momentum_threshold'],
-            momentum_decay=IMAGE_PROCESSING_CONFIG['momentum_decay'],
-            momentum_boost=IMAGE_PROCESSING_CONFIG['momentum_boost']
+def prepare_input_gray(frame_u8: np.ndarray, cfg=IMAGE_PROCESSING_CONFIG) -> np.ndarray:
+    if cfg.get('use_momentum_merging', True):
+        return directional_momentum_merge(
+            frame_u8,
+            search_radius=cfg.get('momentum_search_radius', 3),
+            momentum_threshold=cfg.get('momentum_threshold', 0.2),
+            momentum_decay=cfg.get('momentum_decay', 0.8),
+            momentum_boost=cfg.get('momentum_boost', 1.5),
         )
     else:
-        # Traditional Gaussian blur
-        processed_input = cv2.GaussianBlur(frame, blur_size, 0)
-    
-    # Apply edge detection to processed input
-    edges = cv2.Canny(processed_input, canny_low, canny_high)
-    
-    # ENHANCED: Handle open/incomplete edges with morphological closing
-    # This helps connect nearby edge pixels to form more complete contours
-    morph_kernel_size = IMAGE_PROCESSING_CONFIG['morph_close_kernel']
-    dilation_iterations = IMAGE_PROCESSING_CONFIG['edge_dilation_iterations']
-    
-    edges_processed = edges.copy()
-    
-    # Apply morphological closing if enabled (kernel size > 0)
-    if morph_kernel_size > 0:
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (morph_kernel_size, morph_kernel_size))
-        edges_processed = cv2.morphologyEx(edges_processed, cv2.MORPH_CLOSE, kernel)
-    
-    # Apply dilation if enabled (iterations > 0)
-    if dilation_iterations > 0:
-        kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
-        edges_processed = cv2.dilate(edges_processed, kernel_dilate, iterations=dilation_iterations)
-    
-    # Find contours on the processed edges
-    # Use RETR_LIST to get all contours, not just external ones
-    contours, _ = cv2.findContours(edges_processed, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-    
-    # Convert to color for annotations
-    result_frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-    
-    # Draw area of interest from previous frame
-    current_aoi = None
-    if prev_area_of_interest is not None:
-        aoi_x, aoi_y, aoi_w, aoi_h = prev_area_of_interest
-        # Expand the AOI
-        expanded_x = max(0, aoi_x - aoi_expansion)
-        expanded_y = max(0, aoi_y - aoi_expansion)
-        expanded_w = min(frame.shape[1] - expanded_x, aoi_w + 2 * aoi_expansion)
-        expanded_h = min(frame.shape[0] - expanded_y, aoi_h + 2 * aoi_expansion)
-        
-        current_aoi = (expanded_x, expanded_y, expanded_w, expanded_h)
-        
-        # Draw AOI rectangle in yellow (semi-transparent effect with thin line)
-        cv2.rectangle(result_frame, (expanded_x, expanded_y), 
-                     (expanded_x + expanded_w, expanded_y + expanded_h), 
-                     (0, 255, 255), 1)
-        
-        # Add AOI label
-        cv2.putText(result_frame, 'AOI', (expanded_x + 5, expanded_y + 20), 
-                   cv2.FONT_HERSHEY_SIMPLEX, VIDEO_CONFIG['text_scale'], (0, 255, 255), 1)
-    
-    # Find most elongated contour with AOI preference
-    most_elongated_contour = None
-    max_elongation_score = 0
-    contour_count = 0
-    aoi_contour_count = 0
-    
-    def contour_overlaps_aoi(contour, aoi):
-        """Check if contour overlaps with area of interest"""
-        if aoi is None:
-            return False
-        
-        aoi_x, aoi_y, aoi_w, aoi_h = aoi
-        cx, cy, cw, ch = cv2.boundingRect(contour)
-        
-        # Check if bounding rectangles overlap
-        return not (cx + cw < aoi_x or cx > aoi_x + aoi_w or 
-                   cy + ch < aoi_y or cy > aoi_y + aoi_h)
-    
-    if contours:
-        for contour in contours:
-            area = cv2.contourArea(contour)
-            if area < min_area:
-                continue
-                
-            contour_count += 1
-            
-            # Calculate elongation metrics
-            x, y, w, h = cv2.boundingRect(contour)
-            aspect_ratio = max(w, h) / min(w, h) if min(w, h) > 0 else 0
-            
-            # Solidity
-            hull = cv2.convexHull(contour)
-            hull_area = cv2.contourArea(hull)
-            solidity = area / hull_area if hull_area > 0 else 0
-            
-            # Extent
-            rect_area = w * h
-            extent = area / rect_area if rect_area > 0 else 0
-            
-            # Ellipse elongation
-            if len(contour) >= 5:
-                try:
-                    ellipse = cv2.fitEllipse(contour)
-                    (center), (minor_axis, major_axis), angle = ellipse
-                    ellipse_elongation = major_axis / minor_axis if minor_axis > 0 else 0
-                except:
-                    ellipse_elongation = aspect_ratio
-            else:
-                ellipse_elongation = aspect_ratio
-            
-            # ENHANCED: Add straightness measurement for line detection
-            straightness_score = 1.0  # Default for shapes that can't be measured
-            
-            if len(contour) >= 10:  # Need sufficient points for line fitting
-                # Fit a line to the contour points and measure how well they align
-                try:
-                    # Reshape contour points for cv2.fitLine
-                    points = contour.reshape(-1, 2).astype(np.float32)
-                    
-                    # Fit line using least squares
-                    [vx, vy, x0, y0] = cv2.fitLine(points, cv2.DIST_L2, 0, 0.01, 0.01)
-                    
-                    # Calculate distance of each point from the fitted line
-                    # Line equation: (x-x0)/vx = (y-y0)/vy
-                    distances = []
-                    for point in points:
-                        px, py = point[0], point[1]
-                        # Distance from point to line
-                        # Using formula: |ax + by + c| / sqrt(a² + b²)
-                        # Line in form: vy*x - vx*y + (vx*y0 - vy*x0) = 0
-                        a, b, c = vy, -vx, vx*y0 - vy*x0
-                        dist = abs(a*px + b*py + c) / np.sqrt(a*a + b*b)
-                        distances.append(dist)
-                    
-                    # Calculate straightness as inverse of average distance from line
-                    avg_distance = np.mean(distances)
-                    max_distance = max(w, h) * 0.1  # 10% of bounding box dimension as reference
-                    
-                    # Straightness score: 1.0 for perfect line, approaches 0 for curved shapes
-                    straightness_score = max(0.1, 1.0 - (avg_distance / max(max_distance, 1.0)))
-                    
-                except:
-                    straightness_score = 0.5  # Default if line fitting fails
-            
-            # Composite elongation score using configurable weights + straightness bonus
-            composite_elongation = (
-                aspect_ratio * ELONGATION_CONFIG['aspect_ratio_weight'] +
-                ellipse_elongation * ELONGATION_CONFIG['ellipse_elongation_weight'] +
-                (1 - solidity) * ELONGATION_CONFIG['solidity_weight'] +
-                extent * ELONGATION_CONFIG['extent_weight'] +
-                min(aspect_ratio / 10, 0.5) * ELONGATION_CONFIG['perimeter_weight']
-            )
-            
-            # BOOST FOR STRAIGHT SHAPES: Apply straightness multiplier
-            # Very keen on straight shapes - multiply by straightness score
-            composite_elongation *= (0.5 + 1.5 * straightness_score)  # Range: 0.5x to 2.0x boost
-            
-            elongation_score = area * composite_elongation
-            
-            # BOOST SCORE IF IN AREA OF INTEREST
-            is_in_aoi = contour_overlaps_aoi(contour, current_aoi)
-            if is_in_aoi:
-                elongation_score *= aoi_boost_factor
-                aoi_contour_count += 1
-            
-            if elongation_score > max_elongation_score:
-                max_elongation_score = elongation_score
-                most_elongated_contour = contour
-    
-    # Draw all contours in light blue (if enabled)
-    if VIDEO_CONFIG['show_all_contours'] and contours:
-        cv2.drawContours(result_frame, contours, -1, (255, 200, 100), 1)
-    
-    # Determine next AOI - KEEP LAST KNOWN POSITION IF NO CONTOUR FOUND
-    next_aoi = prev_area_of_interest  # Default: keep previous AOI
-    detection_status = "LOST"  # Default status
-    
-    if most_elongated_contour is not None:
-        # Draw the main contour in green
-        cv2.drawContours(result_frame, [most_elongated_contour], -1, (0, 255, 0), 2)
-        
-        # Calculate bounding rectangle once
-        x, y, w, h = cv2.boundingRect(most_elongated_contour)
-        
-        # Draw bounding rectangle (if enabled)
-        if VIDEO_CONFIG['show_bounding_box']:
-            cv2.rectangle(result_frame, (x, y), (x + w, y + h), (0, 0, 255), 1)
-        
-        # Update AOI to new position
-        next_aoi = (x, y, w, h)
-        
-        # Draw fitted ellipse (if enabled and possible)
-        if VIDEO_CONFIG['show_ellipse'] and len(most_elongated_contour) >= 5:
-            try:
-                ellipse = cv2.fitEllipse(most_elongated_contour)
-                cv2.ellipse(result_frame, ellipse, (255, 0, 255), 1)
-                
-                # DRAW RED LINE THROUGH MAJOR AXIS ENDPOINTS (rotated 90 degrees)
-                # Extract ellipse parameters
-                (center_x, center_y), (minor_axis, major_axis), angle = ellipse
-                
-                # Convert angle from degrees to radians and rotate 90 degrees
-                angle_rad = np.radians(angle + 90)
-                
-                # Calculate half-length of major axis (same length, rotated orientation)
-                half_major = major_axis / 2.0
-                
-                # Calculate endpoints of major axis rotated 90 degrees
-                cos_angle = np.cos(angle_rad)
-                sin_angle = np.sin(angle_rad)
-                
-                # Endpoint 1 (in direction of rotated major axis)
-                end1_x = int(center_x + half_major * cos_angle)
-                end1_y = int(center_y + half_major * sin_angle)
-                
-                # Endpoint 2 (opposite direction - rotated 90 degrees)
-                end2_x = int(center_x - half_major * cos_angle)
-                end2_y = int(center_y - half_major * sin_angle)
-                
-                # Draw red line connecting the two furthest points on the ellipse
-                cv2.line(result_frame, (end1_x, end1_y), (end2_x, end2_y), (0, 0, 255), 2)
-                
-            except:
-                pass
-        
-        # Add text info
-        area = cv2.contourArea(most_elongated_contour)
-        text_scale = VIDEO_CONFIG['text_scale']
-        cv2.putText(result_frame, f'Area: {area:.0f}', (10, 30), 
-                   cv2.FONT_HERSHEY_SIMPLEX, text_scale, (255, 255, 255), 2)
-        cv2.putText(result_frame, f'Score: {max_elongation_score:.0f}', (10, 50), 
-                   cv2.FONT_HERSHEY_SIMPLEX, text_scale, (255, 255, 255), 2)
-        
-        # Determine detection status
-        is_tracked = contour_overlaps_aoi(most_elongated_contour, current_aoi)
-        detection_status = "TRACKED" if is_tracked else "NEW"
-        
-    else:
-        # NO CONTOUR FOUND - Show "LOST" status and maintain AOI
-        cv2.putText(result_frame, 'No contour detected', (10, 30), 
-                   cv2.FONT_HERSHEY_SIMPLEX, VIDEO_CONFIG['text_scale'], (100, 100, 255), 2)
-        
-        # If we have a previous AOI, draw a dashed rectangle to show "searching" area
-        if prev_area_of_interest is not None:
-            aoi_x, aoi_y, aoi_w, aoi_h = prev_area_of_interest
-            # Draw dashed rectangle effect by drawing multiple small lines
-            dash_length = 10
-            gap_length = 5
-            
-            # Top and bottom lines
-            for x in range(aoi_x, aoi_x + aoi_w, dash_length + gap_length):
-                end_x = min(x + dash_length, aoi_x + aoi_w)
-                cv2.line(result_frame, (x, aoi_y), (end_x, aoi_y), (0, 100, 255), 2)  # Top
-                cv2.line(result_frame, (x, aoi_y + aoi_h), (end_x, aoi_y + aoi_h), (0, 100, 255), 2)  # Bottom
-            
-            # Left and right lines
-            for y in range(aoi_y, aoi_y + aoi_h, dash_length + gap_length):
-                end_y = min(y + dash_length, aoi_y + aoi_h)
-                cv2.line(result_frame, (aoi_x, y), (aoi_x, end_y), (0, 100, 255), 2)  # Left
-                cv2.line(result_frame, (aoi_x + aoi_w, y), (aoi_x + aoi_w, end_y), (0, 100, 255), 2)  # Right
-            
-            # Add "SEARCHING" label
-            cv2.putText(result_frame, 'SEARCHING', (aoi_x + 5, aoi_y + aoi_h - 10), 
-                       cv2.FONT_HERSHEY_SIMPLEX, VIDEO_CONFIG['text_scale'], (0, 100, 255), 2)
-    
-    # Show detection status with appropriate color
-    status_colors = {
-        "TRACKED": (0, 255, 0),    # Green
-        "NEW": (0, 165, 255),      # Orange
-        "LOST": (0, 100, 255)      # Red
-    }
-    cv2.putText(result_frame, detection_status, (10, 70), 
-               cv2.FONT_HERSHEY_SIMPLEX, VIDEO_CONFIG['text_scale'], status_colors[detection_status], 2)
-    
-    # Add frame info
-    info_y = result_frame.shape[0] - 40
-    small_text = VIDEO_CONFIG['text_scale'] * 0.8
-    cv2.putText(result_frame, f'Total: {contour_count}', (10, info_y), 
-               cv2.FONT_HERSHEY_SIMPLEX, small_text, (255, 255, 255), 1)
-    cv2.putText(result_frame, f'In AOI: {aoi_contour_count}', (10, info_y + 15), 
-               cv2.FONT_HERSHEY_SIMPLEX, small_text, (255, 255, 255), 1)
-    
-    return result_frame, next_aoi
+        k = cfg.get('blur_kernel_size', (15, 15))
+        return cv2.GaussianBlur(frame_u8, k, 0)
 
-def get_red_line_distance_and_angle(frame):
-    """
-    Extract the distance (length) and angle of the red line from a single frame.
-    
-    Args:
-        frame: Grayscale image as numpy array (uint8)
-        
-    Returns:
-        tuple: (distance, angle) where:
-            - distance: Length of the major axis (red line length)
-            - angle: Angle of the major axis in degrees (rotated 90 degrees from ellipse major axis)
-            - Returns (None, None) if no suitable contour is found
-    """
-    # Get settings from config
-    blur_size = IMAGE_PROCESSING_CONFIG['blur_kernel_size']
-    canny_low = IMAGE_PROCESSING_CONFIG['canny_low_threshold']
-    canny_high = IMAGE_PROCESSING_CONFIG['canny_high_threshold']
-    min_area = IMAGE_PROCESSING_CONFIG['min_contour_area']
-    
-    # Apply either momentum merging or traditional blur
-    if IMAGE_PROCESSING_CONFIG['use_momentum_merging']:
-        processed_input = directional_momentum_merge(
-            frame,
-            search_radius=IMAGE_PROCESSING_CONFIG['momentum_search_radius'],
-            momentum_threshold=IMAGE_PROCESSING_CONFIG['momentum_threshold'],
-            momentum_decay=IMAGE_PROCESSING_CONFIG['momentum_decay'],
-            momentum_boost=IMAGE_PROCESSING_CONFIG['momentum_boost']
-        )
-    else:
-        processed_input = cv2.GaussianBlur(frame, blur_size, 0)
-    
-    # Apply edge detection
-    edges = cv2.Canny(processed_input, canny_low, canny_high)
-    
-    # Apply morphological processing
-    morph_kernel_size = IMAGE_PROCESSING_CONFIG['morph_close_kernel']
-    dilation_iterations = IMAGE_PROCESSING_CONFIG['edge_dilation_iterations']
-    
-    edges_processed = edges.copy()
-    
-    if morph_kernel_size > 0:
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (morph_kernel_size, morph_kernel_size))
-        edges_processed = cv2.morphologyEx(edges_processed, cv2.MORPH_CLOSE, kernel)
-    
-    if dilation_iterations > 0:
-        kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
-        edges_processed = cv2.dilate(edges_processed, kernel_dilate, iterations=dilation_iterations)
-    
-    # Find contours
-    contours, _ = cv2.findContours(edges_processed, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-    
-    # Find most elongated contour (same logic as in process_frame_for_video)
-    most_elongated_contour = None
-    max_elongation_score = 0
-    
-    if contours:
-        for contour in contours:
-            area = cv2.contourArea(contour)
-            if area < min_area:
-                continue
-            
-            # Calculate elongation metrics (simplified version)
-            x, y, w, h = cv2.boundingRect(contour)
-            aspect_ratio = max(w, h) / min(w, h) if min(w, h) > 0 else 0
-            
-            # Solidity
-            hull = cv2.convexHull(contour)
-            hull_area = cv2.contourArea(hull)
-            solidity = area / hull_area if hull_area > 0 else 0
-            
-            # Extent
-            rect_area = w * h
-            extent = area / rect_area if rect_area > 0 else 0
-            
-            # Ellipse elongation
-            if len(contour) >= 5:
-                try:
-                    ellipse = cv2.fitEllipse(contour)
-                    (center), (minor_axis, major_axis), angle = ellipse
-                    ellipse_elongation = major_axis / minor_axis if minor_axis > 0 else 0
-                except:
-                    ellipse_elongation = aspect_ratio
-            else:
-                ellipse_elongation = aspect_ratio
-            
-            # Straightness measurement
-            straightness_score = 1.0
-            if len(contour) >= 10:
-                try:
-                    points = contour.reshape(-1, 2).astype(np.float32)
-                    [vx, vy, x0, y0] = cv2.fitLine(points, cv2.DIST_L2, 0, 0.01, 0.01)
-                    
-                    distances = []
-                    for point in points:
-                        px, py = point[0], point[1]
-                        a, b, c = vy, -vx, vx*y0 - vy*x0
-                        dist = abs(a*px + b*py + c) / np.sqrt(a*a + b*b)
-                        distances.append(dist)
-                    
-                    avg_distance = np.mean(distances)
-                    max_distance = max(w, h) * 0.1
-                    straightness_score = max(0.1, 1.0 - (avg_distance / max(max_distance, 1.0)))
-                except:
-                    straightness_score = 0.5
-            
-            # Composite elongation score
-            composite_elongation = (
-                aspect_ratio * ELONGATION_CONFIG['aspect_ratio_weight'] +
-                ellipse_elongation * ELONGATION_CONFIG['ellipse_elongation_weight'] +
-                (1 - solidity) * ELONGATION_CONFIG['solidity_weight'] +
-                extent * ELONGATION_CONFIG['extent_weight'] +
-                min(aspect_ratio / 10, 0.5) * ELONGATION_CONFIG['perimeter_weight']
-            )
-            
-            composite_elongation *= (0.5 + 1.5 * straightness_score)
-            elongation_score = area * composite_elongation
-            
-            if elongation_score > max_elongation_score:
-                max_elongation_score = elongation_score
-                most_elongated_contour = contour
-    
-    # Extract distance and angle from the most elongated contour
-    if most_elongated_contour is not None and len(most_elongated_contour) >= 5:
+def preprocess_edges(frame_u8: np.ndarray, cfg=IMAGE_PROCESSING_CONFIG) -> Tuple[np.ndarray, np.ndarray]:
+    proc = prepare_input_gray(frame_u8, cfg)
+    edges = cv2.Canny(proc, cfg.get('canny_low_threshold', 50), cfg.get('canny_high_threshold', 150))
+    mks = int(cfg.get('morph_close_kernel', 0))
+    dil = int(cfg.get('edge_dilation_iterations', 0))
+    out = edges
+    if mks > 0:
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (mks, mks))
+        out = cv2.morphologyEx(out, cv2.MORPH_CLOSE, kernel)
+    if dil > 0:
+        kernel2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
+        out = cv2.dilate(out, kernel2, iterations=dil)
+    return edges, out
+
+# ============================ Contour features & scoring ============================
+
+def compute_contour_features(contour) -> Dict[str, float]:
+    area = float(cv2.contourArea(contour))
+    x, y, w, h = contour_rect(contour)
+    ar = (max(w, h) / max(1, min(w, h))) if min(w, h) > 0 else 0.0
+
+    hull = cv2.convexHull(contour)
+    hull_area = float(cv2.contourArea(hull))
+    solidity = (area / hull_area) if hull_area > 0 else 0.0
+
+    rect_area = float(w * h)
+    extent = (area / rect_area) if rect_area > 0 else 0.0
+
+    # ellipse elongation
+    if len(contour) >= 5:
         try:
-            ellipse = cv2.fitEllipse(most_elongated_contour)
-            (center_x, center_y), (minor_axis, major_axis), angle = ellipse
-            
-            # Distance is the major axis length (same as red line length)
-            distance = major_axis
-            
-            # Angle is the ellipse angle + 90 degrees (matching the red line rotation)
-            red_line_angle = angle + 90
-            
-            # Normalize angle to [0, 360) range
-            red_line_angle = red_line_angle % 360
-            
-            return distance, red_line_angle
-            
-        except:
-            return None, None
+            _, (minor, major), _ = cv2.fitEllipse(contour)
+            ell = (major / minor) if minor > 0 else ar
+        except Exception:
+            ell = ar
     else:
+        ell = ar
+
+    # straightness via line fit
+    straight = 1.0
+    if len(contour) >= 10:
+        try:
+            pts = contour.reshape(-1, 2).astype(np.float32)
+            vx, vy, x0, y0 = cv2.fitLine(pts, cv2.DIST_L2, 0, 0.01, 0.01)
+            a, b, c = float(vy), float(-vx), float(vx * y0 - vy * x0)
+            denom = np.sqrt(a*a + b*b) + 1e-12
+            dists = np.abs(a*pts[:, 0] + b*pts[:, 1] + c) / denom
+            avgd = float(np.mean(dists))
+            maxd = max(w, h) * 0.1
+            straight = max(0.1, 1.0 - (avgd / max(maxd, 1.0)))
+        except Exception:
+            straight = 0.5
+
+    return {
+        'area': area,
+        'aspect_ratio': ar,
+        'solidity': solidity,
+        'extent': extent,
+        'ellipse_elongation': ell,
+        'straightness': straight,
+        'rect': (x, y, w, h),
+    }
+
+def score_contour(feat: Dict[str, float], w=ELONGATION_CONFIG) -> float:
+    comp = (
+        feat['aspect_ratio'] * w['aspect_ratio_weight'] +
+        feat['ellipse_elongation'] * w['ellipse_elongation_weight'] +
+        (1 - feat['solidity']) * w['solidity_weight'] +
+        feat['extent'] * w['extent_weight'] +
+        min(feat['aspect_ratio'] / 10.0, 0.5) * w['perimeter_weight']
+    )
+    comp *= (0.5 + 1.5 * feat['straightness'])  # straightness boost
+    return float(feat['area'] * comp)
+
+def select_best_contour(contours, cfg_img=IMAGE_PROCESSING_CONFIG, cfg_track=TRACKING_CONFIG,
+                        aoi: Optional[Tuple[int,int,int,int]] = None) -> Tuple[Optional[np.ndarray], Optional[Dict]]:
+    min_area = float(cfg_img.get('min_contour_area', 100))
+    boost = float(cfg_track.get('aoi_boost_factor', 1.0))
+    best, best_feat, best_score = None, None, 0.0
+    aoi_count, total = 0, 0
+
+    for c in contours or []:
+        area = cv2.contourArea(c)
+        if area < min_area:
+            continue
+        total += 1
+        feat = compute_contour_features(c)
+        s = score_contour(feat)
+        if aoi is not None and rects_overlap(feat['rect'], aoi):
+            s *= boost
+            aoi_count += 1
+        if s > best_score:
+            best, best_feat, best_score = c, feat, s
+
+    stats = {'total_contours': total, 'aoi_contours': aoi_count, 'best_score': best_score}
+    return best, (best_feat or {}), stats
+
+# ============================ Public: distance+angle extraction ============================
+
+def _distance_angle_from_contour(contour) -> Tuple[Optional[float], Optional[float]]:
+    if contour is None or len(contour) < 5:
+        return None, None
+    try:
+        (_, _), (minor_axis, major_axis), angle = cv2.fitEllipse(contour)
+        distance = float(major_axis)
+        red_line_angle = (float(angle) + 90.0) % 360.0
+        return distance, red_line_angle
+    except Exception:
         return None, None
 
-def visualize_processing_steps(frame_index=50, npz_file_index=0, figsize=(15, 5)):
-    """
-    Visualize the image processing pipeline: Original -> Blur -> Edges -> Contours
-    Shows how the current config settings affect each step.
-    """
-    import matplotlib.pyplot as plt
-    
-    # Load data
-    available_files = get_available_npz_files()
-    if npz_file_index >= len(available_files):
-        print(f"Error: NPZ file index {npz_file_index} not available")
-        return
-    
-    npz_file = available_files[npz_file_index]
-    print(f"Loading from: {npz_file}")
-    
-    cones, ts, extent, meta = load_cone_run_npz(npz_file)
-    
-    if frame_index >= len(cones):
-        print(f"Error: Frame {frame_index} not available (max: {len(cones)-1})")
-        return
-    
-    # Get frame and convert to uint8
-    frame = cones[frame_index]
-    frame_uint8 = (frame * 255).astype(np.uint8)
-    
-    # Get settings from config
-    blur_size = IMAGE_PROCESSING_CONFIG['blur_kernel_size']
-    canny_low = IMAGE_PROCESSING_CONFIG['canny_low_threshold']
-    canny_high = IMAGE_PROCESSING_CONFIG['canny_high_threshold']
-    min_area = IMAGE_PROCESSING_CONFIG['min_contour_area']
-    
-    # Apply processing steps
-    if IMAGE_PROCESSING_CONFIG['use_momentum_merging']:
-        # Use momentum merging system
-        processed_input = directional_momentum_merge(
-            frame_uint8,
-            search_radius=IMAGE_PROCESSING_CONFIG['momentum_search_radius'],
-            momentum_threshold=IMAGE_PROCESSING_CONFIG['momentum_threshold'],
-            momentum_decay=IMAGE_PROCESSING_CONFIG['momentum_decay'],
-            momentum_boost=IMAGE_PROCESSING_CONFIG['momentum_boost']
-        )
-        processing_name = "Momentum Merge"
-        processing_params = f"radius={IMAGE_PROCESSING_CONFIG['momentum_search_radius']}"
-    else:
-        # Traditional blur
-        processed_input = cv2.GaussianBlur(frame_uint8, blur_size, 0)
-        processing_name = "Gaussian Blur"
-        processing_params = f"Kernel: {blur_size}"
-    
-    edges = cv2.Canny(processed_input, canny_low, canny_high)
-    
-    # Apply morphological processing to handle open edges
-    morph_kernel_size = IMAGE_PROCESSING_CONFIG['morph_close_kernel']
-    dilation_iterations = IMAGE_PROCESSING_CONFIG['edge_dilation_iterations']
-    
-    edges_processed = edges.copy()
-    
-    # Apply morphological closing if enabled
-    if morph_kernel_size > 0:
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (morph_kernel_size, morph_kernel_size))
-        edges_processed = cv2.morphologyEx(edges_processed, cv2.MORPH_CLOSE, kernel)
-    
-    # Apply dilation if enabled
-    if dilation_iterations > 0:
-        kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
-        edges_processed = cv2.dilate(edges_processed, kernel_dilate, iterations=dilation_iterations)
-    
-    # Find contours on the processed edges using RETR_LIST to catch open shapes
-    contours, _ = cv2.findContours(edges_processed, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-    
-    # Filter contours by area
-    filtered_contours = [c for c in contours if cv2.contourArea(c) >= min_area]
-    
-    # Create contour visualization
-    contour_vis = cv2.cvtColor(frame_uint8, cv2.COLOR_GRAY2BGR)
-    if filtered_contours:
-        cv2.drawContours(contour_vis, filtered_contours, -1, (0, 255, 0), 2)
-        print(f"Found {len(filtered_contours)} contours (area >= {min_area})")
-    else:
-        print(f"No contours found with area >= {min_area}")
-    
-    # Create 5-panel visualization to show morphological processing
-    fig, axes = plt.subplots(1, 5, figsize=(18, 4))
-    
-    # Panel 1: Original
-    axes[0].imshow(frame_uint8, cmap='gray')
-    axes[0].set_title(f'Original Frame {frame_index}')
-    axes[0].axis('off')
-    
-    # Panel 2: Processed Input (Momentum or Blur)
-    axes[1].imshow(processed_input, cmap='gray')
-    axes[1].set_title(f'{processing_name}\n{processing_params}')
-    axes[1].axis('off')
-    
-    # Panel 3: Raw Edges
-    axes[2].imshow(edges, cmap='gray')
-    axes[2].set_title(f'Canny Edges\nThresholds: {canny_low}, {canny_high}')
-    axes[2].axis('off')
-    
-    # Panel 4: Processed Edges (after morphological operations)
-    axes[3].imshow(edges_processed, cmap='gray')
-    morph_title = f'Processed Edges\nClose: {morph_kernel_size}, Dilate: {dilation_iterations}'
-    axes[3].set_title(morph_title)
-    axes[3].axis('off')
-    
-    # Panel 5: Contours
-    axes[4].imshow(cv2.cvtColor(contour_vis, cv2.COLOR_BGR2RGB))
-    axes[4].set_title(f'Filtered Contours\nMin Area: {min_area}\nFound: {len(filtered_contours)}')
-    axes[4].axis('off')
-    
-    plt.tight_layout()
-    plt.show()
-    
-    # Print current settings for reference
-    print("\n=== Current Processing Settings ===")
-    if IMAGE_PROCESSING_CONFIG['use_momentum_merging']:
-        print(f"Momentum merging: radius={IMAGE_PROCESSING_CONFIG['momentum_search_radius']}, "
-              f"threshold={IMAGE_PROCESSING_CONFIG['momentum_threshold']}, "
-              f"decay={IMAGE_PROCESSING_CONFIG['momentum_decay']}")
-    else:
-        print(f"Gaussian blur kernel: {blur_size}")
-    print(f"Canny thresholds: ({canny_low}, {canny_high})")
-    print(f"Morphological closing kernel: {morph_kernel_size}")
-    print(f"Edge dilation iterations: {dilation_iterations}")
-    print(f"Min contour area: {min_area}")
-    print(f"Total contours found: {len(contours)}")
-    print(f"Contours after area filter: {len(filtered_contours)}")
-    
-    # Show improvement from morphological processing
-    if morph_kernel_size > 0 or dilation_iterations > 0:
-        original_contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-        original_filtered = [c for c in original_contours if cv2.contourArea(c) >= min_area]
-        print(f"Improvement: {len(original_filtered)} -> {len(filtered_contours)} contours after morphological processing")
+def get_red_line_distance_and_angle(frame_u8: np.ndarray):
+    """Return (distance_pixels, angle_deg) for the dominant elongated contour, or (None, None)."""
+    _, edges_proc = preprocess_edges(frame_u8, IMAGE_PROCESSING_CONFIG)
+    contours, _ = cv2.findContours(edges_proc, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    best, _, _ = select_best_contour(contours)
+    return _distance_angle_from_contour(best)
 
-# Create video from multiple frames with configurable settings
-def create_contour_detection_video(npz_file_index=0, frame_start=0, frame_count=100, 
-                                 frame_step=5, output_path='contour_detection_video.mp4'):
+# ============================ Public: per-frame processing (video overlay) ============================
+
+def process_frame_for_video(frame_u8: np.ndarray, prev_aoi: Optional[Tuple[int,int,int,int]] = None):
+    # edge pipeline
+    edges_raw, edges_proc = preprocess_edges(frame_u8, IMAGE_PROCESSING_CONFIG)
+    contours, _ = cv2.findContours(edges_proc, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+
+    # AOI expansion
+    aoi = None
+    if prev_aoi is not None:
+        ax, ay, aw, ah = prev_aoi
+        exp = int(TRACKING_CONFIG.get('aoi_expansion_pixels', 10))
+        H, W = frame_u8.shape[:2]
+        aoi = (max(0, ax-exp), max(0, ay-exp),
+               min(W - max(0, ax-exp), aw + 2*exp),
+               min(H - max(0, ay-exp), ah + 2*exp))
+
+    # choose contour
+    best, feat, stats = select_best_contour(contours, IMAGE_PROCESSING_CONFIG, TRACKING_CONFIG, aoi)
+
+    # draw
+    out = cv2.cvtColor(frame_u8, cv2.COLOR_GRAY2BGR)
+    if VIDEO_CONFIG.get('show_all_contours', True) and contours:
+        cv2.drawContours(out, contours, -1, (255, 200, 100), 1)
+
+    # draw AOI box (expanded)
+    if aoi is not None:
+        ex, ey, ew, eh = aoi
+        cv2.rectangle(out, (ex, ey), (ex+ew, ey+eh), (0, 255, 255), 1)
+        cv2.putText(out, 'AOI', (ex + 5, ey + 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, VIDEO_CONFIG['text_scale'], (0,255,255), 1)
+
+    next_aoi, status = prev_aoi, "LOST"
+    if best is not None:
+        cv2.drawContours(out, [best], -1, (0, 255, 0), 2)
+        x, y, w, h = feat['rect']
+        if VIDEO_CONFIG.get('show_bounding_box', True):
+            cv2.rectangle(out, (x,y), (x+w, y+h), (0,0,255), 1)
+        next_aoi = (x, y, w, h)
+        if VIDEO_CONFIG.get('show_ellipse', True) and len(best) >= 5:
+            try:
+                ellipse = cv2.fitEllipse(best)
+                cv2.ellipse(out, ellipse, (255, 0, 255), 1)
+                # 90°-rotated major-axis line (red)
+                (cx, cy), (minor, major), ang = ellipse
+                ang_r = np.radians(ang + 90.0)
+                half = major * 0.5
+                p1 = (int(cx + half*np.cos(ang_r)), int(cy + half*np.sin(ang_r)))
+                p2 = (int(cx - half*np.cos(ang_r)), int(cy - half*np.sin(ang_r)))
+                cv2.line(out, p1, p2, (0,0,255), 2)
+            except Exception:
+                pass
+        # text & status
+        cv2.putText(out, f'Area: {feat.get("area",0):.0f}', (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, VIDEO_CONFIG['text_scale'], (255,255,255), 2)
+        cv2.putText(out, f'Score: {stats.get("best_score",0):.0f}', (10, 50),
+                    cv2.FONT_HERSHEY_SIMPLEX, VIDEO_CONFIG['text_scale'], (255,255,255), 2)
+        status = "TRACKED" if (aoi and rects_overlap(feat['rect'], aoi)) else "NEW"
+    else:
+        # dashed "searching" box if we had a previous AOI
+        if prev_aoi is not None:
+            ax, ay, aw, ah = prev_aoi
+            dash, gap = 10, 5
+            for X in range(ax, ax+aw, dash+gap):
+                cv2.line(out, (X, ay), (min(X+dash, ax+aw), ay), (0, 100, 255), 2)
+                cv2.line(out, (X, ay+ah), (min(X+dash, ax+aw), ay+ah), (0, 100, 255), 2)
+            for Y in range(ay, ay+ah, dash+gap):
+                cv2.line(out, (ax, Y), (ax, min(Y+dash, ay+ah)), (0, 100, 255), 2)
+                cv2.line(out, (ax+aw, Y), (ax+aw, min(Y+dash, ay+ah)), (0, 100, 255), 2)
+            cv2.putText(out, 'SEARCHING', (ax+5, ay+ah-10),
+                        cv2.FONT_HERSHEY_SIMPLEX, VIDEO_CONFIG['text_scale'], (0,100,255), 2)
+
+    status_colors = {"TRACKED": (0,255,0), "NEW": (0,165,255), "LOST": (0,100,255)}
+    cv2.putText(out, status, (10, 70),
+                cv2.FONT_HERSHEY_SIMPLEX, VIDEO_CONFIG['text_scale'], status_colors[status], 2)
+
+    info_y = out.shape[0] - 40
+    s = VIDEO_CONFIG['text_scale'] * 0.8
+    cv2.putText(out, f'Total: {stats.get("total_contours",0)}', (10, info_y),
+                cv2.FONT_HERSHEY_SIMPLEX, s, (255,255,255), 1)
+    cv2.putText(out, f'In AOI: {stats.get("aoi_contours",0)}', (10, info_y+15),
+                cv2.FONT_HERSHEY_SIMPLEX, s, (255,255,255), 1)
+
+    return out, next_aoi
+
+# ============================ Public: analysis over time (deduped) ============================
+
+def analyze_red_line_distance_over_time(npz_file_index: int = 0,
+                                        frame_start: int = 0,
+                                        frame_count: Optional[int] = None,
+                                        frame_step: int = 1) -> pd.DataFrame:
+    """Single unified version (deduped)."""
+    print("=== RED LINE DISTANCE ANALYSIS OVER TIME ===")
+    files = get_available_npz_files()
+    if npz_file_index >= len(files):
+        print(f"Error: NPZ file index {npz_file_index} not available")
+        return None
+    npz_file = files[npz_file_index]
+    print(f"Analyzing: {npz_file}")
+
+    cones, ts, _, _ = load_cone_run_npz(npz_file)
+    T = len(cones)
+    if frame_count is None:
+        frame_count = T - frame_start
+    actual = int(min(frame_count, max(0, (T - frame_start)) // max(1, frame_step)))
+    print(f"Total frames available: {T}")
+    print(f"Analyzing frames {frame_start} to {frame_start + actual * frame_step} (step={frame_step})")
+
+    out = {'frame_index': [], 'timestamp': [], 'distance_pixels': [], 'angle_degrees': [], 'detection_success': []}
+    success = 0
+
+    for i in range(actual):
+        idx = frame_start + i * frame_step
+        if idx >= T: break
+        frame_u8 = to_uint8_gray(cones[idx])
+        distance, angle = get_red_line_distance_and_angle(frame_u8)
+        out['frame_index'].append(idx)
+        out['timestamp'].append(ts[idx] if idx < len(ts) else idx)
+        out['distance_pixels'].append(distance)
+        out['angle_degrees'].append(angle)
+        ok = distance is not None
+        out['detection_success'].append(ok)
+        if ok: success += 1
+        if (i + 1) % 50 == 0:
+            print(f"  Processed {i+1}/{actual} frames (Success rate: {success/(i+1)*100:.1f}%)")
+
+    df = pd.DataFrame(out)
+    print(f"\n=== ANALYSIS COMPLETE ===")
+    print(f"Total frames processed: {len(df)}")
+    print(f"Successful detections: {success} ({(success/len(df)*100 if len(df) else 0):.1f}%)")
+
+    if success:
+        vals = df.loc[df['detection_success'], 'distance_pixels']
+        print("Distance statistics (pixels):")
+        print(f"  - Mean: {vals.mean():.2f}")
+        print(f"  - Std:  {vals.std():.2f}")
+        print(f"  - Min:  {vals.min():.2f}")
+        print(f"  - Max:  {vals.max():.2f}")
+        print(f"  - Range:{(vals.max()-vals.min()):.2f}")
+    return df
+
+# ============================ Public: plotting helpers ============================
+
+def plot_time_based_analysis(distance_results: pd.DataFrame,
+                             pixels_to_meters_avg: float = 0.01,
+                             estimated_fps: float = 15):
+    valid = distance_results[distance_results['detection_success']].copy()
+    valid['distance_meters'] = valid['distance_pixels'] * pixels_to_meters_avg
+    t = elapsed_seconds_from_timestamps(valid.get('timestamp', None), estimated_fps, len(valid))
+    win = max(5, len(valid) // 20)
+    mv = valid['distance_meters'].rolling(window=win, center=True).mean()
+    sd = valid['distance_meters'].rolling(window=win, center=True).std()
+
+    plt.figure(figsize=(14, 7))
+    plt.plot(t, valid['distance_meters'], 'lightblue', alpha=0.5, label='Raw data')
+    plt.plot(t, mv, 'darkblue', linewidth=2, label=f'Moving Avg (n={win})')
+    plt.fill_between(t, mv - sd, mv + sd, alpha=0.3, color='blue', label='±1 Std Dev')
+    plt.xlabel('Elapsed Time (seconds)')
+    plt.ylabel('Distance (meters)')
+    plt.title('Red Line Distance Over Time (Time-Based Analysis)')
+    plt.legend(); plt.grid(True, alpha=0.3); plt.tight_layout(); plt.show()
+
+def plot_real_world_distance_analysis(distance_results: pd.DataFrame,
+                                      image_shape=(700, 900),
+                                      sonar_coverage_meters=5.0):
+    H, W = image_shape
+    px2m = (sonar_coverage_meters / W + sonar_coverage_meters / H) / 2.0
+    valid = distance_results[distance_results['detection_success']].copy()
+    valid['distance_meters'] = valid['distance_pixels'] * px2m
+    dist = valid['distance_meters']
+    win = max(5, len(valid)//20)
+    mv = dist.rolling(window=win, center=True).mean()
+    sd = dist.rolling(window=win, center=True).std()
+
+    fig, ax = plt.subplots(2, 2, figsize=(16, 12))
+    fig.suptitle('Red Line Distance Analysis Over Time (Real-World Distances)', fontsize=16, fontweight='bold')
+
+    ax[0,0].plot(valid['frame_index'], dist, 'b-', alpha=0.7, linewidth=1)
+    ax[0,0].scatter(valid['frame_index'], dist, c='red', s=20, alpha=0.6)
+    ax[0,0].set_title('Red Line Distance vs Frame Index'); ax[0,0].set_xlabel('Frame'); ax[0,0].set_ylabel('Distance (m)')
+    ax[0,0].grid(True, alpha=0.3)
+    ax[0,0].text(0.02, 0.98, f'Mean: {dist.mean():.2f}m\nStd: {dist.std():.2f}m\nRange: {dist.min():.2f}-{dist.max():.2f}m',
+                 transform=ax[0,0].transAxes, fontsize=9, va='top',
+                 bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+
+    ax[0,1].plot(valid['frame_index'], dist, 'g-', alpha=0.7, linewidth=1)
+    ax[0,1].scatter(valid['frame_index'], dist, c='red', s=20, alpha=0.6)
+    ax[0,1].set_title('Red Line Distance vs Time'); ax[0,1].set_xlabel('Frame'); ax[0,1].set_ylabel('Distance (m)')
+    ax[0,1].grid(True, alpha=0.3)
+
+    nbins = max(5, min(30, len(dist)//5))
+    ax[1,0].hist(dist, bins=nbins, alpha=0.7, color='lightcoral', edgecolor='black')
+    ax[1,0].axvline(dist.mean(), color='red', linestyle='--', linewidth=2, label=f'Mean: {dist.mean():.2f}m')
+    ax[1,0].axvline(dist.median(), color='green', linestyle='--', linewidth=2, label=f'Median: {dist.median():.2f}m')
+    ax[1,0].set_title('Red Line Distance Distribution'); ax[1,0].legend(); ax[1,0].grid(True, alpha=0.3)
+
+    ax[1,1].plot(valid['frame_index'], dist, 'lightcoral', alpha=0.5, label='Raw data')
+    ax[1,1].plot(valid['frame_index'], mv, 'darkred', linewidth=2, label=f'Moving Avg (window={win})')
+    ax[1,1].fill_between(valid['frame_index'], mv - sd, mv + sd, alpha=0.3, color='red', label='±1 Std Dev')
+    ax[1,1].set_title('Distance Trends and Variability'); ax[1,1].legend(); ax[1,1].grid(True, alpha=0.3)
+
+    plt.tight_layout(); plt.show()
+
+# ============================ Public: SONAR vs DVL (merged/DRY) ============================
+
+def compare_sonar_vs_dvl(distance_results: pd.DataFrame,
+                         raw_data: Dict[str, pd.DataFrame],
+                         distance_measurements: Dict[str, pd.DataFrame] | None = None,
+                         sonar_coverage_m: float = 5.0,
+                         sonar_image_size: int = 700,
+                         window_size: int = 15):
     """
-    Create a video showing contour detection across multiple frames.
-    All image processing settings are configured in the CONFIG sections above.
+    Unified, DRY version of the comparison that also reproduces the detailed views.
+    - Uses shared smoothing and time alignment.
     """
+    if raw_data is None or 'navigation' not in raw_data or raw_data['navigation'] is None:
+        print("❌ No DVL navigation data available.")
+        return None, {'error': 'no_navigation_data'}
+    if distance_results is None:
+        print("❌ Sonar distance_results not found.")
+        return None, {'error': 'no_distance_results'}
+
+    nav = raw_data['navigation'].copy()
+    nav['timestamp'] = pd.to_datetime(nav['timestamp'], errors='coerce')
+    nav = nav.dropna(subset=['timestamp'])
+    nav['relative_time'] = (nav['timestamp'] - nav['timestamp'].min()).dt.total_seconds()
+
+    # Prefer explicit sonar measurement input if provided, else convert from distance_results
+    if distance_measurements and isinstance(distance_measurements.get('sonar'), pd.DataFrame):
+        sonar = distance_measurements['sonar'].copy()
+        if 'frame_index' not in sonar and 'frame_idx' in sonar:
+            sonar = sonar.rename(columns={'frame_idx': 'frame_index'})
+        if 'distance_pixels' not in sonar and 'distance' in sonar:
+            sonar = sonar.rename(columns={'distance': 'distance_pixels'})
+    else:
+        sonar = distance_results.copy()
+
+    ppm = float(sonar_image_size) / float(sonar_coverage_m)
+    sonar['distance_meters'] = sonar['distance_pixels'] / ppm
+    smooth = apply_smoothing(sonar['distance_meters'].to_numpy(), window_size=window_size)
+    sonar['distance_meters_raw'] = sonar['distance_meters']
+    sonar['distance_meters_mavg'] = smooth['mavg']
+    sonar['distance_meters_savgol'] = smooth['savgol']
+    sonar['distance_meters_gaussian'] = smooth['gaussian']
+    sonar['distance_meters'] = smooth['primary']
+
+    # stretch sonar time to nav span
+    dvl_duration = float(max(1.0, (nav['relative_time'].max() - nav['relative_time'].min())))
+    N = max(1, len(sonar) - 1)
+    if 'frame_index' not in sonar:
+        sonar['frame_index'] = np.arange(len(sonar))
+    sonar['synthetic_time'] = (sonar['frame_index'] / float(N)) * dvl_duration
+
+    # plots
+    fig, axes = plt.subplots(2, 3, figsize=(24, 12))
+    fig.suptitle('🔄 SONAR vs DVL DISTANCE COMPARISON (WITH SMOOTHING)', fontsize=16, fontweight='bold')
+
+    ax1 = axes[0, 0]
+    ax1.plot(sonar['synthetic_time'], sonar['distance_meters_raw'], 'r-', linewidth=1, alpha=0.3, label='Sonar Raw')
+    ax1.plot(sonar['synthetic_time'], sonar['distance_meters'], 'r-', linewidth=2, alpha=0.8, label='Sonar Smoothed')
+    ax1.plot(nav['relative_time'], nav['NetDistance'], 'b-', linewidth=2, alpha=0.8, label='DVL NetDistance')
+    ax1.set_xlabel('Time (s)'); ax1.set_ylabel('Distance (m)'); ax1.set_title('Distance Over Time'); ax1.legend(); ax1.grid(True, alpha=0.3)
+
+    ax2 = axes[0, 1]
+    sl = slice(100, min(200, len(sonar)))
+    ax2.plot(sonar['synthetic_time'].iloc[sl], sonar['distance_meters_raw'].iloc[sl], 'gray', linewidth=1, alpha=0.7, label='Raw')
+    ax2.plot(sonar['synthetic_time'].iloc[sl], sonar['distance_meters_mavg'].iloc[sl], 'orange', linewidth=1.5, alpha=0.8, label='Moving Avg')
+    ax2.plot(sonar['synthetic_time'].iloc[sl], sonar['distance_meters_savgol'].iloc[sl], 'red', linewidth=2, alpha=0.9, label='Savitzky-Golay')
+    ax2.plot(sonar['synthetic_time'].iloc[sl], sonar['distance_meters_gaussian'].iloc[sl], 'purple', linewidth=1.5, alpha=0.8, label='Gaussian')
+    ax2.set_xlabel('Time (s)'); ax2.set_ylabel('Distance (m)'); ax2.set_title('Smoothing Methods (Detail)'); ax2.legend(); ax2.grid(True, alpha=0.3)
+
+    ax3 = axes[0, 2]
+    ax3.hist(sonar['distance_meters'], bins=30, alpha=0.7, color='red', label=f'Sonar (n={len(sonar)})', density=True)
+    ax3.hist(nav['NetDistance'], bins=30, alpha=0.7, color='blue', label=f'DVL (n={len(nav)})', density=True)
+    ax3.set_xlabel('Distance (m)'); ax3.set_ylabel('Density'); ax3.set_title('Distribution Comparison'); ax3.legend(); ax3.grid(True, alpha=0.3)
+
+    ax4 = axes[1, 0]
+    stats_df = pd.DataFrame({
+        'Measurement': ['Sonar Red Line', 'DVL Navigation'],
+        'Count': [len(sonar), len(nav)],
+        'Mean (m)': [float(np.nanmean(sonar['distance_meters'])), float(nav['NetDistance'].mean())],
+        'Std (m)': [float(np.nanstd(sonar['distance_meters'])), float(nav['NetDistance'].std())],
+        'Min (m)': [float(np.nanmin(sonar['distance_meters'])), float(nav['NetDistance'].min())],
+        'Max (m)': [float(np.nanmax(sonar['distance_meters'])), float(nav['NetDistance'].max())],
+    })
+    stats_df['CV (%)'] = stats_df['Std (m)'] / stats_df['Mean (m)'] * 100
+    ax4.axis('off')
+    ax4.text(0.05, 0.95, stats_df.round(3).to_string(index=False),
+             transform=ax4.transAxes, fontfamily='monospace', fontsize=10, va='top')
+    ax4.set_title('Statistical Comparison')
+
+    ax5 = axes[1, 1]
+    x = np.arange(len(stats_df)); w = 0.35
+    ax5.bar(x - w/2, stats_df['Mean (m)'], w, label='Mean', alpha=0.8, color=['red','blue'])
+    ax5.bar(x + w/2, stats_df['Std (m)'], w, label='Std', alpha=0.8, color=['lightcoral','lightblue'])
+    ax5.set_xticks(x); ax5.set_xticklabels(stats_df['Measurement']); ax5.set_title('Mean ± Std'); ax5.legend(); ax5.grid(True, alpha=0.3)
+
+    ax6 = axes[1, 2]
+    noise_levels = [
+        float(np.nanstd(sonar['distance_meters_raw'])),
+        float(np.nanstd(sonar['distance_meters_mavg'])),
+        float(np.nanstd(sonar['distance_meters_savgol'])),
+        float(np.nanstd(sonar['distance_meters_gaussian'])),
+    ]
+    bars = ax6.bar(['Raw', 'Moving Avg', 'Savitzky-Golay', 'Gaussian'], noise_levels, alpha=0.7)
+    ax6.set_ylabel('Std (m)'); ax6.set_title('Noise Reduction by Smoothing'); ax6.grid(True, alpha=0.3)
+    for b, v in zip(bars, noise_levels):
+        ax6.text(b.get_x()+b.get_width()/2, b.get_height()+0.001, f'{v:.3f}m', ha='center', va='bottom', fontsize=9)
+
+    plt.tight_layout(); plt.show()
+
+    sonar_mean = float(np.nanmean(sonar['distance_meters']))
+    dvl_mean = float(nav['NetDistance'].mean())
+    ratio = sonar_mean / dvl_mean if dvl_mean else np.nan
+    sonar_span = float(np.nanmax(sonar['synthetic_time'])) if len(sonar) else 0.0
+    dvl_span = float(nav['relative_time'].max()) if len(nav) else 0.0
+
+    print("\n📊 DETAILED COMPARISON STATISTICS:")
+    print("="*50)
+    print(stats_df.round(3).to_string(index=False))
+    print("\n🔍 SCALE ANALYSIS:")
+    print(f"   Sonar mean: {sonar_mean:.3f} m")
+    print(f"   DVL mean:   {dvl_mean:.3f} m")
+    print(f"   Scale ratio (Sonar/DVL): {ratio:.3f}x")
+    print("\n⏱️ TIME ANALYSIS:")
+    print(f"   Sonar duration (stretched): {sonar_span:.1f}s ({len(sonar)} frames)")
+    print(f"   DVL duration:               {dvl_span:.1f}s ({len(nav)} records)")
+    print(f"   ✅ Temporal alignment: Both now span ~{dvl_span:.1f}s")
+
+    return fig, {
+        'sonar_mean_m': sonar_mean,
+        'dvl_mean_m': dvl_mean,
+        'scale_ratio': ratio,
+        'sonar_duration_stretched_s': sonar_span,
+        'dvl_duration_s': dvl_span,
+    }
+
+# ============================ Visualization helpers (kept but DRY inside) ============================
+
+def basic_image_processing_pipeline(img_u8: np.ndarray, show=True, figsize=(15, 10)) -> Dict[str, np.ndarray]:
+    blurred = cv2.GaussianBlur(img_u8, (15, 15), 0)
+    edges = cv2.Canny(img_u8, 50, 150)
+    edges_blurred = cv2.Canny(blurred, 50, 150)
+    _, thresh = cv2.threshold(img_u8, 127, 255, cv2.THRESH_BINARY)
+    diff = cv2.absdiff(edges, edges_blurred)
+
+    res = {'original': img_u8, 'blurred': blurred, 'edges': edges, 'edges_blurred': edges_blurred, 'thresh': thresh, 'diff': diff}
+    if show:
+        fig, axes = plt.subplots(2, 3, figsize=figsize)
+        axes[0,0].imshow(img_u8, cmap='gray');       axes[0,0].set_title('Original');        axes[0,0].axis('off')
+        axes[0,1].imshow(blurred, cmap='gray');      axes[0,1].set_title('Gaussian Blur');   axes[0,1].axis('off')
+        axes[0,2].imshow(thresh, cmap='gray');       axes[0,2].set_title('Binary Threshold');axes[0,2].axis('off')
+        axes[1,0].imshow(edges, cmap='gray');        axes[1,0].set_title('Canny Edges');     axes[1,0].axis('off')
+        axes[1,1].imshow(edges_blurred, cmap='gray');axes[1,1].set_title('Canny + Blur');    axes[1,1].axis('off')
+        axes[1,2].imshow(diff, cmap='gray');         axes[1,2].set_title('Edge Difference'); axes[1,2].axis('off')
+        plt.tight_layout(); plt.show()
+    return res
+
+def visualize_processing_steps(frame_index=50, npz_file_index=0, figsize=(15, 5)):
+    files = get_available_npz_files()
+    if npz_file_index >= len(files):
+        print(f"Error: NPZ file index {npz_file_index} not available"); return
+    cones, _, _, _ = load_cone_run_npz(files[npz_file_index])
+    if frame_index >= len(cones):
+        print(f"Error: Frame {frame_index} not available (max: {len(cones)-1})"); return
+
+    u8 = to_uint8_gray(cones[frame_index])
+    proc = prepare_input_gray(u8, IMAGE_PROCESSING_CONFIG)
+    edges_raw = cv2.Canny(proc, IMAGE_PROCESSING_CONFIG['canny_low_threshold'], IMAGE_PROCESSING_CONFIG['canny_high_threshold'])
+    _, edges_proc = preprocess_edges(u8, IMAGE_PROCESSING_CONFIG)
+    contours, _ = cv2.findContours(edges_proc, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    min_area = IMAGE_PROCESSING_CONFIG['min_contour_area']
+    filt = [c for c in contours if cv2.contourArea(c) >= min_area]
+
+    cont_vis = cv2.cvtColor(u8, cv2.COLOR_GRAY2BGR)
+    if filt: cv2.drawContours(cont_vis, filt, -1, (0,255,0), 2)
+    print(f"Found {len(filt)} contours (area >= {min_area})" if filt else f"No contours found with area >= {min_area}")
+
+    fig, ax = plt.subplots(1, 5, figsize=(18, 4))
+    ax[0].imshow(u8, cmap='gray');               ax[0].set_title(f'Original Frame {frame_index}'); ax[0].axis('off')
+    ax[1].imshow(proc, cmap='gray');             ax[1].set_title('Momentum Merge' if IMAGE_PROCESSING_CONFIG['use_momentum_merging'] else f'Gaussian {IMAGE_PROCESSING_CONFIG["blur_kernel_size"]}'); ax[1].axis('off')
+    ax[2].imshow(edges_raw, cmap='gray');        ax[2].set_title(f'Canny {IMAGE_PROCESSING_CONFIG["canny_low_threshold"]},{IMAGE_PROCESSING_CONFIG["canny_high_threshold"]}'); ax[2].axis('off')
+    ax[3].imshow(edges_proc, cmap='gray');       ax[3].set_title(f'Close:{IMAGE_PROCESSING_CONFIG["morph_close_kernel"]} Dilate:{IMAGE_PROCESSING_CONFIG["edge_dilation_iterations"]}'); ax[3].axis('off')
+    ax[4].imshow(cv2.cvtColor(cont_vis, cv2.COLOR_BGR2RGB)); ax[4].set_title(f'Contours ≥{min_area}'); ax[4].axis('off')
+    plt.tight_layout(); plt.show()
+
+# ============================ Frame export & video ============================
+
+def pick_and_save_frame(npz_file_index: int = 0, frame_position: str | float = 'middle',
+                        output_path: str = "sample_frame.png", npz_dir: str = "exports/outputs") -> Dict:
+    files = get_available_npz_files(npz_dir)
+    if not files: raise FileNotFoundError(f"No NPZ files found in {npz_dir}")
+    if npz_file_index >= len(files): raise IndexError(f"NPZ index {npz_file_index} out of range 0..{len(files)-1}")
+
+    cones, timestamps, extent, meta = load_cone_run_npz(files[npz_file_index])
+    T = len(cones)
+    if frame_position == 'start': idx = 0
+    elif frame_position == 'end': idx = T-1
+    elif frame_position == 'middle': idx = T//2
+    else:
+        idx = int(frame_position * T) if isinstance(frame_position, float) and frame_position <= 1.0 else int(frame_position)
+        idx = max(0, min(idx, T-1))
+
+    u8 = to_uint8_gray(cones[idx])
+    op = Path(output_path); cv2.imwrite(str(op), u8)
+    print(f"Frame saved to: {op}")
+    print(f"Source: {files[npz_file_index].name}, Frame {idx}/{T-1}")
+    print(f"Timestamp: {timestamps[idx].strftime('%H:%M:%S')}")
+    print(f"Shape: {u8.shape}")
+    return {
+        'saved_path': str(op), 'npz_file': files[npz_file_index].name, 'frame_index': idx,
+        'total_frames': T, 'timestamp': timestamps[idx], 'shape': u8.shape, 'extent': extent
+    }
+
+def load_saved_frame(image_path: str) -> np.ndarray:
+    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        raise FileNotFoundError(f"Could not load image from {image_path}")
+    return img
+
+def create_contour_detection_video(npz_file_index=0, frame_start=0, frame_count=100,
+                                   frame_step=5, output_path='contour_detection_video.mp4'):
     print("=== CONTOUR DETECTION VIDEO CREATION ===")
     print(f"Creating video with {frame_count} frames, stepping by {frame_step}...")
-    
-    # Display current configuration
-    print("\nCurrent Settings:")
-    if IMAGE_PROCESSING_CONFIG['use_momentum_merging']:
+    if IMAGE_PROCESSING_CONFIG.get('use_momentum_merging', True):
         print(f"  Image Processing: MOMENTUM MERGING (radius={IMAGE_PROCESSING_CONFIG['momentum_search_radius']}, "
               f"threshold={IMAGE_PROCESSING_CONFIG['momentum_threshold']}, decay={IMAGE_PROCESSING_CONFIG['momentum_decay']}), "
               f"canny=({IMAGE_PROCESSING_CONFIG['canny_low_threshold']}, {IMAGE_PROCESSING_CONFIG['canny_high_threshold']}), "
@@ -1075,112 +788,77 @@ def create_contour_detection_video(npz_file_index=0, frame_start=0, frame_count=
         print(f"  Image Processing: blur={IMAGE_PROCESSING_CONFIG['blur_kernel_size']}, "
               f"canny=({IMAGE_PROCESSING_CONFIG['canny_low_threshold']}, {IMAGE_PROCESSING_CONFIG['canny_high_threshold']}), "
               f"min_area={IMAGE_PROCESSING_CONFIG['min_contour_area']}")
-    print(f"  Tracking: boost={TRACKING_CONFIG['aoi_boost_factor']}x, "
-          f"expansion={TRACKING_CONFIG['aoi_expansion_pixels']}px")
-    print(f"  Video: fps={VIDEO_CONFIG['fps']}, "
-          f"show_contours={VIDEO_CONFIG['show_all_contours']}, "
-          f"show_ellipse={VIDEO_CONFIG['show_ellipse']}")
-    
-    # Load NPZ data
-    available_files = get_available_npz_files()
-    if npz_file_index >= len(available_files):
-        print(f"Error: NPZ file index {npz_file_index} not available")
-        return None
-    
-    npz_file = available_files[npz_file_index]
-    print(f"Loading from: {npz_file}")
-    
-    # Load the data - FIXED: load_cone_run_npz returns a tuple, not a dict
-    cones, ts, extent, meta = load_cone_run_npz(npz_file)
-    total_frames = len(cones)
-    
-    print(f"Total frames in NPZ: {total_frames}")
-    
-    # Adjust frame parameters
-    actual_frame_count = min(frame_count, (total_frames - frame_start) // frame_step)
-    print(f"Will process {actual_frame_count} frames")
-    
-    if actual_frame_count <= 0:
-        print("Error: Not enough frames to process")
-        return None
-    
-    # Get first frame to determine video dimensions - need to convert to uint8
-    first_frame = cones[frame_start]
-    # Convert from [0,1] float to [0,255] uint8
-    first_frame_uint8 = (first_frame * 255).astype(np.uint8)
-    height, width = first_frame_uint8.shape
-    
-    # Setup video writer
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    fps = VIDEO_CONFIG['fps']
-    video_writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-    
-    if not video_writer.isOpened():
-        print("Error: Could not open video writer")
-        return None
-    
-    print("Processing frames with configurable settings...")
-    
-    # Initialize tracking with enhanced statistics
-    current_aoi = None  # Area of interest from previous frame
-    tracked_frames = 0
-    new_detections = 0
-    lost_frames = 0
-    
-    # Process frames
-    for i in range(actual_frame_count):
-        frame_idx = frame_start + (i * frame_step)
-        
-        if frame_idx >= total_frames:
-            break
-            
-        # Get frame and convert to uint8
-        frame = cones[frame_idx]
-        frame_uint8 = (frame * 255).astype(np.uint8)
-        
-        # Process frame with configurable settings
-        processed_frame, next_aoi = process_frame_for_video(frame_uint8, current_aoi)
-        
-        # Update tracking statistics
+    print(f"  Tracking: boost={TRACKING_CONFIG['aoi_boost_factor']}x, expansion={TRACKING_CONFIG['aoi_expansion_pixels']}px")
+    print(f"  Video: fps={VIDEO_CONFIG['fps']}, show_contours={VIDEO_CONFIG['show_all_contours']}, show_ellipse={VIDEO_CONFIG['show_ellipse']}")
+
+    files = get_available_npz_files()
+    if npz_file_index >= len(files):
+        print(f"Error: NPZ file index {npz_file_index} not available"); return None
+
+    cones, _, _, _ = load_cone_run_npz(files[npz_file_index])
+    T = len(cones)
+    actual = int(min(frame_count, max(0, (T - frame_start)) // max(1, frame_step)))
+    if actual <= 0:
+        print("Error: Not enough frames to process"); return None
+
+    first = to_uint8_gray(cones[frame_start]); H, W = first.shape
+    vw = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*'mp4v'), VIDEO_CONFIG['fps'], (W, H))
+    if not vw.isOpened():
+        print("Error: Could not open video writer"); return None
+
+    print("Processing frames...")
+    aoi = None
+    tracked = new = lost = 0
+
+    for i in range(actual):
+        idx = frame_start + i * frame_step
+        frame_u8 = to_uint8_gray(cones[idx])
+        vis, next_aoi = process_frame_for_video(frame_u8, aoi)
         if next_aoi is not None:
-            if current_aoi is not None:
-                # Check if position changed significantly (new detection vs tracked)
-                if current_aoi == next_aoi:
-                    lost_frames += 1  # AOI maintained, no new detection
-                else:
-                    tracked_frames += 1  # AOI updated with new detection
+            if aoi is None:
+                new += 1
+            elif aoi == next_aoi:
+                lost += 1
             else:
-                new_detections += 1  # First detection
+                tracked += 1
         else:
-            lost_frames += 1  # No AOI at all
-        
-        # Update AOI for next frame (next_aoi might be same as current_aoi if no detection)
-        current_aoi = next_aoi
-        
-        # Add frame number
-        cv2.putText(processed_frame, f'Frame: {frame_idx}', (width - 120, 25), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        
-        # Write frame to video
-        video_writer.write(processed_frame)
-        
-        # Progress update
-        if (i + 1) % 10 == 0:
-            print(f"Processed {i + 1}/{actual_frame_count} frames")
-    
-    # Release video writer
-    video_writer.release()
-    
+            lost += 1
+        aoi = next_aoi
+        cv2.putText(vis, f'Frame: {idx}', (W - 120, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1)
+        vw.write(vis)
+        if (i+1) % 10 == 0:
+            print(f"Processed {i+1}/{actual} frames")
+
+    vw.release()
     print(f"\n=== VIDEO CREATION COMPLETE ===")
     print(f"Video saved to: {output_path}")
-    print(f"Video specs: {width}x{height}, {fps} fps, {actual_frame_count} frames")
+    print(f"Video specs: {W}x{H}, {VIDEO_CONFIG['fps']} fps, {actual} frames")
     print(f"Tracking stats:")
-    print(f"  - Tracked frames: {tracked_frames}")
-    print(f"  - New detections: {new_detections}")
-    print(f"  - Lost/searching frames: {lost_frames}")
-    total_detections = tracked_frames + new_detections
-    if total_detections > 0:
-        print(f"  - Detection success rate: {total_detections/actual_frame_count*100:.1f}%")
-        print(f"  - Tracking continuity: {tracked_frames/total_detections*100:.1f}%")
-    
+    total_det = tracked + new
+    print(f"  - Tracked frames: {tracked}")
+    print(f"  - New detections: {new}")
+    print(f"  - Lost/searching frames: {lost}")
+    if total_det > 0:
+        print(f"  - Detection success rate: {total_det/actual*100:.1f}%")
+        print(f"  - Tracking continuity:   {tracked/max(1,total_det)*100:.1f}%")
     return output_path
+
+# --- Backwards compatibility shim for legacy callers ---
+def detailed_sonar_dvl_comparison(
+    distance_results,
+    raw_data,
+    sonar_coverage_m: float = 5.0,
+    sonar_image_size: int = 700,
+    window_size: int = 15,
+):
+    """
+    Legacy API preserved. Delegates to compare_sonar_vs_dvl and returns (fig, stats).
+    """
+    return compare_sonar_vs_dvl(
+        distance_results=distance_results,
+        raw_data=raw_data,
+        distance_measurements=None,   # legacy version didn't accept this
+        sonar_coverage_m=sonar_coverage_m,
+        sonar_image_size=sonar_image_size,
+        window_size=window_size,
+    )
