@@ -1,22 +1,60 @@
 # Re-export main entry points for convenience.
-from .core import (
-    sanitize_topic, base_msgtype, find_data_bags, find_video_bags,
-    register_custom_msgs_from_dataset_root, stamp_seconds, coerce_for_table,
-    flatten_msg, to_native,
-)
-from .data_export import (
-    list_topics_in_bag, bag_topic_to_dataframe, save_dataframe,
-    save_all_topics_from_data_bags,
-)
-from .video_export import (
-    list_camera_topics_in_bag, export_camera_info_for_bag,
-    export_camera_topic_to_mp4, export_camera_topic_to_png_sequence,
-    export_all_video_bags_to_mp4, export_all_video_bags_to_png,
-)
-from .reporting import (
-    load_data_index, list_exported_bag_stems, overview_by_bag, overview_by_datetime,
-    topics_in_bag_df, topics_overview_dir,
-)
+# Import from available modules only
+
+try:
+    from .reporting import (
+        load_data_index, list_exported_bag_stems, overview_by_bag, overview_by_datetime,
+        topics_in_bag_df, topics_overview_dir,
+    )
+except ImportError:
+    pass
+
+try:
+    # Import from sonar_utils as needed by other modules
+    from .sonar_utils import (
+        ConeGridSpec, load_df, enhance_intensity, iter_cone_frames, 
+        save_cone_run_npz, get_sonoptix_frame, parse_json_cell
+    )
+except ImportError:
+    pass
+
+try:
+    # Import from new sonar visualization module
+    from .sonar_visualization import (
+        SonarVisualizer, find_sonar_files, print_sonar_files, quick_visualize
+    )
+except ImportError:
+    pass
+
+try:
+    from .image_analysis_utils import *
+except ImportError:
+    pass
+
+try:
+    from .navigation_guidance_analysis import *
+except ImportError:
+    pass
+
+try:
+    from .net_line_utils import *
+except ImportError:
+    pass
+
+try:
+    from .nucleus1000dvl_analysis import *
+except ImportError:
+    pass
+
+try:
+    from .sonar_distance_analysis import *
+except ImportError:
+    pass
+
+try:
+    from .synchronized_analysis import *
+except ImportError:
+    pass
 
 # Optional zero-shot model utilities (requires additional dependencies)
 try:

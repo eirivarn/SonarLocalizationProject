@@ -756,11 +756,11 @@ def save_cone_run_npz(
         meta["attrs"] = attrs
 
     np.savez_compressed(
-    out_path,
-    cones=np.asarray(cones, dtype=np.float32),
-    ts=np.asarray(ts, dtype="datetime64[ns]"),   # <--- add this
-    extent=np.asarray(extent, dtype=np.float32),
-    meta=meta,
+        out_path,
+        cones=cones_stack,
+        ts_unix_ns=ts_unix_ns,
+        extent=extent_ref,
+        meta_json=json.dumps(meta, ensure_ascii=False)
     )
 
     if progress:
