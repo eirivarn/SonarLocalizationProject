@@ -27,6 +27,14 @@ except ImportError:
     pass
 
 try:
+    # Import from new ping360 visualization module
+    from .ping360_visualization import (
+        Ping360Visualizer, find_ping360_files, print_ping360_files, quick_visualize as quick_visualize_ping360
+    )
+except ImportError:
+    pass
+
+try:
     from .image_analysis_utils import *
 except ImportError:
     pass
