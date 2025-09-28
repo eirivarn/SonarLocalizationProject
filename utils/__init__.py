@@ -27,6 +27,14 @@ except ImportError:
     pass
 
 try:
+    # Export video utilities (including optimized sonar video generator)
+    from .video_with_sonar import (
+        export_optimized_sonar_video, export_video_with_sonar_display
+    )
+except ImportError:
+    pass
+
+try:
     # Import from new ping360 visualization module
     from .ping360_visualization import (
         Ping360Visualizer, find_ping360_files, print_ping360_files, quick_visualize as quick_visualize_ping360

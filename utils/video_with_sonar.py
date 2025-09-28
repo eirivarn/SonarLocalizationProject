@@ -223,6 +223,7 @@ def export_optimized_sonar_video(
     NET_DISTANCE_TOLERANCE = 0.5
     NET_PITCH_TOLERANCE = 0.3
     GENERAL_SENSOR_TOLERANCE = 1.0
+    GENERAL_SENSOR_TOLERANCE = 1.0
 
     # Enhanced settings
     USE_ENHANCED = True
