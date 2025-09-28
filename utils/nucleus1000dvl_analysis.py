@@ -580,6 +580,225 @@ class Nucleus1000DVLAnalyzer:
         
         plt.tight_layout()
         plt.show()
+
+    # -------------------------
+    # Notebook helper methods
+    # -------------------------
+    def explore_bag(self, bag_name):
+        """
+        Print a compact exploration summary for a single bag.
+
+        This replicates the "BASIC DATA EXPLORATION" notebook cell
+        and is useful for quickly inspecting available sensors for a bag.
+        """
+        if bag_name is None:
+            print("❌ No bag specified for exploration")
+            return
+
+        print(f"\n🔍 Exploring bag: {bag_name}")
+        for sensor in self.available_sensors:
+            print(f"\n🔧 {sensor.upper()} Data:")
+            data = self.load_sensor_data(sensor, bag_name, verbose=False)
+            if data is not None and len(data) > 0:
+                try:
+                    duration_min = data['t_rel'].max() / 60.0 if 't_rel' in data.columns else 0
+                except Exception:
+                    duration_min = 0
+                print(f"   📏 Shape: {data.shape}")
+                print(f"   ⏱️  Duration: {duration_min:.1f} minutes")
+            else:
+                print("   ❌ No data available")
+
+    def compare_bottomtrack_across_bags(self, output_folder="exports/outputs", export_plots=False):
+        """
+        Create comparison plots for bottomtrack velocity across all available bags.
+
+        This encapsulates the multi-file comparison notebook cell.
+        """
+        if 'bottomtrack' not in self.available_sensors or len(self.available_bags) <= 1:
+            print("⚠️  Not enough bottomtrack data across bags for comparison")
+            return
+
+        print(f"📊 Comparing bottomtrack across {len(self.available_bags)} bags")
+        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+        fig.suptitle('Bottom Track Velocity Comparison Across Bags', fontsize=14)
+
+        colors = plt.cm.Set1(np.linspace(0, 1, len(self.available_bags)))
+
+        for i, bag in enumerate(self.available_bags):
+            data = self.load_sensor_data("bottomtrack", bag, verbose=False)
+            if isinstance(data, dict):
+                data = data.get(bag)
+            if data is None or 'dvl_velocity_xyz.x' not in data.columns:
+                continue
+
+            valid_mask = data.get('data_valid', pd.Series([True] * len(data))) == True
+            data_valid = data[valid_mask]
+            if len(data_valid) == 0:
+                continue
+
+            color = colors[i]
+            axes[0,0].plot(data_valid['t_rel_min'], data_valid['dvl_velocity_xyz.x'], color=color, label=bag, alpha=0.7)
+            axes[0,1].plot(data_valid['t_rel_min'], data_valid['dvl_velocity_xyz.y'], color=color, alpha=0.7)
+            axes[1,0].plot(data_valid['t_rel_min'], data_valid['dvl_velocity_xyz.z'], color=color, alpha=0.7)
+            speed = np.sqrt(data_valid['dvl_velocity_xyz.x']**2 + data_valid['dvl_velocity_xyz.y']**2 + data_valid['dvl_velocity_xyz.z']**2)
+            axes[1,1].plot(data_valid['t_rel_min'], speed, color=color, alpha=0.7)
+
+        # Format subplots
+        axes[0,0].set_title('X Velocity')
+        axes[0,0].set_ylabel('Velocity (m/s)')
+        axes[0,0].legend()
+        axes[0,0].grid(True, alpha=0.3)
+
+        axes[0,1].set_title('Y Velocity')
+        axes[0,1].set_ylabel('Velocity (m/s)')
+        axes[0,1].grid(True, alpha=0.3)
+
+        axes[1,0].set_title('Z Velocity')
+        axes[1,0].set_ylabel('Velocity (m/s)')
+        axes[1,0].set_xlabel('Time (minutes)')
+        axes[1,0].grid(True, alpha=0.3)
+
+        axes[1,1].set_title('Speed Magnitude')
+        axes[1,1].set_ylabel('Speed (m/s)')
+        axes[1,1].set_xlabel('Time (minutes)')
+        axes[1,1].grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        if export_plots:
+            outp = Path(output_folder) / "bottomtrack_comparison.png"
+            outp.parent.mkdir(parents=True, exist_ok=True)
+            plt.savefig(outp, dpi=300, bbox_inches='tight')
+            print(f"💾 Saved plot: {outp}")
+        plt.show()
+
+    def compute_summary_stats(self, export_summary=True, output_folder="exports/outputs"):
+        """
+        Compute the statistical summary used in the notebook and optionally export it.
+
+        Returns a pandas DataFrame with summary rows.
+        """
+        summary_stats = []
+        for sensor in self.available_sensors:
+            for bag in self.available_bags:
+                data = self._load_single_file(f"nucleus1000dvl_{sensor}", bag, verbose=False)
+                if data is None or len(data) == 0:
+                    continue
+                duration_min = data['t_rel'].max() / 60.0 if 't_rel' in data.columns else 0
+                sample_rate = len(data) / data['t_rel'].max() if 't_rel' in data.columns and data['t_rel'].max() > 0 else 0
+                entry = {'sensor': sensor, 'bag': bag, 'samples': len(data), 'duration_min': duration_min, 'sample_rate_hz': sample_rate}
+
+                # Sensor-specific enrichments (keep lightweight)
+                if sensor == 'bottomtrack' and 'dvl_velocity_xyz.x' in data.columns:
+                    valid_mask = data.get('data_valid', pd.Series([True] * len(data))) == True
+                    data_valid = data[valid_mask]
+                    if len(data_valid) > 0:
+                        speed = np.sqrt(data_valid['dvl_velocity_xyz.x']**2 + data_valid['dvl_velocity_xyz.y']**2 + data_valid['dvl_velocity_xyz.z']**2)
+                        entry.update({'mean_speed': speed.mean(), 'std_speed': speed.std(), 'valid_percent': len(data_valid)/len(data)*100})
+
+                summary_stats.append(entry)
+
+        summary_df = pd.DataFrame(summary_stats)
+        if not summary_df.empty and export_summary:
+            outp = Path(output_folder) / "nucleus1000dvl_detailed_summary.csv"
+            outp.parent.mkdir(parents=True, exist_ok=True)
+            summary_df.to_csv(outp, index=False)
+            print(f"💾 Summary exported to: {outp}")
+
+        return summary_df
+
+    def create_static_overview_for_bag(self, bag_name, summary_stats=None, export_plots=False, output_folder="exports/outputs"):
+        """
+        Create the static 2x2 overview used as fallback when Plotly isn't available.
+        """
+        if bag_name is None:
+            print("❌ No bag specified for overview")
+            return
+
+        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+        fig.suptitle(f'Nucleus1000DVL Overview - {bag_name}', fontsize=16)
+
+        # Bottomtrack
+        if 'bottomtrack' in self.available_sensors:
+            data = self.load_sensor_data('bottomtrack', bag_name, verbose=False)
+            if isinstance(data, dict):
+                data = data.get(bag_name)
+            if data is not None and 'dvl_velocity_xyz.x' in data.columns:
+                valid_mask = data.get('data_valid', pd.Series([True] * len(data))) == True
+                data_valid = data[valid_mask]
+                if len(data_valid) > 0:
+                    axes[0,0].plot(data_valid['t_rel_min'], data_valid['dvl_velocity_xyz.x'], 'r-', alpha=0.7, label='X')
+                    axes[0,0].plot(data_valid['t_rel_min'], data_valid['dvl_velocity_xyz.y'], 'g-', alpha=0.7, label='Y')
+                    axes[0,0].plot(data_valid['t_rel_min'], data_valid['dvl_velocity_xyz.z'], 'b-', alpha=0.7, label='Z')
+                    axes[0,0].set_title('Bottom Track Velocity')
+                    axes[0,0].legend()
+                    axes[0,0].grid(True, alpha=0.3)
+
+        # INS trajectory
+        if 'ins' in self.available_sensors:
+            data = self.load_sensor_data('ins', bag_name, verbose=False)
+            if isinstance(data, dict):
+                data = data.get(bag_name)
+            if data is not None and 'positionFrame.x' in data.columns:
+                axes[0,1].plot(data['positionFrame.x'], data['positionFrame.y'], 'b-', alpha=0.7)
+                axes[0,1].scatter(data['positionFrame.x'].iloc[0], data['positionFrame.y'].iloc[0], c='green', s=100, marker='s', label='Start')
+                axes[0,1].scatter(data['positionFrame.x'].iloc[-1], data['positionFrame.y'].iloc[-1], c='red', s=100, marker='D', label='End')
+                axes[0,1].set_title('Vehicle Trajectory')
+                axes[0,1].set_xlabel('X Position (m)')
+                axes[0,1].set_ylabel('Y Position (m)')
+                axes[0,1].legend()
+                axes[0,1].grid(True, alpha=0.3)
+                axes[0,1].set_aspect('equal', adjustable='box')
+
+        # Altimeter
+        if 'altimeter' in self.available_sensors:
+            data = self.load_sensor_data('altimeter', bag_name, verbose=False)
+            if isinstance(data, dict):
+                data = data.get(bag_name)
+            if data is not None and 'altimeter_distance' in data.columns:
+                axes[1,0].plot(data['t_rel_min'], data['altimeter_distance'], 'purple', alpha=0.7)
+                axes[1,0].set_title('Altimeter Distance')
+                axes[1,0].set_ylabel('Distance (m)')
+                axes[1,0].set_xlabel('Time (minutes)')
+                axes[1,0].grid(True, alpha=0.3)
+
+        # Data summary
+        if summary_stats is not None and not summary_stats.empty:
+            sensors = [s for s in summary_stats['sensor'] if s is not None]
+            durations = [d for d in summary_stats['duration_min'] if d is not None]
+            if sensors and durations:
+                axes[1,1].bar(sensors, durations, alpha=0.7)
+                axes[1,1].set_title('Data Duration by Sensor')
+                axes[1,1].set_ylabel('Duration (minutes)')
+                axes[1,1].tick_params(axis='x', rotation=45)
+                axes[1,1].grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        if export_plots:
+            outp = Path(output_folder) / f"nucleus1000dvl_overview_{bag_name}.png"
+            outp.parent.mkdir(parents=True, exist_ok=True)
+            plt.savefig(outp, dpi=300, bbox_inches='tight')
+            print(f"💾 Saved overview plot: {outp}")
+        plt.show()
+
+    def run_navigation_guidance_analysis(self, bag_name, interactive=True):
+        """
+        Run the navigation/guidance notebook section via utils.navigation_guidance_analysis.
+        """
+        try:
+            import importlib
+            import utils.navigation_guidance_analysis as nav_guidance_utils
+            importlib.reload(nav_guidance_utils)
+
+            nav_analyzer = nav_guidance_utils.NavigationGuidanceAnalyzer(self.by_bag_folder)
+            print(f"📁 Running navigation/guidance analysis for bag: {bag_name}")
+            nav_analyzer.analyze_guidance_errors(bag_name, interactive=interactive)
+            nav_analyzer.analyze_navigation_plane(bag_name, interactive=interactive)
+            nav_analyzer.compare_navigation_guidance(bag_name, interactive=interactive)
+            return True
+        except Exception as e:
+            print(f"⚠️ Navigation/guidance analysis failed: {e}")
+            return False
     
     def export_data_summary(self, output_file="nucleus1000dvl_summary.csv"):
         """
@@ -1000,3 +1219,133 @@ def quick_trajectory_plot(bag_name=None, by_bag_folder="exports/by_bag"):
     analyzer = Nucleus1000DVLAnalyzer(by_bag_folder)
     analyzer.plot_trajectory_2d(bag_name)
     return analyzer
+
+
+def run_full_notebook_workflow(by_bag_folder="exports/by_bag", bag_selection=None,
+                               sensor_selection=None, export_summary=True, export_plots=False,
+                               output_folder="exports/outputs", interactive=HAS_PLOTLY,
+                               plot_style=None):
+    """
+    Run the main analysis workflow that the notebook performs.
+
+    This replicates the high-level steps found in the notebook:
+    - initialize analyzer
+    - discover available bags/sensors and print summary
+    - perform basic exploration for a selected bag
+    - create various plots (bottomtrack, trajectories, INS, multi-file comparisons)
+    - compute summary statistics and optionally export
+    - create dashboard (interactive if Plotly available)
+    - run DVL sensor comparison
+
+    Parameters mirror the top-level notebook configuration so the notebook
+    can call this single function.
+    """
+    print("🚀 Running full Nucleus1000DVL notebook workflow...")
+    analyzer = Nucleus1000DVLAnalyzer(by_bag_folder)
+
+    print(f"\n📋 Data Discovery Summary:")
+    print(f"   📅 Available bags: {len(analyzer.available_bags)}")
+    print(f"   🔧 Available sensors: {len(analyzer.available_sensors)}")
+
+    # Choose bag
+    selected_bag = bag_selection
+    if selected_bag is None and analyzer.available_bags:
+        selected_bag = analyzer.available_bags[0]
+
+    if selected_bag is None:
+        print("❌ No bag available. Aborting workflow.")
+        return {'error': 'no_bag'}
+
+    print(f"\n📅 Using bag: {selected_bag}")
+
+    # Basic exploration
+    print("\n📊 Basic data exploration for selected bag")
+    for sensor in analyzer.available_sensors:
+        print(f"\n🔧 {sensor.upper()} Data:")
+        data = analyzer.load_sensor_data(sensor, selected_bag, verbose=False)
+        if data is not None and len(data) > 0:
+            try:
+                duration_min = data['t_rel'].max() / 60.0 if 't_rel' in data.columns else 0
+            except Exception:
+                duration_min = 0
+            print(f"   📏 Shape: {data.shape}")
+            print(f"   ⏱️  Duration: {duration_min:.1f} minutes")
+        else:
+            print("   ❌ No data available")
+
+    # Generate targeted plots (non-interactive by default unless interactive True)
+    print("\n🚀 Generating plots (may open interactive windows if enabled)...")
+    # Bottomtrack
+    if 'bottomtrack' in analyzer.available_sensors:
+        try:
+            analyzer.plot_bottomtrack_velocity(selected_bag if selected_bag else None, interactive=interactive)
+        except Exception as e:
+            print(f"⚠️ Failed to plot bottomtrack: {e}")
+
+    # Trajectory
+    if 'ins' in analyzer.available_sensors:
+        try:
+            analyzer.plot_trajectory_2d(selected_bag if selected_bag else None, interactive=interactive)
+        except Exception as e:
+            print(f"⚠️ Failed to plot trajectory: {e}")
+
+    # INS data
+    try:
+        analyzer.plot_ins_data(selected_bag if selected_bag else None, variables=['position', 'velocity'], interactive=interactive)
+    except Exception as e:
+        print(f"⚠️ Failed to plot INS: {e}")
+
+    # Multi-file comparison across bags (if multiple)
+    if len(analyzer.available_bags) > 1:
+        try:
+            # Use existing quick plotting functions in the analyzer
+            print("\n📈 Running multi-file comparisons across bags...")
+            # Use the analyzer methods directly where useful
+            # The original notebook produced bottomtrack comparison; reuse that
+            analyzer.plot_bottomtrack_velocity(None, interactive=interactive)
+        except Exception as e:
+            print(f"⚠️ Multi-file comparison failed: {e}")
+
+    # Statistical summary and export
+    try:
+        print("\n📊 Computing summary statistics...")
+        # Reuse notebook-style summary generation
+        summary_stats = []
+        for sensor in analyzer.available_sensors:
+            for bag in analyzer.available_bags:
+                data = analyzer._load_single_file(f"nucleus1000dvl_{sensor}", bag, verbose=False)
+                if data is not None and len(data) > 0:
+                    duration_min = data['t_rel'].max() / 60.0 if 't_rel' in data.columns else 0
+                    sample_rate = len(data) / data['t_rel'].max() if 't_rel' in data.columns and data['t_rel'].max() > 0 else 0
+                    entry = {'sensor': sensor, 'bag': bag, 'samples': len(data), 'duration_min': duration_min, 'sample_rate_hz': sample_rate}
+                    summary_stats.append(entry)
+        if summary_stats:
+            summary_df = pd.DataFrame(summary_stats)
+            print(f"\n📋 Overall Summary: {len(summary_df)} datasets")
+            if export_summary:
+                outp = Path(output_folder) / "nucleus1000dvl_detailed_summary.csv"
+                outp.parent.mkdir(parents=True, exist_ok=True)
+                summary_df.to_csv(outp, index=False)
+                print(f"💾 Summary exported to: {outp}")
+    except Exception as e:
+        print(f"⚠️ Summary generation failed: {e}")
+
+    # Dashboard creation
+    try:
+        if interactive and HAS_PLOTLY:
+            print("\n🎛️ Creating interactive dashboard...")
+            create_comprehensive_dvl_dashboard(analyzer, bag_name=selected_bag, output_html="nucleus1000dvl_dashboard.html")
+        else:
+            print("\nℹ️ Skipping interactive dashboard (Plotly not available or interactive=False).")
+    except Exception as e:
+        print(f"⚠️ Dashboard creation failed: {e}")
+
+    # DVL sensor comparison
+    try:
+        print("\n🔍 Running DVL sensor comparison...")
+        analyzer.compare_dvl_sensors(selected_bag, interactive=interactive)
+    except Exception as e:
+        print(f"⚠️ DVL sensor comparison failed: {e}")
+
+    print("\n✅ Notebook workflow complete.")
+    return {'status': 'done', 'selected_bag': selected_bag}
