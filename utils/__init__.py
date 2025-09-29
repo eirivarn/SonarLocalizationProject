@@ -36,22 +36,12 @@ except ImportError:
     pass
 
 try:
-    from .net_line_utils import *
-except ImportError:
-    pass
-
-try:
     from .nucleus1000dvl_analysis import *
 except ImportError:
     pass
 
 try:
     from .sonar_distance_analysis import *
-except ImportError:
-    pass
-
-try:
-    from .synchronized_analysis import *
 except ImportError:
     pass
 

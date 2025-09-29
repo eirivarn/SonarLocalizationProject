@@ -25,7 +25,6 @@ from utils.sonar_utils import (
     cone_raster_like_display_cell,
 )
 
-
 class SonarVisualizer:
     """
     Main class for sonar data visualization with configurable parameters.
@@ -365,8 +364,6 @@ def analyze_bag_directly(bag_path: Union[str, Path], topic: str, frame_index: in
                 }
         raise IndexError(f"Frame index {frame_index} not found")
 
-
-def analyze_full_bag_statistics(bag_path: Union[str, Path], topic: str) -> Dict:
     """
     Aggregate simple stats across all frames of a ROS bag topic.
     """
