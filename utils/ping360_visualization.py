@@ -5,17 +5,13 @@ This module provides utilities for processing and visualizing Ping360 sonar data
 including data loading, preprocessing, TVG compensation, and visualization.
 """
 
-
 import json
-import math
 import pathlib
 from typing import Optional, Tuple, Union, List
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-
-
 
 class Ping360Visualizer:
     """

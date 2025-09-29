@@ -15,7 +15,7 @@ except ImportError:
 
 try:
     # Export video utilities (including optimized sonar video generator)
-    from .video_with_sonar import *
+    from .sonar_and_foto import *
 except ImportError:
     pass
 
@@ -26,7 +26,7 @@ except ImportError:
     pass
 
 try:
-    from .image_analysis_utils import *
+    from .sonar_image_analysis_utils import *
 except ImportError:
     pass
 
@@ -41,7 +41,7 @@ except ImportError:
     pass
 
 try:
-    from .sonar_distance_analysis import *
+    from .net_distance_analysis import *
 except ImportError:
     pass
 

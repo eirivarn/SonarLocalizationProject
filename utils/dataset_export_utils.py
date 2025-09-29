@@ -861,7 +861,6 @@ def export_camera_topic_to_png_sequence(
         "frames": frames_written,
     }
 
-
 def export_all_video_bags_to_mp4(
     data_dir: Union[str, Path],
     out_dir: Union[str, Path] = "exports",
