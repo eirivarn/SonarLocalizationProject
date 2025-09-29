@@ -10,11 +10,11 @@ This single script handles all SOLAQUA data export operations:
 - Cone NPZ creation from sonar data
 
 Usage:
-    python solaqua_export.py --help
-    python solaqua_export.py --data-dir data --exports-dir exports
-    python solaqua_export.py --data-dir data --exports-dir exports --all
-    python solaqua_export.py --data-dir data --exports-dir exports --csv-only
-    python solaqua_export.py --data-dir data --exports-dir exports --video-only
+    python3 solaqua_export.py --help
+    python3 solaqua_export.py --data-dir data --exports-dir exports
+    python3 solaqua_export.py --data-dir data --exports-dir exports --all
+    python3 solaqua_export.py --data-dir data --exports-dir exports --csv-only
+    python3 solaqua_export.py --data-dir data --exports-dir exports --video-only
 """
 
 import argparse
