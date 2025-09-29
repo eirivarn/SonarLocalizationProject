@@ -1,11 +1,7 @@
-import os
 import cv2
 import numpy as np
 import pandas as pd
-import matplotlib.cm as cm
 from pathlib import Path
-from datetime import datetime
-import time
 
 
 from utils.sonar_utils import (
