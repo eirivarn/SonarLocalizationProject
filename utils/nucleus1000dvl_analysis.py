@@ -4,10 +4,7 @@
 
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 from pathlib import Path
-import warnings
-from datetime import datetime
 
 # Check for optional libraries
 try:
@@ -220,10 +217,11 @@ class Nucleus1000DVLAnalyzer:
             data = {bag_name: data}
             plot_title = f"Bottom Track Velocity - {bag_name}"
         
-        if interactive:
+        # Always use interactive Plotly plots (matplotlib support removed)
+        if HAS_PLOTLY:
             self._plot_bottomtrack_interactive(data, bags_to_plot, plot_title)
         else:
-            self._plot_bottomtrack_matplotlib(data, bags_to_plot, plot_title)
+            print("❌ Plotly not available. Install plotly to view interactive plots.")
     
     def _plot_bottomtrack_interactive(self, data, bags_to_plot, title):
         """Create interactive bottomtrack velocity plot with plotly"""
@@ -300,48 +298,7 @@ class Nucleus1000DVLAnalyzer:
         
         fig.show()
     
-    def _plot_bottomtrack_matplotlib(self, data, bags_to_plot, title):
-        """Create matplotlib bottomtrack velocity plot"""
-        fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
-        fig.suptitle(title, fontsize=14)
-        
-        colors = plt.cm.Set1(np.linspace(0, 1, len(bags_to_plot)))
-        
-        for i, bag in enumerate(bags_to_plot):
-            df = data[bag]
-            if df is None or 'dvl_velocity_xyz.x' not in df.columns:
-                continue
-            
-            # Filter valid data
-            valid_mask = df['data_valid'] == True if 'data_valid' in df.columns else pd.Series([True] * len(df))
-            df_valid = df[valid_mask]
-            
-            if len(df_valid) == 0:
-                continue
-            
-            color = colors[i]
-            
-            # Plot velocities
-            axes[0].plot(df_valid['t_rel_min'], df_valid['dvl_velocity_xyz.x'], 
-                        color=color, label=f"{bag}", alpha=0.7)
-            axes[1].plot(df_valid['t_rel_min'], df_valid['dvl_velocity_xyz.y'], 
-                        color=color, alpha=0.7)
-            axes[2].plot(df_valid['t_rel_min'], df_valid['dvl_velocity_xyz.z'], 
-                        color=color, alpha=0.7)
-        
-        # Formatting
-        axes[0].set_ylabel('X Velocity (m/s)')
-        axes[1].set_ylabel('Y Velocity (m/s)')
-        axes[2].set_ylabel('Z Velocity (m/s)')
-        axes[2].set_xlabel('Time (minutes)')
-        
-        axes[0].legend()
-        axes[0].grid(True, alpha=0.3)
-        axes[1].grid(True, alpha=0.3)
-        axes[2].grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        plt.show()
+    # Matplotlib-based plotting support removed. Use Plotly interactive helpers instead.
     
     def plot_ins_data(self, bag_name=None, variables=['quaternion', 'position', 'velocity'], interactive=True):
         """
@@ -375,10 +332,11 @@ class Nucleus1000DVLAnalyzer:
             print(f"❌ No INS data for {bag_name}")
             return
         
-        if interactive:
+        # Always use interactive Plotly plots (matplotlib support removed)
+        if HAS_PLOTLY:
             self._plot_ins_interactive(df, variables, title)
         else:
-            self._plot_ins_matplotlib(df, variables, title)
+            print("❌ Plotly not available. Install plotly to view interactive plots.")
     
     def _plot_ins_interactive(self, df, variables, title):
         """Create interactive INS plot with plotly"""
@@ -418,50 +376,7 @@ class Nucleus1000DVLAnalyzer:
         fig.update_xaxes(title_text="Time (minutes)", row=n_vars, col=1)
         fig.show()
     
-    def _plot_ins_matplotlib(self, df, variables, title):
-        """Create matplotlib INS plot"""
-        n_vars = len(variables)
-        fig, axes = plt.subplots(n_vars, 1, figsize=(12, 3*n_vars), sharex=True)
-        if n_vars == 1:
-            axes = [axes]
-        
-        fig.suptitle(title, fontsize=14)
-        
-        for i, var in enumerate(variables):
-            ax = axes[i]
-            
-            if var == 'quaternion' and all(col in df.columns for col in ['quaternion.x', 'quaternion.y', 'quaternion.z', 'quaternion.w']):
-                ax.plot(df['t_rel_min'], df['quaternion.x'], 'r-', label='qx', alpha=0.7)
-                ax.plot(df['t_rel_min'], df['quaternion.y'], 'g-', label='qy', alpha=0.7)
-                ax.plot(df['t_rel_min'], df['quaternion.z'], 'b-', label='qz', alpha=0.7)
-                ax.plot(df['t_rel_min'], df['quaternion.w'], 'orange', label='qw', alpha=0.7)
-                ax.set_ylabel('Quaternion')
-                
-            elif var == 'position' and all(col in df.columns for col in ['positionFrame.x', 'positionFrame.y', 'positionFrame.z']):
-                ax.plot(df['t_rel_min'], df['positionFrame.x'], 'r-', label='x', alpha=0.7)
-                ax.plot(df['t_rel_min'], df['positionFrame.y'], 'g-', label='y', alpha=0.7)
-                ax.plot(df['t_rel_min'], df['positionFrame.z'], 'b-', label='z', alpha=0.7)
-                ax.set_ylabel('Position (m)')
-                
-            elif var == 'velocity' and all(col in df.columns for col in ['velocityNed.x', 'velocityNed.y', 'velocityNed.z']):
-                ax.plot(df['t_rel_min'], df['velocityNed.x'], 'r-', label='North', alpha=0.7)
-                ax.plot(df['t_rel_min'], df['velocityNed.y'], 'g-', label='East', alpha=0.7)
-                ax.plot(df['t_rel_min'], df['velocityNed.z'], 'b-', label='Down', alpha=0.7)
-                ax.set_ylabel('Velocity (m/s)')
-                
-            elif var == 'turnrate' and all(col in df.columns for col in ['turnRate.x', 'turnRate.y', 'turnRate.z']):
-                ax.plot(df['t_rel_min'], df['turnRate.x'], 'r-', label='roll rate', alpha=0.7)
-                ax.plot(df['t_rel_min'], df['turnRate.y'], 'g-', label='pitch rate', alpha=0.7)
-                ax.plot(df['t_rel_min'], df['turnRate.z'], 'b-', label='yaw rate', alpha=0.7)
-                ax.set_ylabel('Turn Rate (deg/s)')
-            
-            ax.legend()
-            ax.grid(True, alpha=0.3)
-            ax.set_title(var.title())
-        
-        axes[-1].set_xlabel('Time (minutes)')
-        plt.tight_layout()
-        plt.show()
+    # Matplotlib-based plotting support removed. Use Plotly interactive helpers instead.
     
     def plot_trajectory_2d(self, bag_name=None, interactive=True):
         """
@@ -488,10 +403,11 @@ class Nucleus1000DVLAnalyzer:
             data = {bag_name: data}
             title = f"Vehicle Trajectory - {bag_name}"
         
-        if interactive:
+        # Always use interactive Plotly plots (matplotlib support removed)
+        if HAS_PLOTLY:
             self._plot_trajectory_2d_interactive(data, bags_to_plot, title)
         else:
-            self._plot_trajectory_2d_matplotlib(data, bags_to_plot, title)
+            print("❌ Plotly not available. Install plotly to view interactive plots.")
     
     def _plot_trajectory_2d_interactive(self, data, bags_to_plot, title):
         """Create interactive 2D trajectory plot"""
@@ -547,39 +463,7 @@ class Nucleus1000DVLAnalyzer:
         
         fig.show()
     
-    def _plot_trajectory_2d_matplotlib(self, data, bags_to_plot, title):
-        """Create matplotlib 2D trajectory plot"""
-        fig, ax = plt.subplots(figsize=(10, 8))
-        
-        colors = plt.cm.Set1(np.linspace(0, 1, len(bags_to_plot)))
-        
-        for i, bag in enumerate(bags_to_plot):
-            df = data[bag]
-            if df is None or 'positionFrame.x' not in df.columns:
-                continue
-            
-            color = colors[i]
-            
-            # Plot trajectory
-            ax.plot(df['positionFrame.x'], df['positionFrame.y'], 
-                   color=color, label=bag, alpha=0.7, linewidth=2)
-            
-            # Add start and end markers
-            if len(df) > 0:
-                ax.scatter(df['positionFrame.x'].iloc[0], df['positionFrame.y'].iloc[0], 
-                          color=color, s=100, marker='s', alpha=0.8, edgecolor='black')
-                ax.scatter(df['positionFrame.x'].iloc[-1], df['positionFrame.y'].iloc[-1], 
-                          color=color, s=100, marker='D', alpha=0.8, edgecolor='black')
-        
-        ax.set_xlabel('X Position (m)')
-        ax.set_ylabel('Y Position (m)')
-        ax.set_title(title)
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        ax.set_aspect('equal', adjustable='box')
-        
-        plt.tight_layout()
-        plt.show()
+    # Matplotlib-based plotting support removed. Use Plotly interactive helpers instead.
 
     # -------------------------
     # Notebook helper methods
@@ -620,57 +504,14 @@ class Nucleus1000DVLAnalyzer:
             return
 
         print(f"📊 Comparing bottomtrack across {len(self.available_bags)} bags")
-        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-        fig.suptitle('Bottom Track Velocity Comparison Across Bags', fontsize=14)
-
-        colors = plt.cm.Set1(np.linspace(0, 1, len(self.available_bags)))
-
-        for i, bag in enumerate(self.available_bags):
-            data = self.load_sensor_data("bottomtrack", bag, verbose=False)
-            if isinstance(data, dict):
-                data = data.get(bag)
-            if data is None or 'dvl_velocity_xyz.x' not in data.columns:
-                continue
-
-            valid_mask = data.get('data_valid', pd.Series([True] * len(data))) == True
-            data_valid = data[valid_mask]
-            if len(data_valid) == 0:
-                continue
-
-            color = colors[i]
-            axes[0,0].plot(data_valid['t_rel_min'], data_valid['dvl_velocity_xyz.x'], color=color, label=bag, alpha=0.7)
-            axes[0,1].plot(data_valid['t_rel_min'], data_valid['dvl_velocity_xyz.y'], color=color, alpha=0.7)
-            axes[1,0].plot(data_valid['t_rel_min'], data_valid['dvl_velocity_xyz.z'], color=color, alpha=0.7)
-            speed = np.sqrt(data_valid['dvl_velocity_xyz.x']**2 + data_valid['dvl_velocity_xyz.y']**2 + data_valid['dvl_velocity_xyz.z']**2)
-            axes[1,1].plot(data_valid['t_rel_min'], speed, color=color, alpha=0.7)
-
-        # Format subplots
-        axes[0,0].set_title('X Velocity')
-        axes[0,0].set_ylabel('Velocity (m/s)')
-        axes[0,0].legend()
-        axes[0,0].grid(True, alpha=0.3)
-
-        axes[0,1].set_title('Y Velocity')
-        axes[0,1].set_ylabel('Velocity (m/s)')
-        axes[0,1].grid(True, alpha=0.3)
-
-        axes[1,0].set_title('Z Velocity')
-        axes[1,0].set_ylabel('Velocity (m/s)')
-        axes[1,0].set_xlabel('Time (minutes)')
-        axes[1,0].grid(True, alpha=0.3)
-
-        axes[1,1].set_title('Speed Magnitude')
-        axes[1,1].set_ylabel('Speed (m/s)')
-        axes[1,1].set_xlabel('Time (minutes)')
-        axes[1,1].grid(True, alpha=0.3)
-
-        plt.tight_layout()
-        if export_plots:
-            outp = Path(output_folder) / "bottomtrack_comparison.png"
-            outp.parent.mkdir(parents=True, exist_ok=True)
-            plt.savefig(outp, dpi=300, bbox_inches='tight')
-            print(f"💾 Saved plot: {outp}")
-        plt.show()
+        # Delegate to the interactive bottomtrack plot (handles multi-bag)
+        if HAS_PLOTLY:
+            try:
+                self.plot_bottomtrack_velocity(None, interactive=True)
+            except Exception as e:
+                print(f"⚠️ Failed to create interactive bottomtrack comparison: {e}")
+        else:
+            print("❌ Plotly not available. Install plotly to view interactive comparisons.")
 
     def compute_summary_stats(self, export_summary=True, output_folder="exports/outputs"):
         """
@@ -707,80 +548,6 @@ class Nucleus1000DVLAnalyzer:
 
         return summary_df
 
-    def create_static_overview_for_bag(self, bag_name, summary_stats=None, export_plots=False, output_folder="exports/outputs"):
-        """
-        Create the static 2x2 overview used as fallback when Plotly isn't available.
-        """
-        if bag_name is None:
-            print("❌ No bag specified for overview")
-            return
-
-        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-        fig.suptitle(f'Nucleus1000DVL Overview - {bag_name}', fontsize=16)
-
-        # Bottomtrack
-        if 'bottomtrack' in self.available_sensors:
-            data = self.load_sensor_data('bottomtrack', bag_name, verbose=False)
-            if isinstance(data, dict):
-                data = data.get(bag_name)
-            if data is not None and 'dvl_velocity_xyz.x' in data.columns:
-                valid_mask = data.get('data_valid', pd.Series([True] * len(data))) == True
-                data_valid = data[valid_mask]
-                if len(data_valid) > 0:
-                    axes[0,0].plot(data_valid['t_rel_min'], data_valid['dvl_velocity_xyz.x'], 'r-', alpha=0.7, label='X')
-                    axes[0,0].plot(data_valid['t_rel_min'], data_valid['dvl_velocity_xyz.y'], 'g-', alpha=0.7, label='Y')
-                    axes[0,0].plot(data_valid['t_rel_min'], data_valid['dvl_velocity_xyz.z'], 'b-', alpha=0.7, label='Z')
-                    axes[0,0].set_title('Bottom Track Velocity')
-                    axes[0,0].legend()
-                    axes[0,0].grid(True, alpha=0.3)
-
-        # INS trajectory
-        if 'ins' in self.available_sensors:
-            data = self.load_sensor_data('ins', bag_name, verbose=False)
-            if isinstance(data, dict):
-                data = data.get(bag_name)
-            if data is not None and 'positionFrame.x' in data.columns:
-                axes[0,1].plot(data['positionFrame.x'], data['positionFrame.y'], 'b-', alpha=0.7)
-                axes[0,1].scatter(data['positionFrame.x'].iloc[0], data['positionFrame.y'].iloc[0], c='green', s=100, marker='s', label='Start')
-                axes[0,1].scatter(data['positionFrame.x'].iloc[-1], data['positionFrame.y'].iloc[-1], c='red', s=100, marker='D', label='End')
-                axes[0,1].set_title('Vehicle Trajectory')
-                axes[0,1].set_xlabel('X Position (m)')
-                axes[0,1].set_ylabel('Y Position (m)')
-                axes[0,1].legend()
-                axes[0,1].grid(True, alpha=0.3)
-                axes[0,1].set_aspect('equal', adjustable='box')
-
-        # Altimeter
-        if 'altimeter' in self.available_sensors:
-            data = self.load_sensor_data('altimeter', bag_name, verbose=False)
-            if isinstance(data, dict):
-                data = data.get(bag_name)
-            if data is not None and 'altimeter_distance' in data.columns:
-                axes[1,0].plot(data['t_rel_min'], data['altimeter_distance'], 'purple', alpha=0.7)
-                axes[1,0].set_title('Altimeter Distance')
-                axes[1,0].set_ylabel('Distance (m)')
-                axes[1,0].set_xlabel('Time (minutes)')
-                axes[1,0].grid(True, alpha=0.3)
-
-        # Data summary
-        if summary_stats is not None and not summary_stats.empty:
-            sensors = [s for s in summary_stats['sensor'] if s is not None]
-            durations = [d for d in summary_stats['duration_min'] if d is not None]
-            if sensors and durations:
-                axes[1,1].bar(sensors, durations, alpha=0.7)
-                axes[1,1].set_title('Data Duration by Sensor')
-                axes[1,1].set_ylabel('Duration (minutes)')
-                axes[1,1].tick_params(axis='x', rotation=45)
-                axes[1,1].grid(True, alpha=0.3)
-
-        plt.tight_layout()
-        if export_plots:
-            outp = Path(output_folder) / f"nucleus1000dvl_overview_{bag_name}.png"
-            outp.parent.mkdir(parents=True, exist_ok=True)
-            plt.savefig(outp, dpi=300, bbox_inches='tight')
-            print(f"💾 Saved overview plot: {outp}")
-        plt.show()
-
     def run_navigation_guidance_analysis(self, bag_name, interactive=True):
         """
         Run the navigation/guidance notebook section via utils.navigation_guidance_analysis.
@@ -799,42 +566,7 @@ class Nucleus1000DVLAnalyzer:
         except Exception as e:
             print(f"⚠️ Navigation/guidance analysis failed: {e}")
             return False
-    
-    def export_data_summary(self, output_file="nucleus1000dvl_summary.csv"):
-        """
-        Export a summary of all available data to CSV
-        
-        Parameters:
-        -----------
-        output_file : str
-            Output CSV filename
-        """
-        summary_data = []
-        
-        for sensor in self.available_sensors:
-            for bag in self.available_bags:
-                data = self._load_single_file(f"nucleus1000dvl_{sensor}", bag, verbose=False)
-                
-                if data is not None:
-                    summary_data.append({
-                        'sensor': sensor,
-                        'bag': bag,
-                        'samples': len(data),
-                        'duration_min': data['t_rel'].max() / 60.0 if 't_rel' in data.columns else 0,
-                        'start_time': data['datetime'].min() if 'datetime' in data.columns else None,
-                        'end_time': data['datetime'].max() if 'datetime' in data.columns else None,
-                        'columns': len(data.columns)
-                    })
-        
-        summary_df = pd.DataFrame(summary_data)
-        
-        # Save to exports/outputs folder
-        output_path = Path("exports/outputs") / output_file
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        summary_df.to_csv(output_path, index=False)
-        print(f"✅ Summary exported to: {output_path}")
-        
+ 
     def compare_dvl_sensors(self, bag_name=None, interactive=True):
         """
         Compare nucleus1000dvl vs sensor_dvl position and velocity data
@@ -982,118 +714,8 @@ class Nucleus1000DVLAnalyzer:
         
         fig.show()
     
-    def _compare_dvl_matplotlib(self, nucleus_bt, nucleus_ins, sensor_pos, sensor_vel, bag_name):
-        """Create matplotlib DVL comparison plot"""
-        fig, axes = plt.subplots(3, 2, figsize=(16, 12), sharex=True)
-        fig.suptitle(f'DVL Sensor Comparison - {bag_name}', fontsize=14)
-        
-        # Velocity comparisons
-        if nucleus_bt is not None and 'dvl_velocity_xyz.x' in nucleus_bt.columns:
-            valid_mask = nucleus_bt.get('data_valid', pd.Series([True] * len(nucleus_bt))) == True
-            nucleus_valid = nucleus_bt[valid_mask]
-            
-            if len(nucleus_valid) > 0:
-                axes[0,0].plot(nucleus_valid['t_rel_min'], nucleus_valid['dvl_velocity_xyz.x'], 
-                             'r-', label='Nucleus1000', alpha=0.7)
-                axes[0,1].plot(nucleus_valid['t_rel_min'], nucleus_valid['dvl_velocity_xyz.y'], 
-                             'r-', alpha=0.7)
-                axes[1,0].plot(nucleus_valid['t_rel_min'], nucleus_valid['dvl_velocity_xyz.z'], 
-                             'r-', alpha=0.7)
-        
-        if sensor_vel is not None and 'velocity.x' in sensor_vel.columns:
-            axes[0,0].plot(sensor_vel['t_rel_min'], sensor_vel['velocity.x'], 
-                         'b--', label='Sensor DVL', alpha=0.7)
-            axes[0,1].plot(sensor_vel['t_rel_min'], sensor_vel['velocity.y'], 
-                         'b--', alpha=0.7)
-            axes[1,0].plot(sensor_vel['t_rel_min'], sensor_vel['velocity.z'], 
-                         'b--', alpha=0.7)
-        
-        # Position comparisons
-        if nucleus_ins is not None and 'positionFrame.x' in nucleus_ins.columns:
-            axes[1,1].plot(nucleus_ins['t_rel_min'], nucleus_ins['positionFrame.x'], 
-                         'g-', label='Nucleus1000', alpha=0.7)
-            axes[2,0].plot(nucleus_ins['t_rel_min'], nucleus_ins['positionFrame.y'], 
-                         'g-', alpha=0.7)
-            axes[2,1].plot(nucleus_ins['t_rel_min'], nucleus_ins['positionFrame.z'], 
-                         'purple', alpha=0.7)
-        
-        if sensor_pos is not None and 'x' in sensor_pos.columns:
-            axes[1,1].plot(sensor_pos['t_rel_min'], sensor_pos['x'], 
-                         'orange', linestyle='--', label='Sensor DVL', alpha=0.7)
-            axes[2,0].plot(sensor_pos['t_rel_min'], sensor_pos['y'], 
-                         'orange', linestyle='--', alpha=0.7)
-            axes[2,1].plot(sensor_pos['t_rel_min'], sensor_pos['z'], 
-                         'purple', linestyle='--', alpha=0.7)
-        
-        # Format subplots
-        axes[0,0].set_title('X Velocity')
-        axes[0,0].set_ylabel('Velocity (m/s)')
-        axes[0,0].legend()
-        axes[0,0].grid(True, alpha=0.3)
-        
-        axes[0,1].set_title('Y Velocity')
-        axes[0,1].set_ylabel('Velocity (m/s)')
-        axes[0,1].grid(True, alpha=0.3)
-        
-        axes[1,0].set_title('Z Velocity')
-        axes[1,0].set_ylabel('Velocity (m/s)')
-        axes[1,0].grid(True, alpha=0.3)
-        
-        axes[1,1].set_title('X Position')
-        axes[1,1].set_ylabel('Position (m)')
-        axes[1,1].legend()
-        axes[1,1].grid(True, alpha=0.3)
-        
-        axes[2,0].set_title('Y Position')
-        axes[2,0].set_ylabel('Position (m)')
-        axes[2,0].set_xlabel('Time (minutes)')
-        axes[2,0].grid(True, alpha=0.3)
-        
-        axes[2,1].set_title('Z Position')
-        axes[2,1].set_ylabel('Position (m)')
-        axes[2,1].set_xlabel('Time (minutes)')
-        axes[2,1].grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        plt.show()
+    # Matplotlib-based DVL comparison removed. Use _compare_dvl_interactive instead.
     
-    def export_data_summary(self, output_file="nucleus1000dvl_summary.csv"):
-        """
-        Export a summary of all available data to CSV
-        
-        Parameters:
-        -----------
-        output_file : str
-            Output CSV filename
-        """
-        summary_data = []
-        
-        for sensor in self.available_sensors:
-            for bag in self.available_bags:
-                data = self._load_single_file(f"nucleus1000dvl_{sensor}", bag, verbose=False)
-                
-                if data is not None:
-                    summary_data.append({
-                        'sensor': sensor,
-                        'bag': bag,
-                        'samples': len(data),
-                        'duration_min': data['t_rel'].max() / 60.0 if 't_rel' in data.columns else 0,
-                        'start_time': data['datetime'].min() if 'datetime' in data.columns else None,
-                        'end_time': data['datetime'].max() if 'datetime' in data.columns else None,
-                        'columns': len(data.columns)
-                    })
-        
-        summary_df = pd.DataFrame(summary_data)
-        
-        # Save to exports/outputs folder
-        output_path = Path("exports/outputs") / output_file
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        summary_df.to_csv(output_path, index=False)
-        print(f"✅ Summary exported to: {output_path}")
-        
-        return summary_df
-
 
 def create_comprehensive_dvl_dashboard(analyzer, bag_name=None, output_html="dvl_dashboard.html"):
     """
@@ -1199,26 +821,6 @@ def create_comprehensive_dvl_dashboard(analyzer, bag_name=None, output_html="dvl
     print(f"📊 Dashboard saved to: {output_path}")
     
     return fig
-
-
-# Convenience functions
-def quick_load_dvl_data(by_bag_folder="exports/by_bag"):
-    """Quick function to create and return analyzer"""
-    return Nucleus1000DVLAnalyzer(by_bag_folder)
-
-
-def quick_bottomtrack_plot(bag_name=None, by_bag_folder="exports/by_bag"):
-    """Quick function to plot bottomtrack data"""
-    analyzer = Nucleus1000DVLAnalyzer(by_bag_folder)
-    analyzer.plot_bottomtrack_velocity(bag_name)
-    return analyzer
-
-
-def quick_trajectory_plot(bag_name=None, by_bag_folder="exports/by_bag"):
-    """Quick function to plot trajectory"""
-    analyzer = Nucleus1000DVLAnalyzer(by_bag_folder)
-    analyzer.plot_trajectory_2d(bag_name)
-    return analyzer
 
 
 def run_full_notebook_workflow(by_bag_folder="exports/by_bag", bag_selection=None,
