@@ -16,7 +16,6 @@ from typing import Dict, List, Optional, Tuple, Any
 # SOLAQUA utilities
 import utils.sonar_utils as sonar_utils
 import utils.image_analysis_utils as iau
-import utils.enhanced_net_detection as end
 import utils.navigation_guidance_analysis as nav_utils
 
 # Scientific computing

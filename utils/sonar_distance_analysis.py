@@ -14,11 +14,7 @@ import numpy as np
 from pathlib import Path
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
-from typing import Dict, Tuple, Optional, List
-import warnings
-
-# Import sonar utilities
-import utils.sonar_utils as sonar_utils
+from typing import Dict, Tuple, Optional
 
 def load_all_distance_data_for_bag(target_bag: str, exports_folder: str = "/Users/eirikvarnes/code/SOLAQUA/exports") -> Tuple[Dict, Dict]:
     """
