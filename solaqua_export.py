@@ -24,26 +24,47 @@ from typing import Dict, List, Optional, Union
 
 import pandas as pd
 
-# Import our utility modules
-from utils.data_export import (
+# Import our consolidated utility module
+from utils.dataset_export_utils import (
     save_all_topics_from_data_bags,
-    list_topics_in_bag
-)
-from utils.video_export import (
+    list_topics_in_bag,
     export_all_video_bags_to_mp4,
     export_all_video_bags_to_png,
     export_camera_info_for_bag,
-    list_camera_topics_in_bag
+    list_camera_topics_in_bag,
+    find_data_bags,
+    find_video_bags,
 )
-from utils.reporting import (
-    load_data_index,
-    list_exported_bag_stems,
-    overview_by_bag
-)
-from utils.core import find_data_bags, find_video_bags
 import utils.sonar_utils as sonar_utils
-import utils.image_analysis_utils as iau
 
+
+# ------------------------------ Convenience listings ------------------------------
+
+def load_data_index(out_dir: Path | str = "exports") -> pd.DataFrame:
+    """
+    Load the index created by save_all_topics_from_data_bags().
+    Looks for exports/index_data_topics.csv (or .parquet).
+    """
+    out_dir = Path(out_dir)
+    csv = out_dir / "index_data_topics.csv"
+    pq  = out_dir / "index_data_topics.parquet"
+    if csv.exists():
+        return pd.read_csv(csv)
+    if pq.exists():
+        return pd.read_parquet(pq)
+    raise FileNotFoundError(
+        f"Could not find index_data_topics.csv or .parquet under {out_dir}. "
+        "Run save_all_topics_from_data_bags() first."
+    )
+
+
+def list_exported_bag_stems(out_dir: Path | str = "exports",
+                            bag_suffix: str = "_data") -> List[str]:
+    """Return bag stems present in the export index, optionally filtered by suffix."""
+    idx = load_data_index(out_dir)
+    if bag_suffix:
+        idx = idx[idx["bag"].str.endswith(bag_suffix)]
+    return sorted(idx["bag"].unique().tolist())
 
 class SOLAQUACompleteExporter:
     """
