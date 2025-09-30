@@ -809,6 +809,178 @@ def compare_sonar_vs_dvl(distance_results: pd.DataFrame,
         'dvl_duration_s': dvl_span,
     }
 
+# ============================ Interactive Plotly Version ============================
+
+def interactive_distance_comparison(distance_results: pd.DataFrame,
+                                   raw_data: Dict[str, pd.DataFrame],
+                                   distance_measurements: Dict[str, pd.DataFrame] | None = None,
+                                   sonar_coverage_m: float = 5.0,
+                                   sonar_image_size: int = 700):
+    """
+    Interactive plotly version showing distance over time with raw/smoothed sonar and DVL data.
+    """
+    try:
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+    except ImportError:
+        print("❌ Plotly not available. Install with: pip install plotly")
+        return None, {'error': 'plotly_not_available'}
+
+    if raw_data is None or 'navigation' not in raw_data or raw_data['navigation'] is None:
+        return None, {'error': 'no_navigation_data'}
+    if distance_results is None:
+        return None, {'error': 'no_distance_results'}
+
+    nav = raw_data['navigation'].copy()
+    nav['timestamp'] = pd.to_datetime(nav['timestamp'], errors='coerce')
+    nav = nav.dropna(subset=['timestamp'])
+    nav['relative_time'] = (nav['timestamp'] - nav['timestamp'].min()).dt.total_seconds()
+
+    # Prepare sonar data
+    if distance_measurements and isinstance(distance_measurements.get('sonar'), pd.DataFrame):
+        sonar = distance_measurements['sonar'].copy()
+        if 'frame_index' not in sonar and 'frame_idx' in sonar:
+            sonar = sonar.rename(columns={'frame_idx': 'frame_index'})
+        if 'distance_pixels' not in sonar and 'distance' in sonar:
+            sonar = sonar.rename(columns={'distance': 'distance_pixels'})
+    else:
+        sonar = distance_results.copy()
+
+    if 'distance_meters' in sonar.columns:
+        sonar['distance_meters_raw'] = sonar['distance_meters']
+    else:
+        ppm = float(sonar_image_size) / float(sonar_coverage_m)
+        sonar['distance_meters'] = sonar['distance_pixels'] / ppm
+        sonar['distance_meters_raw'] = sonar['distance_meters']
+
+    # Apply smoothing to sonar data
+    from scipy.signal import savgol_filter
+    window_size = min(15, len(sonar) // 2 * 2 + 1)  # Ensure odd window size
+    if len(sonar) > window_size:
+        sonar['distance_meters_smoothed'] = savgol_filter(sonar['distance_meters'], window_size, 3)
+    else:
+        sonar['distance_meters_smoothed'] = sonar['distance_meters']
+
+    # Stretch sonar time to match DVL duration
+    dvl_duration = float(max(1.0, (nav['relative_time'].max() - nav['relative_time'].min())))
+    N = max(1, len(sonar) - 1)
+    if 'frame_index' not in sonar:
+        sonar['frame_index'] = np.arange(len(sonar))
+    sonar['time_seconds'] = (sonar['frame_index'] / float(N)) * dvl_duration
+
+    # Check if pitch data is available
+    has_pitch = 'NetPitch' in nav.columns and nav['NetPitch'].notna().any()
+
+    # Create interactive plot with subplots
+    if has_pitch:
+        fig = make_subplots(
+            rows=2, cols=1,
+            subplot_titles=("Distance Comparison", "Pitch Comparison"),
+            specs=[[{"secondary_y": False}], [{"secondary_y": False}]]
+        )
+    else:
+        fig = make_subplots(specs=[[{"secondary_y": False}]])
+
+    # Add distance traces
+    fig.add_trace(
+        go.Scatter(
+            x=sonar['time_seconds'],
+            y=sonar['distance_meters_raw'],
+            mode='lines',
+            name='Sonar Raw Distance',
+            line=dict(color='rgba(255, 0, 0, 0.3)', width=1),
+            hovertemplate='Time: %{x:.1f}s<br>Distance: %{y:.3f}m<extra>Sonar Raw</extra>'
+        ),
+        row=1, col=1
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=sonar['time_seconds'],
+            y=sonar['distance_meters_smoothed'],
+            mode='lines',
+            name='Sonar Smoothed Distance',
+            line=dict(color='rgba(255, 0, 0, 1)', width=3),
+            hovertemplate='Time: %{x:.1f}s<br>Distance: %{y:.3f}m<extra>Sonar Smoothed</extra>'
+        ),
+        row=1, col=1
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=nav['relative_time'],
+            y=nav['NetDistance'],
+            mode='lines',
+            name='DVL Distance',
+            line=dict(color='rgba(0, 0, 255, 1)', width=3),
+            hovertemplate='Time: %{x:.1f}s<br>Distance: %{y:.3f}m<extra>DVL Distance</extra>'
+        ),
+        row=1, col=1
+    )
+
+    # Add pitch traces if available
+    if has_pitch:
+        # Sonar pitch (from angle_degrees, convert to similar scale as DVL)
+        sonar_pitch = sonar.get('angle_degrees', pd.Series([0] * len(sonar)))
+        
+        fig.add_trace(
+            go.Scatter(
+                x=sonar['time_seconds'],
+                y=sonar_pitch,
+                mode='lines',
+                name='Sonar Pitch (from contour)',
+                line=dict(color='rgba(255, 165, 0, 1)', width=3),
+                hovertemplate='Time: %{x:.1f}s<br>Pitch: %{y:.1f}°<extra>Sonar Pitch</extra>'
+            ),
+            row=2, col=1
+        )
+
+        fig.add_trace(
+            go.Scatter(
+                x=nav['relative_time'],
+                y=np.degrees(nav['NetPitch']),  # Convert radians to degrees
+                mode='lines',
+                name='DVL Pitch',
+                line=dict(color='rgba(0, 128, 0, 1)', width=3),
+                hovertemplate='Time: %{x:.1f}s<br>Pitch: %{y:.1f}°<extra>DVL Pitch</extra>'
+            ),
+            row=2, col=1
+        )
+
+    # Update layout
+    if has_pitch:
+        fig.update_layout(
+            title="🔄 Interactive Distance & Pitch Comparison: Sonar vs DVL",
+            hovermode='x unified',
+            height=800
+        )
+        fig.update_xaxes(title_text="Time (seconds)", row=1, col=1)
+        fig.update_xaxes(title_text="Time (seconds)", row=2, col=1)
+        fig.update_yaxes(title_text="Distance (meters)", row=1, col=1)
+        fig.update_yaxes(title_text="Pitch (degrees)", row=2, col=1)
+    else:
+        fig.update_layout(
+            title="🔄 Interactive Distance Comparison: Sonar vs DVL",
+            xaxis_title="Time (seconds)",
+            yaxis_title="Distance (meters)",
+            hovermode='x unified'
+        )
+
+    fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='LightGray')
+    fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='LightGray')
+
+    # Calculate basic stats
+    sonar_mean = float(np.nanmean(sonar['distance_meters_smoothed']))
+    dvl_mean = float(nav['NetDistance'].mean())
+
+    return fig, {
+        'sonar_mean_m': sonar_mean,
+        'dvl_mean_m': dvl_mean,
+        'sonar_frames': len(sonar),
+        'dvl_records': len(nav),
+        'time_span_s': dvl_duration
+    }
+
 # ============================ Visualization helpers (kept but DRY inside) ============================
 
 def basic_image_processing_pipeline(img_u8: np.ndarray, show=True, figsize=(15, 10)) -> Dict[str, np.ndarray]:

@@ -236,10 +236,46 @@ def export_optimized_sonar_video(
                         if min_dt <= pd.Timedelta(f"{NET_DISTANCE_TOLERANCE}s") and "NetDistance" in rec and pd.notna(rec["NetDistance"]):
                             net_distance = float(rec["NetDistance"])
                             sync_status = "DISTANCE_OK"
-                            if min_dt <= pd.Timedelta(f"{NET_PITCH_TOLERANCE}s") and "NetPitch" in rec and pd.notna(rec["NetPitch"]):
-                                # NetPitch sign convention: invert sign to match display coordinate system
-                                net_angle_deg = -float(np.degrees(rec["NetPitch"]))
+
+                            # Try to get pitch data - be very lenient
+                            pitch_time_window = max(NET_PITCH_TOLERANCE, 2.0)  # At least 2 second window for pitch
+
+                            # First, check if the current record has pitch
+                            if "NetPitch" in rec and pd.notna(rec["NetPitch"]):
+                                net_angle_deg = float(np.degrees(rec["NetPitch"]))
                                 sync_status = "FULL_SYNC"
+                                print(f"Frame {frame_idx}: Using pitch from current record: {net_angle_deg:.1f}°")
+                            # If not, look for the closest pitch data within time window
+                            elif min_dt <= pd.Timedelta(f"{pitch_time_window}s"):
+                                # Find closest record with valid pitch
+                                pitch_candidates = nav_complete[nav_complete["NetPitch"].notna()]
+                                if len(pitch_candidates) > 0:
+                                    pitch_diffs = abs(pitch_candidates["timestamp"] - ts_target)
+                                    pitch_idx = pitch_diffs.idxmin()
+                                    pitch_min_dt = pitch_diffs.iloc[pitch_idx]
+
+                                    if pitch_min_dt <= pd.Timedelta(f"{pitch_time_window}s"):
+                                        pitch_rec = pitch_candidates.loc[pitch_idx]
+                                        net_angle_deg = float(np.degrees(pitch_rec["NetPitch"]))
+                                        sync_status = "DISTANCE_OK_WITH_PITCH"
+                                        print(f"Frame {frame_idx}: Using pitch from nearby record ({pitch_min_dt}): {net_angle_deg:.1f}°")
+                                    else:
+                                        print(f"Frame {frame_idx}: No pitch data within {pitch_time_window}s (closest: {pitch_min_dt})")
+                                else:
+                                    print(f"Frame {frame_idx}: No valid pitch data in navigation")
+                            else:
+                                print(f"Frame {frame_idx}: Distance OK but no pitch data found")
+
+                        # Debug: print sync info for first few frames
+                        if frame_idx < 5:
+                            print(f"Frame {frame_idx}: ts_target={ts_target}, min_dt={min_dt}, sync_status={sync_status}")
+                            print(f"  net_distance={net_distance}, net_angle_deg={net_angle_deg}")
+                            if "NetPitch" in rec and pd.notna(rec["NetPitch"]):
+                                print(f"  Current record has pitch: {float(np.degrees(rec['NetPitch'])):.1f}°")
+                            else:
+                                print("  Current record missing pitch")
+                    else:
+                        sync_status = "NO_NAV_DATA"
 
                 # --- Sonar Analysis Data ---
                 if SONAR_DISTANCE_RESULTS is not None and len(SONAR_DISTANCE_RESULTS) > 0:
@@ -271,21 +307,31 @@ def export_optimized_sonar_video(
                         print(f"Warning: Could not sync sonar analysis data: {e}")
 
                 # --- Draw overlays ---
-                if sync_status in ["DISTANCE_OK", "FULL_SYNC", "SONAR_ONLY", "BOTH_SYNC"]:
+                if sync_status in ["DISTANCE_OK", "FULL_SYNC", "SONAR_ONLY", "BOTH_SYNC", "DISTANCE_OK_WITH_PITCH"]:
                     net_half_width = 2.0
 
                     # Draw DVL net line (if available)
                     if net_distance is not None and net_distance <= DISPLAY_RANGE_MAX_M:
                         if sync_status == "FULL_SYNC":
-                            dvl_line_color = (0, 255, 255)  # Yellow
+                            dvl_line_color = (0, 255, 255)  # Yellow - perfect sync
                             dvl_center_color = (0, 0, 255)  # Red
                             dvl_label = f"DVL: {net_distance:.2f}m @ {net_angle_deg:.1f}°"
+                        elif sync_status == "DISTANCE_OK_WITH_PITCH":
+                            dvl_line_color = (0, 255, 128)  # Light green - distance OK, pitch from closest
+                            dvl_center_color = (0, 128, 0)  # Dark green
+                            dvl_label = f"DVL: {net_distance:.2f}m @ {net_angle_deg:.1f}° (approx)"
                         else:
-                            dvl_line_color = (0, 165, 255)  # Orange
+                            dvl_line_color = (0, 165, 255)  # Orange - distance only
                             dvl_center_color = (0, 100, 255)  # Dark orange
                             dvl_label = f"DVL: {net_distance:.2f}m @ 0.0°"
 
-                        net_angle_rad = np.radians(net_angle_deg) if sync_status == "FULL_SYNC" else 0.0
+                        # Only draw angled line if we have pitch data
+                        use_angle = sync_status in ["FULL_SYNC", "DISTANCE_OK_WITH_PITCH", "BOTH_SYNC"]
+                        net_angle_rad = np.radians(net_angle_deg) if use_angle else 0.0
+
+                        # Debug: print drawing parameters
+                        if frame_idx < 10:
+                            print(f"Frame {frame_idx}: DRAWING - sync_status={sync_status}, use_angle={use_angle}, net_angle_deg={net_angle_deg:.1f}, net_angle_rad={net_angle_rad:.3f}")
 
                         x1, y1 = -net_half_width, net_distance
                         x2, y2 = +net_half_width, net_distance
@@ -298,6 +344,12 @@ def export_optimized_sonar_video(
 
                         px1, py1 = x_px(rx1), y_px(ry1)
                         px2, py2 = x_px(rx2), y_px(ry2)
+
+                        # Debug: print coordinate transformation
+                        if frame_idx < 5:
+                            print(f"Frame {frame_idx}: COORDS - original: ({x1:.1f}, {y1:.1f}) to ({x2:.1f}, {y2:.1f})")
+                            print(f"Frame {frame_idx}: COORDS - rotated: ({rx1:.1f}, {ry1:.1f}) to ({rx2:.1f}, {ry2:.1f})")
+                            print(f"Frame {frame_idx}: COORDS - pixels: ({px1}, {py1}) to ({px2}, {py2})")
 
                         cv2.line(cone_bgr, (px1, py1), (px2, py2), dvl_line_color, 3)
                         for (px, py) in [(px1, py1), (px2, py2)]:
@@ -345,6 +397,12 @@ def export_optimized_sonar_video(
                         status_lines.append(sonar_label)
                     if status_lines:
                         status_text = " | ".join(status_lines)
+
+                    # Debug: print sync status for first few frames
+                    if frame_idx < 5:
+                        angle_val = net_angle_deg if 'net_angle_deg' in locals() else 'UNDEFINED'
+                        use_angle_val = use_angle if 'use_angle' in locals() else 'UNDEFINED'
+                        print(f"Frame {frame_idx}: status={sync_status}, dist={net_distance:.2f}m, angle={angle_val}, use_angle={use_angle_val}")
 
                 else:
                     if INCLUDE_NET or SONAR_DISTANCE_RESULTS is not None:
