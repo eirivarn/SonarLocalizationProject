@@ -9,6 +9,10 @@ import matplotlib.pyplot as plt
 from scipy.signal import savgol_filter
 from scipy.ndimage import uniform_filter1d
 
+from utils.sonar_utils import (
+    load_df, get_sonoptix_frame,
+    enhance_intensity, apply_flips, cone_raster_like_display_cell
+)
 from utils.sonar_config import IMAGE_PROCESSING_CONFIG, ELONGATION_CONFIG, TRACKING_CONFIG, VIDEO_CONFIG, ConeGridSpec
 
 # ============================ NPZ I/O ============================
@@ -309,8 +313,8 @@ def _distance_angle_from_contour(contour) -> Tuple[Optional[float], Optional[flo
     if contour is None or len(contour) < 5:
         return None, None
     try:
-        (_, _), (minor_axis, major_axis), angle = cv2.fitEllipse(contour)
-        distance = float(major_axis)
+        (cx, cy), (minor_axis, major_axis), angle = cv2.fitEllipse(contour)
+        distance = float(cy)
         red_line_angle = (float(angle) + 90.0) % 360.0
         return distance, red_line_angle
     except Exception:
@@ -423,7 +427,11 @@ def analyze_red_line_distance_over_time(npz_file_index: int = 0,
     npz_file = files[npz_file_index]
     print(f"Analyzing: {npz_file}")
 
-    cones, ts, _, _ = load_cone_run_npz(npz_file)
+    cones, ts, extent, _ = load_cone_run_npz(npz_file)
+    x_min, x_max, y_min, y_max = extent
+    height_m = y_max - y_min
+    H = cones.shape[1]  # assuming cones[T,H,W]
+    px2m_y = height_m / H
     T = len(cones)
     if frame_count is None:
         frame_count = T - frame_start
@@ -431,7 +439,7 @@ def analyze_red_line_distance_over_time(npz_file_index: int = 0,
     print(f"Total frames available: {T}")
     print(f"Analyzing frames {frame_start} to {frame_start + actual * frame_step} (step={frame_step})")
 
-    out = {'frame_index': [], 'timestamp': [], 'distance_pixels': [], 'angle_degrees': [], 'detection_success': []}
+    out = {'frame_index': [], 'timestamp': [], 'distance_pixels': [], 'angle_degrees': [], 'detection_success': [], 'distance_meters': []}
     success = 0
 
     for i in range(actual):
@@ -445,6 +453,7 @@ def analyze_red_line_distance_over_time(npz_file_index: int = 0,
         out['angle_degrees'].append(angle)
         ok = distance is not None
         out['detection_success'].append(ok)
+        out['distance_meters'].append(y_min + distance * px2m_y if ok else None)
         if ok: success += 1
         if (i + 1) % 50 == 0:
             print(f"  Processed {i+1}/{actual} frames (Success rate: {success/(i+1)*100:.1f}%)")
@@ -464,13 +473,152 @@ def analyze_red_line_distance_over_time(npz_file_index: int = 0,
         print(f"  - Range:{(vals.max()-vals.min()):.2f}")
     return df
 
+
+def analyze_red_line_distance_from_sonar_csv(TARGET_BAG: str,
+                                             EXPORTS_FOLDER: Path,
+                                             frame_start: int = 0,
+                                             frame_count: Optional[int] = None,
+                                             frame_step: int = 1,
+                                             # --- sonar processing params (same as video generation) ---
+                                             FOV_DEG: float = 120.0,
+                                             RANGE_MIN_M: float = 0.5,
+                                             RANGE_MAX_M: float = 10.0,
+                                             DISPLAY_RANGE_MAX_M: float = 10.0,
+                                             FLIP_BEAMS: bool = True,
+                                             FLIP_RANGE: bool = False,
+                                             USE_ENHANCED: bool = True,
+                                             ENH_SCALE: str = "db",
+                                             ENH_TVG: str = "amplitude",
+                                             ENH_ALPHA_DB_PER_M: float = 0.0,
+                                             ENH_R0: float = 1e-2,
+                                             ENH_P_LOW: float = 1.0,
+                                             ENH_P_HIGH: float = 99.5,
+                                             ENH_GAMMA: float = 0.9,
+                                             ENH_ZERO_AWARE: bool = True,
+                                             ENH_EPS_LOG: float = 1e-6,
+                                             CONE_W: int = 900,
+                                             CONE_H: int = 700) -> pd.DataFrame:
+    """
+    Analyze red line distance using the same sonar processing pipeline as video generation.
+    This ensures consistency between video visualization and analysis.
+    """
+    print("=== RED LINE DISTANCE ANALYSIS FROM SONAR CSV ===")
+    print(f"🎯 Target Bag: {TARGET_BAG}")
+    print(f"   Cone Size: {CONE_W}x{CONE_H}")
+    print(f"   Range: {RANGE_MIN_M}-{DISPLAY_RANGE_MAX_M}m | FOV: {FOV_DEG}°")
+
+    # Load sonar data (same as video generation)
+    sonar_csv_file = EXPORTS_FOLDER / "by_bag" / f"sensor_sonoptix_echo_image__{TARGET_BAG}_video.csv"
+    if not sonar_csv_file.exists():
+        print(f"❌ ERROR: Sonar CSV not found: {sonar_csv_file}")
+        return None
+
+    from utils.sonar_utils import load_df, get_sonoptix_frame, apply_flips
+    from utils.sonar_config import ENHANCE_DEFAULTS
+
+    print(f"   Loading sonar data: {sonar_csv_file.name}")
+    df = load_df(sonar_csv_file)
+    if "ts_utc" not in df.columns:
+        if "t" not in df.columns:
+            print("❌ ERROR: Missing timestamp column")
+            return None
+        df["ts_utc"] = pd.to_datetime(df["t"], unit="s", utc=True, errors="coerce")
+
+    T = len(df)
+    if frame_count is None:
+        frame_count = T - frame_start
+    actual = int(min(frame_count, max(0, (T - frame_start)) // max(1, frame_step)))
+    print(f"Total frames available: {T}")
+    print(f"Analyzing frames {frame_start} to {frame_start + actual * frame_step} (step={frame_step})")
+
+    out = {'frame_index': [], 'timestamp': [], 'distance_pixels': [], 'angle_degrees': [], 'detection_success': []}
+    success = 0
+
+    for i in range(actual):
+        idx = frame_start + i * frame_step
+        if idx >= T: break
+
+        try:
+            # Process sonar data exactly like video generation (up to cone creation)
+            M0 = get_sonoptix_frame(df, idx)
+            if M0 is None:
+                continue
+
+            M = apply_flips(M0, flip_range=FLIP_RANGE, flip_beams=FLIP_BEAMS)
+
+            if USE_ENHANCED:
+                from utils.sonar_utils import enhance_intensity
+                Z = enhance_intensity(
+                    M, RANGE_MIN_M, RANGE_MAX_M, scale=ENH_SCALE, tvg=ENH_TVG,
+                    alpha_db_per_m=ENH_ALPHA_DB_PER_M, r0=ENH_R0,
+                    p_low=ENH_P_LOW, p_high=ENH_P_HIGH, gamma=ENH_GAMMA,
+                    zero_aware=ENH_ZERO_AWARE, eps_log=ENH_EPS_LOG)
+            else:
+                Z = M
+
+            # Create cone visualization (same as video generation)
+            cone, extent = cone_raster_like_display_cell(
+                Z, FOV_DEG, RANGE_MIN_M, RANGE_MAX_M, DISPLAY_RANGE_MAX_M, CONE_W, CONE_H
+            )
+            cone = np.flipud(cone)  # Same vertical flip as video generation
+
+            # Compute pixel-to-meter conversion from extent (same as notebook)
+            x_min, x_max, y_min, y_max = extent
+            width_m = x_max - x_min
+            height_m = y_max - y_min
+            H, W = cone.shape
+            px2m_x = width_m / W
+            px2m_y = height_m / H
+            pixels_to_meters = 0.5 * (px2m_x + px2m_y)
+
+            # Convert to grayscale for analysis (this is our "raw input")
+            cone_normalized = np.ma.masked_invalid(cone)
+            cone_u8 = (cone_normalized * 255).astype(np.uint8)
+
+            # Apply line detection algorithm
+            distance, angle = get_red_line_distance_and_angle(cone_u8)
+
+            out['frame_index'].append(idx)
+            out['timestamp'].append(df.loc[idx, "ts_utc"])
+            out['distance_pixels'].append(distance)
+            out['angle_degrees'].append(angle)
+            ok = distance is not None
+            out['detection_success'].append(ok)
+            out['distance_meters'].append(y_min + distance * px2m_y if ok else None)
+            if ok: success += 1
+
+            if (i + 1) % 50 == 0:
+                print(f"  Processed {i+1}/{actual} frames (Success rate: {success/(i+1)*100:.1f}%)")
+
+        except Exception as e:
+            print(f"❌ Error processing frame {idx}: {e}")
+            continue
+
+    df_result = pd.DataFrame(out)
+    print(f"\n=== ANALYSIS COMPLETE ===")
+    print(f"Total frames processed: {len(df_result)}")
+    print(f"Successful detections: {success} ({(success/len(df_result)*100 if len(df_result) else 0):.1f}%)")
+
+    if success:
+        vals = df_result.loc[df_result['detection_success'], 'distance_meters']
+        print("Distance statistics (meters):")
+        print(f"  - Mean: {vals.mean():.2f}")
+        print(f"  - Std:  {vals.std():.2f}")
+        print(f"  - Min:  {vals.min():.2f}")
+        print(f"  - Max:  {vals.max():.2f}")
+        print(f"  - Range:{(vals.max()-vals.min()):.2f}")
+    return df_result
+
 # ============================ Public: plotting helpers ============================
 
 def plot_time_based_analysis(distance_results: pd.DataFrame,
                              pixels_to_meters_avg: float = 0.01,
                              estimated_fps: float = 15):
     valid = distance_results[distance_results['detection_success']].copy()
-    valid['distance_meters'] = valid['distance_pixels'] * pixels_to_meters_avg
+    if 'distance_meters' in valid.columns:
+        valid['distance_meters'] = valid['distance_meters']
+    else:
+        valid['distance_meters'] = valid['distance_pixels'] * pixels_to_meters_avg
     t = elapsed_seconds_from_timestamps(valid.get('timestamp', None), estimated_fps, len(valid))
     win = max(5, len(valid) // 20)
     mv = valid['distance_meters'].rolling(window=win, center=True).mean()
@@ -488,11 +636,14 @@ def plot_time_based_analysis(distance_results: pd.DataFrame,
 def plot_real_world_distance_analysis(distance_results: pd.DataFrame,
                                       image_shape=(700, 900),
                                       sonar_coverage_meters=5.0):
-    H, W = image_shape
-    px2m = (sonar_coverage_meters / W + sonar_coverage_meters / H) / 2.0
     valid = distance_results[distance_results['detection_success']].copy()
-    valid['distance_meters'] = valid['distance_pixels'] * px2m
-    dist = valid['distance_meters']
+    if 'distance_meters' in valid.columns:
+        dist = valid['distance_meters']
+    else:
+        H, W = image_shape
+        px2m = (sonar_coverage_meters / W + sonar_coverage_meters / H) / 2.0
+        dist = valid['distance_pixels'] * px2m
+        valid['distance_meters'] = dist
     win = max(5, len(valid)//20)
     mv = dist.rolling(window=win, center=True).mean()
     sd = dist.rolling(window=win, center=True).std()
@@ -560,14 +711,12 @@ def compare_sonar_vs_dvl(distance_results: pd.DataFrame,
     else:
         sonar = distance_results.copy()
 
-    ppm = float(sonar_image_size) / float(sonar_coverage_m)
-    sonar['distance_meters'] = sonar['distance_pixels'] / ppm
-    smooth = apply_smoothing(sonar['distance_meters'].to_numpy(), window_size=window_size)
-    sonar['distance_meters_raw'] = sonar['distance_meters']
-    sonar['distance_meters_mavg'] = smooth['mavg']
-    sonar['distance_meters_savgol'] = smooth['savgol']
-    sonar['distance_meters_gaussian'] = smooth['gaussian']
-    sonar['distance_meters'] = smooth['primary']
+    if 'distance_meters' in sonar.columns:
+        sonar['distance_meters_raw'] = sonar['distance_meters']
+    else:
+        ppm = float(sonar_image_size) / float(sonar_coverage_m)
+        sonar['distance_meters'] = sonar['distance_pixels'] / ppm
+        sonar['distance_meters_raw'] = sonar['distance_meters']
 
     # stretch sonar time to nav span
     dvl_duration = float(max(1.0, (nav['relative_time'].max() - nav['relative_time'].min())))

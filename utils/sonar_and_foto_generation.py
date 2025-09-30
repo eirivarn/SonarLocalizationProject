@@ -179,8 +179,8 @@ def export_optimized_sonar_video(
 
     def y_px(ym: float) -> int:
         # top = max range, bottom = 0; flip if desired
-        y = int(round((DISPLAY_RANGE_MAX_M - ym) / DISPLAY_RANGE_MAX_M * (CONE_H - 1)))
-        return (CONE_H - 1) - y if not CONE_FLIP_VERTICAL else y
+        y = int(round((ym - RANGE_MIN_M) / (DISPLAY_RANGE_MAX_M - RANGE_MIN_M) * (CONE_H - 1)))
+        return (CONE_H - 1) - y  # Flipped for display
 
     grid_blue = (255, 150, 50)
     vehicle_center = (CONE_W // 2, CONE_H - 1)
@@ -246,7 +246,7 @@ def export_optimized_sonar_video(
                     # Convert pixel distance to meters using the extent
                     try:
                         # Calculate pixel-to-meter conversion
-                        x_min, x_max, y_min, y_max = meta_extent if meta_extent is not None else (-DISPLAY_RANGE_MAX_M, DISPLAY_RANGE_MAX_M, 0, DISPLAY_RANGE_MAX_M)
+                        x_min, x_max, y_min, y_max = meta_extent if meta_extent is not None else (-DISPLAY_RANGE_MAX_M, DISPLAY_RANGE_MAX_M, RANGE_MIN_M, DISPLAY_RANGE_MAX_M)
                         width_m = float(x_max - x_min)
                         height_m = float(y_max - y_min)
                         px2m_x = width_m / float(CONE_W)
@@ -261,7 +261,7 @@ def export_optimized_sonar_video(
 
                         if min_sonar_dt <= pd.Timedelta(f"{NET_DISTANCE_TOLERANCE}s") and sonar_rec.get("detection_success", False):
                             sonar_distance_px = sonar_rec["distance_pixels"]
-                            sonar_distance_m = sonar_distance_px * pixels_to_meters_avg
+                            sonar_distance_m = sonar_rec.get("distance_meters", sonar_distance_px * pixels_to_meters_avg)
                             if sync_status == "NO_DATA":
                                 sync_status = "SONAR_ONLY"
                             elif sync_status in ["DISTANCE_OK", "FULL_SYNC"]:
