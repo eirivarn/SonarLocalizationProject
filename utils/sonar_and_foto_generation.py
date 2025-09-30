@@ -1,11 +1,18 @@
 import cv2
+import json
 import numpy as np
 import pandas as pd
 from pathlib import Path
+from datetime import datetime, timezone
 
 from utils.sonar_utils import (
     load_df, get_sonoptix_frame,
     enhance_intensity, read_video_index, apply_flips, cone_raster_like_display_cell
+)
+from utils.sonar_config import (
+    SONAR_VIS_DEFAULTS, ENHANCE_DEFAULTS,
+    CONE_W_DEFAULT, CONE_H_DEFAULT, CONE_FLIP_VERTICAL_DEFAULT,
+    CMAP_NAME_DEFAULT, DISPLAY_RANGE_MAX_M_DEFAULT, FOV_DEG_DEFAULT,
 )
 
 def load_png_bgr(path: Path) -> np.ndarray:
@@ -41,10 +48,10 @@ def export_optimized_sonar_video(
     PAD_BETWEEN: int = 8,
     FONT_SCALE: float = 0.55,
     # --- sonar / display params (optimized defaults) ---
-    FOV_DEG: float = 120.0,
-    RANGE_MIN_M: float = 0.0,
-    RANGE_MAX_M: float = 30.0,
-    DISPLAY_RANGE_MAX_M: float = 4.0,
+    FOV_DEG: float = FOV_DEG_DEFAULT,
+    RANGE_MIN_M: float = SONAR_VIS_DEFAULTS["range_min_m"],
+    RANGE_MAX_M: float = SONAR_VIS_DEFAULTS["range_max_m"],
+    DISPLAY_RANGE_MAX_M: float = DISPLAY_RANGE_MAX_M_DEFAULT,
     FLIP_BEAMS: bool = True,
     FLIP_RANGE: bool = False,
     USE_ENHANCED: bool = True,
@@ -57,10 +64,10 @@ def export_optimized_sonar_video(
     ENH_GAMMA: float = 0.9,
     ENH_ZERO_AWARE: bool = True,
     ENH_EPS_LOG: float = 1e-6,
-    CONE_W: int = 900,
-    CONE_H: int = 700,
-    CONE_FLIP_VERTICAL: bool = True,
-    CMAP_NAME: str = "viridis",
+    CONE_W: int = CONE_W_DEFAULT,
+    CONE_H: int = CONE_H_DEFAULT,
+    CONE_FLIP_VERTICAL: bool = CONE_FLIP_VERTICAL_DEFAULT,
+    CMAP_NAME: str = CMAP_NAME_DEFAULT,
     # --- net overlay (optional) ---
     INCLUDE_NET: bool = True,
     NET_DISTANCE_TOLERANCE: float = 0.5,  # seconds
@@ -155,6 +162,7 @@ def export_optimized_sonar_video(
     out_path = out_dir / out_name
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = None
+    meta_extent = None
 
     # --- Color map and geometry helpers ---
     cmap = cm.get_cmap(CMAP_NAME).copy()
@@ -193,6 +201,11 @@ def export_optimized_sonar_video(
             )
             # Optimized path used vertical flip; keep it:
             cone = np.flipud(cone)
+            # remember extent for metadata (use latest)
+            try:
+                meta_extent = tuple(map(float, _ext))
+            except Exception:
+                meta_extent = None
 
             cone_rgb = (cmap(np.ma.masked_invalid(cone))[:, :, :3] * 255).astype(np.uint8)
             cone_bgr = cv2.cvtColor(cone_rgb, cv2.COLOR_RGB2BGR)
@@ -217,7 +230,8 @@ def export_optimized_sonar_video(
                         net_distance = float(rec["NetDistance"])
                         sync_status = "DISTANCE_OK"
                         if min_dt <= pd.Timedelta(f"{NET_PITCH_TOLERANCE}s") and "NetPitch" in rec and pd.notna(rec["NetPitch"]):
-                            net_angle_deg = float(np.degrees(rec["NetPitch"]))
+                            # NetPitch sign convention: invert sign to match display coordinate system
+                            net_angle_deg = -float(np.degrees(rec["NetPitch"]))
                             sync_status = "FULL_SYNC"
 
                 if sync_status in ["DISTANCE_OK", "FULL_SYNC"] and net_distance is not None and net_distance <= DISPLAY_RANGE_MAX_M:
@@ -341,4 +355,32 @@ def export_optimized_sonar_video(
 
     if writer is not None:
         writer.release()
-    print(f"\n🎉 DONE! Wrote {frames_written} frames to {out_path} @ {natural_fps:.2f} FPS")
+    # Write metadata beside the exported video for reproducible pixel<->meter mapping
+    try:
+        meta = {
+            "format": "solaqua.optimized_sync.video.meta.v1",
+            "target_bag": str(TARGET_BAG),
+            "created_at_utc": datetime.utcnow().replace(tzinfo=timezone.utc).isoformat(),
+            "frames_written": int(frames_written),
+            "natural_fps": float(natural_fps),
+            "fov_deg": float(FOV_DEG),
+            "range_min_m": float(RANGE_MIN_M),
+            "range_max_m": float(RANGE_MAX_M),
+            "display_range_max_m": float(DISPLAY_RANGE_MAX_M),
+            "cone_w": int(CONE_W),
+            "cone_h": int(CONE_H),
+            "cone_flip_vertical": bool(CONE_FLIP_VERTICAL),
+            "cmap": str(CMAP_NAME),
+            "include_net": bool(INCLUDE_NET),
+            "flip_range": bool(FLIP_RANGE),
+            "flip_beams": bool(FLIP_BEAMS),
+        }
+        if meta_extent is not None:
+            meta["extent"] = list(meta_extent)
+        meta_path = out_path.with_suffix(out_path.suffix + ".meta.json")
+        with open(meta_path, "w", encoding="utf-8") as fh:
+            json.dump(meta, fh, ensure_ascii=False, indent=2)
+        print(f"\n🎉 DONE! Wrote {frames_written} frames to {out_path} @ {natural_fps:.2f} FPS")
+        print(f"Metadata saved to: {meta_path}")
+    except Exception as e:
+        print(f"Warning: could not write metadata: {e}")

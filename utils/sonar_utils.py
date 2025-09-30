@@ -751,6 +751,8 @@ def save_cone_run_npz(
         flips=dict(range=bool(flip_range), beams=bool(flip_beams)),
         enhanced=bool(enhanced),
         enhance_kwargs=(enhance_kwargs or {}),
+        display_range_max_m=(None if y_zoom is None else float(y_zoom)),
+        extent=(None if extent_ref is None else [float(x) for x in extent_ref]),
     )
     if attrs:
         meta["attrs"] = attrs

@@ -500,7 +500,8 @@ def process_sonar_data_and_visualize(
 
         if min_time_diff <= pd.Timedelta('5s'):
             nav_idx = nav_time_diffs.idxmin()
-            net_angle_rad = nav_data.loc[nav_idx, 'NetPitch']
+            # Invert sign of NetPitch for plotting/rotation
+            net_angle_rad = -nav_data.loc[nav_idx, 'NetPitch']
             net_angle_deg = np.degrees(net_angle_rad)
             angle_source = f"navigation NetPitch (Δt: {min_time_diff.total_seconds():.3f}s)"
 
@@ -516,7 +517,8 @@ def process_sonar_data_and_visualize(
 
             if direct_min_diff <= pd.Timedelta('5s'):
                 direct_idx = direct_time_diffs.idxmin()
-                net_angle_rad = direct_nav_df.loc[direct_idx, 'NetPitch']
+                # Invert sign of NetPitch coming from direct file as well
+                net_angle_rad = -direct_nav_df.loc[direct_idx, 'NetPitch']
                 net_angle_deg = np.degrees(net_angle_rad)
                 angle_source = "direct navigation file"
 

@@ -9,42 +9,7 @@ import matplotlib.pyplot as plt
 from scipy.signal import savgol_filter
 from scipy.ndimage import uniform_filter1d
 
-# ============================ CONFIG (unchanged structure) ============================
-
-IMAGE_PROCESSING_CONFIG = {
-    'use_momentum_merging': True,
-    'momentum_search_radius': 3,
-    'momentum_threshold': 0.1,
-    'momentum_decay': 0.9,
-    'momentum_boost': 5.0,
-    'blur_kernel_size': (31, 31),
-    'canny_low_threshold': 40,
-    'canny_high_threshold': 120,
-    'min_contour_area': 100,
-    'morph_close_kernel': 5,
-    'edge_dilation_iterations': 2,
-}
-
-ELONGATION_CONFIG = {
-    'aspect_ratio_weight': 0.4,
-    'ellipse_elongation_weight': 0.7,
-    'solidity_weight': 0.1,
-    'extent_weight': 0.0,
-    'perimeter_weight': 0.0,
-}
-
-TRACKING_CONFIG = {
-    'aoi_boost_factor': 1000.0,
-    'aoi_expansion_pixels': 10,
-}
-
-VIDEO_CONFIG = {
-    'fps': 15,
-    'show_all_contours': True,
-    'show_ellipse': True,
-    'show_bounding_box': True,
-    'text_scale': 0.6,
-}
+from utils.sonar_config import IMAGE_PROCESSING_CONFIG, ELONGATION_CONFIG, TRACKING_CONFIG, VIDEO_CONFIG, ConeGridSpec
 
 # ============================ NPZ I/O ============================
 

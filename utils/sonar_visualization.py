@@ -24,6 +24,7 @@ from utils.sonar_utils import (
     enhance_intensity,
     cone_raster_like_display_cell,
 )
+from utils.sonar_config import SONAR_VIS_DEFAULTS, ConeGridSpec
 
 class SonarVisualizer:
     """
@@ -38,38 +39,8 @@ class SonarVisualizer:
         Args:
             config: Dictionary with visualization parameters
         """
-        # Default configuration
-        self.config = {
-            # Geometry / calibration
-            "fov_deg": 120.0,
-            "range_min_m": 0.0,
-            "range_max_m": 20.0,
-            "display_range_max_m": 10.0,
-            # Orientation
-            "swap_hw": False,
-            "flip_beams": False,
-            "flip_range": False,
-            # Enhancement
-            "enh_scale": "db",
-            "enh_tvg": "amplitude",
-            "enh_alpha_db_per_m": 0.0,
-            "enh_eps_log": 1e-5,
-            "enh_r0": 1e-6,
-            "enh_p_low": 1.0,
-            "enh_p_high": 99.5,
-            "enh_gamma": 0.9,
-            "enh_zero_aware": True,
-            # Visualization
-            "cmap_raw": "viridis",
-            "cmap_enh": "viridis",
-            "figsize": (12, 5.6),
-            # Cone view
-            "img_w": 900,
-            "img_h": 700,
-            "bg_color": "black",
-            "n_spokes": 5,
-            "rotate_deg": 0.0,
-        }
+        # Default configuration (centralized)
+        self.config = SONAR_VIS_DEFAULTS.copy()
         if config:
             self.config.update(config)
 
@@ -313,25 +284,6 @@ def print_sonar_files(candidates: List[Path]) -> None:
         return
     for i, p in enumerate(candidates):
         print(f"[{i}] {p}")
-
-
-def quick_visualize(
-    file_path: Union[str, Path],
-    frame_index: int = 0,
-    config: Optional[Dict] = None,
-) -> Tuple[plt.Figure, plt.Figure]:
-    """
-    Quick visualization of a sonar frame with default settings.
-    Returns (raw/enhanced fig, cone fig).
-    """
-    viz = SonarVisualizer(config)
-    df = viz.load_sonar_data(file_path)
-    data = viz.get_frame_data(df, frame_index)
-
-    fig1 = viz.plot_raw_and_enhanced(data, frame_index)
-    fig2 = viz.plot_cone_view(data, use_enhanced=True)
-    return fig1, fig2
-
 
 # -----------------------------------------------------------------------------
 # Optional: direct bag analysis (kept as-is, small and standalone)
