@@ -72,10 +72,13 @@ def export_optimized_sonar_video(
     INCLUDE_NET: bool = True,
     NET_DISTANCE_TOLERANCE: float = 0.5,  # seconds
     NET_PITCH_TOLERANCE: float = 0.3,     # seconds
+    # --- sonar analysis overlay (optional) ---
+    SONAR_DISTANCE_RESULTS: pd.DataFrame | None = None,  # DataFrame with sonar analysis results
 ):
     """
-    Optimized sonar + (optional) net-line overlay.
+    Optimized sonar + (optional) net-line overlay + (optional) sonar analysis overlay.
     If VIDEO_SEQ_DIR is given, the output includes the actual camera frame (side-by-side).
+    If SONAR_DISTANCE_RESULTS is provided, displays both DVL and sonar analysis distances.
 
     Output is saved under EXPORTS_FOLDER / 'videos' with an 'optimized_sync' name.
     """
@@ -95,6 +98,7 @@ def export_optimized_sonar_video(
     print(f"   🎥 Camera: {'enabled' if VIDEO_SEQ_DIR is not None else 'disabled'}")
     print(f"   🕸  Net-line: {'enabled' if INCLUDE_NET else 'disabled'}"
           + (f" (dist tol={NET_DISTANCE_TOLERANCE}s, pitch tol={NET_PITCH_TOLERANCE}s)" if INCLUDE_NET else ""))
+    print(f"   📊 Sonar Analysis: {'enabled' if SONAR_DISTANCE_RESULTS is not None else 'disabled'}")
 
     # --- Load sonar timestamps/frames ---
     sonar_csv_file = Path(EXPORTS_FOLDER) / "by_bag" / f"sensor_sonoptix_echo_image__{TARGET_BAG}_video.csv"
@@ -158,7 +162,7 @@ def export_optimized_sonar_video(
     out_dir = Path(EXPORTS_FOLDER) / "videos"
     out_dir.mkdir(exist_ok=True)
     first_ts = pd.to_datetime(df.loc[frame_indices[0], "ts_utc"], utc=True, errors="coerce")
-    out_name = f"{TARGET_BAG}_optimized_sync_{'withcam_' if VIDEO_SEQ_DIR is not None else ''}{'nonet_' if not INCLUDE_NET else ''}{ts_for_name(first_ts)}.mp4"
+    out_name = f"{TARGET_BAG}_optimized_sync_{'withcam_' if VIDEO_SEQ_DIR is not None else ''}{'withsonar_' if SONAR_DISTANCE_RESULTS is not None else ''}{'nonet_' if not INCLUDE_NET else ''}{ts_for_name(first_ts)}.mp4"
     out_path = out_dir / out_name
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = None
@@ -213,64 +217,129 @@ def export_optimized_sonar_video(
             # --- optional net-line overlay (optimized sync) ---
             status_text = None
             line_color = (128, 128, 128)
-            if INCLUDE_NET:
+            if INCLUDE_NET or SONAR_DISTANCE_RESULTS is not None:
                 net_angle_deg = 0.0
                 net_distance = None
+                sonar_distance_m = None
                 sync_status = "NO_DATA"
 
                 ts_target = pd.to_datetime(df.loc[frame_idx, "ts_utc"], utc=True, errors="coerce")
 
-                if nav_complete is not None and len(nav_complete) > 0:
-                    diffs = abs(nav_complete["timestamp"] - ts_target)
-                    idx = diffs.idxmin()
-                    min_dt = diffs.iloc[idx]
-                    rec = nav_complete.loc[idx]
+                # --- DVL Navigation Data ---
+                if INCLUDE_NET:
+                    if nav_complete is not None and len(nav_complete) > 0:
+                        diffs = abs(nav_complete["timestamp"] - ts_target)
+                        idx = diffs.idxmin()
+                        min_dt = diffs.iloc[idx]
+                        rec = nav_complete.loc[idx]
 
-                    if min_dt <= pd.Timedelta(f"{NET_DISTANCE_TOLERANCE}s") and "NetDistance" in rec and pd.notna(rec["NetDistance"]):
-                        net_distance = float(rec["NetDistance"])
-                        sync_status = "DISTANCE_OK"
-                        if min_dt <= pd.Timedelta(f"{NET_PITCH_TOLERANCE}s") and "NetPitch" in rec and pd.notna(rec["NetPitch"]):
-                            # NetPitch sign convention: invert sign to match display coordinate system
-                            net_angle_deg = -float(np.degrees(rec["NetPitch"]))
-                            sync_status = "FULL_SYNC"
+                        if min_dt <= pd.Timedelta(f"{NET_DISTANCE_TOLERANCE}s") and "NetDistance" in rec and pd.notna(rec["NetDistance"]):
+                            net_distance = float(rec["NetDistance"])
+                            sync_status = "DISTANCE_OK"
+                            if min_dt <= pd.Timedelta(f"{NET_PITCH_TOLERANCE}s") and "NetPitch" in rec and pd.notna(rec["NetPitch"]):
+                                # NetPitch sign convention: invert sign to match display coordinate system
+                                net_angle_deg = -float(np.degrees(rec["NetPitch"]))
+                                sync_status = "FULL_SYNC"
 
-                if sync_status in ["DISTANCE_OK", "FULL_SYNC"] and net_distance is not None and net_distance <= DISPLAY_RANGE_MAX_M:
+                # --- Sonar Analysis Data ---
+                if SONAR_DISTANCE_RESULTS is not None and len(SONAR_DISTANCE_RESULTS) > 0:
+                    # Convert pixel distance to meters using the extent
+                    try:
+                        # Calculate pixel-to-meter conversion
+                        x_min, x_max, y_min, y_max = meta_extent if meta_extent is not None else (-DISPLAY_RANGE_MAX_M, DISPLAY_RANGE_MAX_M, 0, DISPLAY_RANGE_MAX_M)
+                        width_m = float(x_max - x_min)
+                        height_m = float(y_max - y_min)
+                        px2m_x = width_m / float(CONE_W)
+                        px2m_y = height_m / float(CONE_H)
+                        pixels_to_meters_avg = 0.5 * (px2m_x + px2m_y)
+
+                        # Find closest sonar analysis measurement
+                        sonar_diffs = abs(SONAR_DISTANCE_RESULTS["timestamp"] - ts_target)
+                        sonar_idx = sonar_diffs.idxmin()
+                        min_sonar_dt = sonar_diffs.iloc[sonar_idx]
+                        sonar_rec = SONAR_DISTANCE_RESULTS.loc[sonar_idx]
+
+                        if min_sonar_dt <= pd.Timedelta(f"{NET_DISTANCE_TOLERANCE}s") and sonar_rec.get("detection_success", False):
+                            sonar_distance_px = sonar_rec["distance_pixels"]
+                            sonar_distance_m = sonar_distance_px * pixels_to_meters_avg
+                            if sync_status == "NO_DATA":
+                                sync_status = "SONAR_ONLY"
+                            elif sync_status in ["DISTANCE_OK", "FULL_SYNC"]:
+                                sync_status = "BOTH_SYNC"
+                    except Exception as e:
+                        print(f"Warning: Could not sync sonar analysis data: {e}")
+
+                # --- Draw overlays ---
+                if sync_status in ["DISTANCE_OK", "FULL_SYNC", "SONAR_ONLY", "BOTH_SYNC"]:
                     net_half_width = 2.0
 
-                    if sync_status == "FULL_SYNC":
-                        net_angle_rad = np.radians(net_angle_deg)
-                        line_color = (0, 255, 255)
-                        center_color = (0, 0, 255)
-                        status_text = f"NET: {net_distance:.2f}m @ {net_angle_deg:.1f}° (SYNCED)"
-                    else:
-                        net_angle_rad = 0.0
-                        net_angle_deg = 0.0
-                        line_color = (0, 165, 255)
-                        center_color = (0, 100, 255)
-                        status_text = f"NET: {net_distance:.2f}m @ 0.0° (DIST-ONLY)"
+                    # Draw DVL net line (if available)
+                    if net_distance is not None and net_distance <= DISPLAY_RANGE_MAX_M:
+                        if sync_status == "FULL_SYNC":
+                            dvl_line_color = (0, 255, 255)  # Yellow
+                            dvl_center_color = (0, 0, 255)  # Red
+                            dvl_label = f"DVL: {net_distance:.2f}m @ {net_angle_deg:.1f}°"
+                        else:
+                            dvl_line_color = (0, 165, 255)  # Orange
+                            dvl_center_color = (0, 100, 255)  # Dark orange
+                            dvl_label = f"DVL: {net_distance:.2f}m @ 0.0°"
 
-                    x1, y1 = -net_half_width, net_distance
-                    x2, y2 = +net_half_width, net_distance
+                        net_angle_rad = np.radians(net_angle_deg) if sync_status == "FULL_SYNC" else 0.0
 
-                    cos_a, sin_a = np.cos(net_angle_rad), np.sin(net_angle_rad)
-                    rx1 = x1 * cos_a - (y1 - net_distance) * sin_a
-                    ry1 = x1 * sin_a + (y1 - net_distance) * cos_a + net_distance
-                    rx2 = x2 * cos_a - (y2 - net_distance) * sin_a
-                    ry2 = x2 * sin_a + (y2 - net_distance) * cos_a + net_distance
+                        x1, y1 = -net_half_width, net_distance
+                        x2, y2 = +net_half_width, net_distance
 
-                    px1, py1 = x_px(rx1), y_px(ry1)
-                    px2, py2 = x_px(rx2), y_px(ry2)
+                        cos_a, sin_a = np.cos(net_angle_rad), np.sin(net_angle_rad)
+                        rx1 = x1 * cos_a - (y1 - net_distance) * sin_a
+                        ry1 = x1 * sin_a + (y1 - net_distance) * cos_a + net_distance
+                        rx2 = x2 * cos_a - (y2 - net_distance) * sin_a
+                        ry2 = x2 * sin_a + (y2 - net_distance) * cos_a + net_distance
 
-                    cv2.line(cone_bgr, (px1, py1), (px2, py2), line_color, 5)
-                    for (px, py) in [(px1, py1), (px2, py2)]:
-                        cv2.circle(cone_bgr, (px, py), 6, (255, 255, 255), -1)
-                        cv2.circle(cone_bgr, (px, py), 6, (0, 0, 0), 2)
+                        px1, py1 = x_px(rx1), y_px(ry1)
+                        px2, py2 = x_px(rx2), y_px(ry2)
 
-                    center_px, center_py = x_px(0), y_px(net_distance)
-                    cv2.circle(cone_bgr, (center_px, center_py), 5, center_color, -1)
-                    cv2.circle(cone_bgr, (center_px, center_py), 5, (255, 255, 255), 2)
+                        cv2.line(cone_bgr, (px1, py1), (px2, py2), dvl_line_color, 3)
+                        for (px, py) in [(px1, py1), (px2, py2)]:
+                            cv2.circle(cone_bgr, (px, py), 4, (255, 255, 255), -1)
+                            cv2.circle(cone_bgr, (px, py), 4, (0, 0, 0), 1)
+
+                        center_px, center_py = x_px(0), y_px(net_distance)
+                        cv2.circle(cone_bgr, (center_px, center_py), 3, dvl_center_color, -1)
+                        cv2.circle(cone_bgr, (center_px, center_py), 3, (255, 255, 255), 1)
+
+                    # Draw Sonar analysis line (if available)
+                    if sonar_distance_m is not None and sonar_distance_m <= DISPLAY_RANGE_MAX_M:
+                        sonar_line_color = (255, 0, 255)  # Magenta
+                        sonar_center_color = (128, 0, 128)  # Dark magenta
+                        sonar_label = f"SONAR: {sonar_distance_m:.2f}m"
+
+                        # Sonar analysis is always horizontal (no angle info)
+                        sx1, sy1 = -net_half_width, sonar_distance_m
+                        sx2, sy2 = +net_half_width, sonar_distance_m
+
+                        spx1, spy1 = x_px(sx1), y_px(sy1)
+                        spx2, spy2 = x_px(sx2), y_px(sy2)
+
+                        cv2.line(cone_bgr, (spx1, spy1), (spx2, spy2), sonar_line_color, 3)
+                        for (px, py) in [(spx1, spy1), (spx2, spy2)]:
+                            cv2.circle(cone_bgr, (px, py), 4, (255, 255, 255), -1)
+                            cv2.circle(cone_bgr, (px, py), 4, (0, 0, 0), 1)
+
+                        center_px, center_py = x_px(0), y_px(sonar_distance_m)
+                        cv2.circle(cone_bgr, (center_px, center_py), 3, sonar_center_color, -1)
+                        cv2.circle(cone_bgr, (center_px, center_py), 3, (255, 255, 255), 1)
+
+                    # Create status text
+                    status_lines = []
+                    if net_distance is not None:
+                        status_lines.append(dvl_label)
+                    if sonar_distance_m is not None:
+                        status_lines.append(sonar_label)
+                    if status_lines:
+                        status_text = " | ".join(status_lines)
+
                 else:
-                    if INCLUDE_NET:
+                    if INCLUDE_NET or SONAR_DISTANCE_RESULTS is not None:
                         status_text = f"NET: NO SYNC DATA (tol: {NET_DISTANCE_TOLERANCE}s)"
                         line_color = (128, 128, 128)
 
@@ -296,9 +365,9 @@ def export_optimized_sonar_video(
                         cv2.putText(cone_bgr, f"{bearing_deg:+d}°", label_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.4, grid_blue, 1)
 
             # annotate status if net considered
-            if INCLUDE_NET and status_text:
+            if (INCLUDE_NET or SONAR_DISTANCE_RESULTS is not None) and status_text:
                 cv2.putText(cone_bgr, status_text, (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 3, cv2.LINE_AA)
-                cv2.putText(cone_bgr, status_text, (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, line_color, 2, cv2.LINE_AA)
+                cv2.putText(cone_bgr, status_text, (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
 
             # footer info
             frame_info = f"Frame {frame_idx}/{len(frame_indices)} | {TARGET_BAG} | Opt.Sync"
@@ -372,6 +441,7 @@ def export_optimized_sonar_video(
             "cone_flip_vertical": bool(CONE_FLIP_VERTICAL),
             "cmap": str(CMAP_NAME),
             "include_net": bool(INCLUDE_NET),
+            "include_sonar_analysis": SONAR_DISTANCE_RESULTS is not None,
             "flip_range": bool(FLIP_RANGE),
             "flip_beams": bool(FLIP_BEAMS),
         }
