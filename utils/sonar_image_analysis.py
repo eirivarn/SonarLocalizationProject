@@ -128,7 +128,10 @@ def list_npz_files(npz_dir: str = "exports/outputs") -> None:
 # ============================ Small utilities ============================
 
 def to_uint8_gray(frame01: np.ndarray) -> np.ndarray:
-    return (np.clip(frame01, 0, 1) * 255).astype(np.uint8)
+    # Robust conversion: handle NaN/inf and out-of-range values before casting
+    safe = np.nan_to_num(frame01, nan=0.0, posinf=1.0, neginf=0.0)
+    safe = np.clip(safe, 0.0, 1.0)
+    return (safe * 255.0).astype(np.uint8)
 
 def elapsed_seconds_from_timestamps(stamps: pd.Series | pd.DatetimeIndex | np.ndarray,
                                     estimated_fps: float,
@@ -802,9 +805,28 @@ def create_contour_detection_video(npz_file_index=0, frame_start=0, frame_count=
         print("Error: Not enough frames to process"); return None
 
     first = to_uint8_gray(cones[frame_start]); H, W = first.shape
-    vw = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*'mp4v'), VIDEO_CONFIG['fps'], (W, H))
+    outp = Path(output_path)
+    # Ensure output directory exists
+    try:
+        outp.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+
+    # Try primary mp4 writer
+    vw = cv2.VideoWriter(str(outp), cv2.VideoWriter_fourcc(*'mp4v'), VIDEO_CONFIG['fps'], (W, H))
     if not vw.isOpened():
-        print("Error: Could not open video writer"); return None
+        # Fallback: try AVI with XVID (more widely supported in some OpenCV builds)
+        fallback_path = outp.with_suffix('.avi')
+        vw = cv2.VideoWriter(str(fallback_path), cv2.VideoWriter_fourcc(*'XVID'), VIDEO_CONFIG['fps'], (W, H))
+        if vw.isOpened():
+            print(f"Warning: mp4 writer failed, falling back to AVI: {fallback_path}")
+            output_path = str(fallback_path)
+        else:
+            print("Error: Could not open video writer (mp4v and XVID both failed).")
+            print("Possible causes: output directory missing, or your OpenCV build lacks the needed codecs (mp4/ffmpeg).")
+            print(f"Tried paths: {outp} and {fallback_path}")
+            print("Try installing OpenCV with FFmpeg support, or use an .avi output by specifying output_path with .avi extension.")
+            return None
 
     print("Processing frames...")
     aoi = None
@@ -814,6 +836,23 @@ def create_contour_detection_video(npz_file_index=0, frame_start=0, frame_count=
         idx = frame_start + i * frame_step
         frame_u8 = to_uint8_gray(cones[idx])
         vis, next_aoi = process_frame_for_video(frame_u8, aoi)
+        # Compute detected net distance (pixels) and overlay on the frame
+        try:
+            dist_px, ang_deg = get_red_line_distance_and_angle(frame_u8)
+            if dist_px is not None:
+                dist_text = f"Detected net distance: {dist_px:.1f}px"
+            else:
+                dist_text = "Detected net distance: N/A"
+        except Exception:
+            dist_text = "Detected net distance: N/A"
+        # Put the distance text near the existing frame counter text (right side)
+        try:
+            text_x = max(10, W - 320)
+            # Place the distance a bit further down (y=50) to avoid overlapping the top-right frame counter
+            cv2.putText(vis, dist_text, (text_x, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1)
+        except Exception:
+            # If overlay fails for any reason, continue without breaking the video creation
+            pass
         if next_aoi is not None:
             if aoi is None:
                 new += 1

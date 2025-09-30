@@ -377,7 +377,6 @@ def extract_raw_sonar_data_with_configurable_rmax(
     """
     
     import utils.sonar_utils as sonar_utils
-    from utils.sonar_utils import ConeGridSpec
     
     print(f"🔬 EXTRACTING RAW SONAR DATA WITH CONFIGURABLE RMAX")
     print(f"   📁 Bag: {target_bag}")

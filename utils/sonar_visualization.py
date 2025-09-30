@@ -43,7 +43,7 @@ class SonarVisualizer:
             # Geometry / calibration
             "fov_deg": 120.0,
             "range_min_m": 0.0,
-            "range_max_m": 30.0,
+            "range_max_m": 20.0,
             "display_range_max_m": 10.0,
             # Orientation
             "swap_hw": False,
