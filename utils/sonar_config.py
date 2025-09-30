@@ -11,7 +11,7 @@ from typing import Dict
 FOV_DEG_DEFAULT: float = 120.0
 RANGE_MIN_M_DEFAULT: float = 0.0
 RANGE_MAX_M_DEFAULT: float = 20.0
-DISPLAY_RANGE_MAX_M_DEFAULT: float = 10.0
+DISPLAY_RANGE_MAX_M_DEFAULT: float = 5.0
 
 CONE_W_DEFAULT: int = 900
 CONE_H_DEFAULT: int = 700
