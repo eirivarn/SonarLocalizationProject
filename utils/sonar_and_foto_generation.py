@@ -262,6 +262,7 @@ def export_optimized_sonar_video(
                         if min_sonar_dt <= pd.Timedelta(f"{NET_DISTANCE_TOLERANCE}s") and sonar_rec.get("detection_success", False):
                             sonar_distance_px = sonar_rec["distance_pixels"]
                             sonar_distance_m = sonar_rec.get("distance_meters", sonar_distance_px * pixels_to_meters_avg)
+                            sonar_angle_deg = sonar_rec.get("angle_degrees", 0.0) if pd.notna(sonar_rec.get("angle_degrees")) else 0.0
                             if sync_status == "NO_DATA":
                                 sync_status = "SONAR_ONLY"
                             elif sync_status in ["DISTANCE_OK", "FULL_SYNC"]:
@@ -311,14 +312,21 @@ def export_optimized_sonar_video(
                     if sonar_distance_m is not None and sonar_distance_m <= DISPLAY_RANGE_MAX_M:
                         sonar_line_color = (255, 0, 255)  # Magenta
                         sonar_center_color = (128, 0, 128)  # Dark magenta
-                        sonar_label = f"SONAR: {sonar_distance_m:.2f}m"
+                        sonar_label = f"SONAR: {sonar_distance_m:.2f}m @ {sonar_angle_deg:.1f}°"
 
-                        # Sonar analysis is always horizontal (no angle info)
+                        # Draw angled line using sonar angle
+                        sonar_angle_rad = np.radians(sonar_angle_deg)
                         sx1, sy1 = -net_half_width, sonar_distance_m
                         sx2, sy2 = +net_half_width, sonar_distance_m
 
-                        spx1, spy1 = x_px(sx1), y_px(sy1)
-                        spx2, spy2 = x_px(sx2), y_px(sy2)
+                        cos_a, sin_a = np.cos(sonar_angle_rad), np.sin(sonar_angle_rad)
+                        srx1 = sx1 * cos_a - (sy1 - sonar_distance_m) * sin_a
+                        sry1 = sx1 * sin_a + (sy1 - sonar_distance_m) * cos_a + sonar_distance_m
+                        srx2 = sx2 * cos_a - (sy2 - sonar_distance_m) * sin_a
+                        sry2 = sx2 * sin_a + (sy2 - sonar_distance_m) * cos_a + sonar_distance_m
+
+                        spx1, spy1 = x_px(srx1), y_px(sry1)
+                        spx2, spy2 = x_px(srx2), y_px(sry2)
 
                         cv2.line(cone_bgr, (spx1, spy1), (spx2, spy2), sonar_line_color, 3)
                         for (px, py) in [(spx1, spy1), (spx2, spy2)]:
@@ -366,8 +374,13 @@ def export_optimized_sonar_video(
 
             # annotate status if net considered
             if (INCLUDE_NET or SONAR_DISTANCE_RESULTS is not None) and status_text:
-                cv2.putText(cone_bgr, status_text, (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 3, cv2.LINE_AA)
-                cv2.putText(cone_bgr, status_text, (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+                # Legend
+                legend_y = 15
+                cv2.putText(cone_bgr, "DVL: Yellow/Orange (nav data)", (10, legend_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 2, cv2.LINE_AA)
+                cv2.putText(cone_bgr, "SONAR: Magenta (analysis)", (10, legend_y + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2, cv2.LINE_AA)
+                # Status
+                cv2.putText(cone_bgr, status_text, (10, 35 + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 3, cv2.LINE_AA)
+                cv2.putText(cone_bgr, status_text, (10, 35 + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
 
             # footer info
             frame_info = f"Frame {frame_idx}/{len(frame_indices)} | {TARGET_BAG} | Opt.Sync"
