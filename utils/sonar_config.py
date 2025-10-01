@@ -83,6 +83,7 @@ IMAGE_PROCESSING_CONFIG: Dict = {
     'min_contour_area': 100,
     'morph_close_kernel': 5,
     'edge_dilation_iterations': 2,
+    'extreme_angle_threshold_deg': 20.0,  # Degrees from horizontal to trigger ellipse center fallback
 }
 
 ELONGATION_CONFIG: Dict = {
@@ -96,6 +97,8 @@ ELONGATION_CONFIG: Dict = {
 TRACKING_CONFIG: Dict = {
     'aoi_boost_factor': 1000.0,
     'aoi_expansion_pixels': 10,
+    'ellipse_smoothing_alpha': 0.2,  # Smoothing factor (0.0 = no smoothing, 1.0 = instant jump)
+    'ellipse_max_movement_pixels': 10.0,  # Maximum pixels ellipse center can move per frame
 }
 
 VIDEO_CONFIG: Dict = {

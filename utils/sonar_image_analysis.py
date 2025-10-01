@@ -309,23 +309,59 @@ def select_best_contour(contours, cfg_img=IMAGE_PROCESSING_CONFIG, cfg_track=TRA
 
 # ============================ Public: distance+angle extraction ============================
 
-def _distance_angle_from_contour(contour) -> Tuple[Optional[float], Optional[float]]:
+def _distance_angle_from_contour(contour, image_width: int, image_height: int) -> Tuple[Optional[float], Optional[float]]:
+    """Calculate net distance straight ahead of robot (center beam intersection)."""
     if contour is None or len(contour) < 5:
         return None, None
     try:
         (cx, cy), (minor_axis, major_axis), angle = cv2.fitEllipse(contour)
-        distance = float(cy)
+
+        # Calculate intersection of net's major axis with center beam (x = image_width/2)
+        ang_r = np.radians(angle + 90.0)  # Major axis direction
+        cos_ang = np.cos(ang_r)
+        sin_ang = np.sin(ang_r)
+
+        # Find intersection with vertical center line
+        center_x = image_width / 2
+
+        if abs(cos_ang) > 1e-6:  # Avoid division by zero
+            # Solve: cx + t * cos_ang = center_x
+            t = (center_x - cx) / cos_ang
+            intersect_y = cy + t * sin_ang
+
+            # Use the intersection point directly (blue dot position) - no bounds checking
+            distance = intersect_y
+        else:
+            # Line is nearly vertical, use center y
+            distance = cy
+
         red_line_angle = (float(angle) + 90.0) % 360.0
-        return distance, red_line_angle
+        return float(distance), red_line_angle
     except Exception:
         return None, None
 
-def get_red_line_distance_and_angle(frame_u8: np.ndarray):
-    """Return (distance_pixels, angle_deg) for the dominant elongated contour, or (None, None)."""
+def get_red_line_distance_and_angle(frame_u8: np.ndarray, prev_aoi: Optional[Tuple[int,int,int,int]] = None):
+    """Return (distance_pixels, angle_deg) for the dominant elongated contour, or (None, None).
+    
+    Uses SAME contour selection logic as process_frame_for_video to ensure consistency.
+    """
     _, edges_proc = preprocess_edges(frame_u8, IMAGE_PROCESSING_CONFIG)
     contours, _ = cv2.findContours(edges_proc, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-    best, _, _ = select_best_contour(contours)
-    return _distance_angle_from_contour(best)
+    
+    # Apply same AOI logic as video processing
+    aoi = None
+    if prev_aoi is not None:
+        ax, ay, aw, ah = prev_aoi
+        exp = int(TRACKING_CONFIG.get('aoi_expansion_pixels', 10))
+        H, W = frame_u8.shape[:2]
+        aoi = (max(0, ax-exp), max(0, ay-exp),
+               min(W - max(0, ax-exp), aw + 2*exp),
+               min(H - max(0, ay-exp), ah + 2*exp))
+    
+    # Use same contour selection as video
+    best, _, _ = select_best_contour(contours, IMAGE_PROCESSING_CONFIG, TRACKING_CONFIG, aoi)
+    H, W = frame_u8.shape[:2]
+    return _distance_angle_from_contour(best, W, H)
 
 # ============================ Public: per-frame processing (video overlay) ============================
 
@@ -368,15 +404,38 @@ def process_frame_for_video(frame_u8: np.ndarray, prev_aoi: Optional[Tuple[int,i
         next_aoi = (x, y, w, h)
         if VIDEO_CONFIG.get('show_ellipse', True) and len(best) >= 5:
             try:
+                # Fit ellipse on the detected contour
                 ellipse = cv2.fitEllipse(best)
-                cv2.ellipse(out, ellipse, (255, 0, 255), 1)
-                # 90°-rotated major-axis line (red)
                 (cx, cy), (minor, major), ang = ellipse
+                
+                # Draw the ellipse
+                cv2.ellipse(out, ellipse, (255, 0, 255), 1)
+                
+                # 90°-rotated major-axis line (red)
                 ang_r = np.radians(ang + 90.0)
                 half = major * 0.5
                 p1 = (int(cx + half*np.cos(ang_r)), int(cy + half*np.sin(ang_r)))
                 p2 = (int(cx - half*np.cos(ang_r)), int(cy - half*np.sin(ang_r)))
                 cv2.line(out, p1, p2, (0,0,255), 2)
+                
+                # Calculate and draw intersection point with center beam
+                H_img, W_img = frame_u8.shape[:2]
+                center_x = W_img / 2
+                cos_ang = np.cos(ang_r)
+                sin_ang = np.sin(ang_r)
+                
+                if abs(cos_ang) > 1e-6:  # Avoid division by zero
+                    t = (center_x - cx) / cos_ang
+                    intersect_y = cy + t * sin_ang
+                    intersect_x = center_x
+                else:  # Line is nearly vertical
+                    intersect_x = cx
+                    intersect_y = cy
+                
+                # Draw intersection point (blue circle)
+                cv2.circle(out, (int(intersect_x), int(intersect_y)), 2, (255, 0, 0), -1)  # Filled blue circle
+                cv2.circle(out, (int(intersect_x), int(intersect_y)), 5, (255, 0, 0), 2)  # Blue ring
+                
             except Exception:
                 pass
         # text & status
@@ -412,13 +471,13 @@ def process_frame_for_video(frame_u8: np.ndarray, prev_aoi: Optional[Tuple[int,i
 
     return out, next_aoi
 
-# ============================ Public: analysis over time (deduped) ============================
-
 def analyze_red_line_distance_over_time(npz_file_index: int = 0,
                                         frame_start: int = 0,
                                         frame_count: Optional[int] = None,
-                                        frame_step: int = 1) -> pd.DataFrame:
-    """Single unified version (deduped)."""
+                                        frame_step: int = 1,
+                                        save_error_frames: bool = False,
+                                        error_frames_dir: str = "exports/error_frames") -> pd.DataFrame:
+    """Analyze red line distance over time - uses SAME calculation as video display."""
     print("=== RED LINE DISTANCE ANALYSIS OVER TIME ===")
     files = get_available_npz_files()
     if npz_file_index >= len(files):
@@ -439,21 +498,50 @@ def analyze_red_line_distance_over_time(npz_file_index: int = 0,
     print(f"Total frames available: {T}")
     print(f"Analyzing frames {frame_start} to {frame_start + actual * frame_step} (step={frame_step})")
 
+    # Set up error frame saving
+    if save_error_frames:
+        error_dir = Path(error_frames_dir)
+        error_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Saving error frames to: {error_dir}")
+
     out = {'frame_index': [], 'timestamp': [], 'distance_pixels': [], 'angle_degrees': [], 'detection_success': [], 'distance_meters': []}
     success = 0
+    aoi = None  # Track AOI across frames like video does
 
     for i in range(actual):
         idx = frame_start + i * frame_step
         if idx >= T: break
         frame_u8 = to_uint8_gray(cones[idx])
-        distance, angle = get_red_line_distance_and_angle(frame_u8)
+        # Use the SAME function as video display - with AOI tracking
+        distance_pixels, angle = get_red_line_distance_and_angle(frame_u8, aoi)
+        
+        # Update AOI for next frame (same logic as video)
+        if distance_pixels is not None:
+            _, edges_proc = preprocess_edges(frame_u8, IMAGE_PROCESSING_CONFIG)
+            contours, _ = cv2.findContours(edges_proc, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+            
+            # Apply same AOI expansion as video
+            expanded_aoi = None
+            if aoi is not None:
+                ax, ay, aw, ah = aoi
+                exp = int(TRACKING_CONFIG.get('aoi_expansion_pixels', 10))
+                H, W = frame_u8.shape[:2]
+                expanded_aoi = (max(0, ax-exp), max(0, ay-exp),
+                               min(W - max(0, ax-exp), aw + 2*exp),
+                               min(H - max(0, ay-exp), ah + 2*exp))
+            
+            best, feat, _ = select_best_contour(contours, IMAGE_PROCESSING_CONFIG, TRACKING_CONFIG, expanded_aoi)
+            if best is not None:
+                x, y, w, h = feat['rect']
+                aoi = (x, y, w, h)  # Update AOI for next frame
+        
         out['frame_index'].append(idx)
         out['timestamp'].append(ts[idx] if idx < len(ts) else idx)
-        out['distance_pixels'].append(distance)
+        out['distance_pixels'].append(distance_pixels)
         out['angle_degrees'].append(angle)
-        ok = distance is not None
+        ok = distance_pixels is not None
         out['detection_success'].append(ok)
-        out['distance_meters'].append(y_min + distance * px2m_y if ok else None)
+        out['distance_meters'].append(y_min + distance_pixels * px2m_y if ok else None)
         if ok: success += 1
         if (i + 1) % 50 == 0:
             print(f"  Processed {i+1}/{actual} frames (Success rate: {success/(i+1)*100:.1f}%)")
@@ -648,34 +736,181 @@ def plot_real_world_distance_analysis(distance_results: pd.DataFrame,
     mv = dist.rolling(window=win, center=True).mean()
     sd = dist.rolling(window=win, center=True).std()
 
-    fig, ax = plt.subplots(2, 2, figsize=(16, 12))
-    fig.suptitle('Red Line Distance Analysis Over Time (Real-World Distances)', fontsize=16, fontweight='bold')
+    # Create interactive plots using plotly
+    try:
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
 
-    ax[0,0].plot(valid['frame_index'], dist, 'b-', alpha=0.7, linewidth=1)
-    ax[0,0].scatter(valid['frame_index'], dist, c='red', s=20, alpha=0.6)
-    ax[0,0].set_title('Red Line Distance vs Frame Index'); ax[0,0].set_xlabel('Frame'); ax[0,0].set_ylabel('Distance (m)')
-    ax[0,0].grid(True, alpha=0.3)
-    ax[0,0].text(0.02, 0.98, f'Mean: {dist.mean():.2f}m\nStd: {dist.std():.2f}m\nRange: {dist.min():.2f}-{dist.max():.2f}m',
-                 transform=ax[0,0].transAxes, fontsize=9, va='top',
-                 bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+        fig = make_subplots(
+            rows=2, cols=2,
+            subplot_titles=(
+                'Red Line Distance vs Frame Index',
+                'Red Line Distance vs Time',
+                'Red Line Distance Distribution',
+                'Distance Trends and Variability'
+            ),
+            specs=[
+                [{"secondary_y": False}, {"secondary_y": False}],
+                [{"secondary_y": False}, {"secondary_y": False}]
+            ]
+        )
 
-    ax[0,1].plot(valid['frame_index'], dist, 'g-', alpha=0.7, linewidth=1)
-    ax[0,1].scatter(valid['frame_index'], dist, c='red', s=20, alpha=0.6)
-    ax[0,1].set_title('Red Line Distance vs Time'); ax[0,1].set_xlabel('Frame'); ax[0,1].set_ylabel('Distance (m)')
-    ax[0,1].grid(True, alpha=0.3)
+        # Top-left: Distance vs Frame Index
+        fig.add_trace(
+            go.Scatter(
+                x=valid['frame_index'],
+                y=dist,
+                mode='lines+markers',
+                name='Distance',
+                line=dict(color='blue', width=2),
+                marker=dict(color='red', size=6),
+                showlegend=False
+            ),
+            row=1, col=1
+        )
 
-    nbins = max(5, min(30, len(dist)//5))
-    ax[1,0].hist(dist, bins=nbins, alpha=0.7, color='lightcoral', edgecolor='black')
-    ax[1,0].axvline(dist.mean(), color='red', linestyle='--', linewidth=2, label=f'Mean: {dist.mean():.2f}m')
-    ax[1,0].axvline(dist.median(), color='green', linestyle='--', linewidth=2, label=f'Median: {dist.median():.2f}m')
-    ax[1,0].set_title('Red Line Distance Distribution'); ax[1,0].legend(); ax[1,0].grid(True, alpha=0.3)
+        # Top-right: Distance vs Time (using frame index as proxy for time)
+        fig.add_trace(
+            go.Scatter(
+                x=valid['frame_index'],
+                y=dist,
+                mode='lines+markers',
+                name='Distance over Time',
+                line=dict(color='green', width=2),
+                marker=dict(color='red', size=6),
+                showlegend=False
+            ),
+            row=1, col=2
+        )
 
-    ax[1,1].plot(valid['frame_index'], dist, 'lightcoral', alpha=0.5, label='Raw data')
-    ax[1,1].plot(valid['frame_index'], mv, 'darkred', linewidth=2, label=f'Moving Avg (window={win})')
-    ax[1,1].fill_between(valid['frame_index'], mv - sd, mv + sd, alpha=0.3, color='red', label='±1 Std Dev')
-    ax[1,1].set_title('Distance Trends and Variability'); ax[1,1].legend(); ax[1,1].grid(True, alpha=0.3)
+        # Bottom-left: Histogram
+        fig.add_trace(
+            go.Histogram(
+                x=dist,
+                nbinsx=max(5, min(30, len(dist)//5)),
+                name='Distance Distribution',
+                marker_color='lightcoral',
+                opacity=0.7,
+                showlegend=False
+            ),
+            row=2, col=1
+        )
 
-    plt.tight_layout(); plt.show()
+        # Add mean and median lines to histogram
+        fig.add_vline(
+            x=dist.mean(),
+            line=dict(color='red', dash='dash', width=2),
+            annotation_text=f'Mean: {dist.mean():.2f}m',
+            row=2, col=1
+        )
+        fig.add_vline(
+            x=dist.median(),
+            line=dict(color='green', dash='dash', width=2),
+            annotation_text=f'Median: {dist.median():.2f}m',
+            row=2, col=1
+        )
+
+        # Bottom-right: Trends and variability
+        fig.add_trace(
+            go.Scatter(
+                x=valid['frame_index'],
+                y=dist,
+                mode='lines',
+                name='Raw data',
+                line=dict(color='lightcoral', width=1),
+                opacity=0.5
+            ),
+            row=2, col=2
+        )
+
+        fig.add_trace(
+            go.Scatter(
+                x=valid['frame_index'],
+                y=mv,
+                mode='lines',
+                name=f'Moving Avg (window={win})',
+                line=dict(color='darkred', width=3)
+            ),
+            row=2, col=2
+        )
+
+        # Add confidence band
+        fig.add_trace(
+            go.Scatter(
+                x=valid['frame_index'].tolist() + valid['frame_index'].tolist()[::-1],
+                y=(mv + sd).tolist() + (mv - sd).tolist()[::-1],
+                fill='toself',
+                fillcolor='rgba(255,0,0,0.3)',
+                line=dict(color='rgba(255,255,255,0)'),
+                name='±1 Std Dev'
+            ),
+            row=2, col=2
+        )
+
+        # Update layout
+        fig.update_layout(
+            title_text='Red Line Distance Analysis Over Time (Real-World Distances)',
+            title_font_size=16,
+            title_font_weight='bold',
+            height=800,
+            showlegend=True
+        )
+
+        # Update axis labels
+        fig.update_xaxes(title_text='Frame Index', row=1, col=1)
+        fig.update_xaxes(title_text='Frame Index', row=1, col=2)
+        fig.update_xaxes(title_text='Distance (m)', row=2, col=1)
+        fig.update_xaxes(title_text='Frame Index', row=2, col=2)
+
+        fig.update_yaxes(title_text='Distance (m)', row=1, col=1)
+        fig.update_yaxes(title_text='Distance (m)', row=1, col=2)
+        fig.update_yaxes(title_text='Frequency', row=2, col=1)
+        fig.update_yaxes(title_text='Distance (m)', row=2, col=2)
+
+        # Add statistics annotation
+        stats_text = f'Mean: {dist.mean():.2f}m<br>Std: {dist.std():.2f}m<br>Range: {dist.min():.2f}-{dist.max():.2f}m'
+        fig.add_annotation(
+            text=stats_text,
+            xref='paper', yref='paper',
+            x=0.02, y=0.98,
+            showarrow=False,
+            bgcolor='wheat',
+            opacity=0.8
+        )
+
+        fig.show()
+
+    except ImportError:
+        print("⚠️ Plotly not available, falling back to matplotlib plots")
+        # Fallback to original matplotlib plots
+        fig, ax = plt.subplots(2, 2, figsize=(16, 12))
+        fig.suptitle('Red Line Distance Analysis Over Time (Real-World Distances)', fontsize=16, fontweight='bold')
+
+        ax[0,0].plot(valid['frame_index'], dist, 'b-', alpha=0.7, linewidth=1)
+        ax[0,0].scatter(valid['frame_index'], dist, c='red', s=20, alpha=0.6)
+        ax[0,0].set_title('Red Line Distance vs Frame Index'); ax[0,0].set_xlabel('Frame'); ax[0,0].set_ylabel('Distance (m)')
+        ax[0,0].grid(True, alpha=0.3)
+        ax[0,0].text(0.02, 0.98, f'Mean: {dist.mean():.2f}m\nStd: {dist.std():.2f}m\nRange: {dist.min():.2f}-{dist.max():.2f}m',
+                     transform=ax[0,0].transAxes, fontsize=9, va='top',
+                     bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+
+        ax[0,1].plot(valid['frame_index'], dist, 'g-', alpha=0.7, linewidth=1)
+        ax[0,1].scatter(valid['frame_index'], dist, c='red', s=20, alpha=0.6)
+        ax[0,1].set_title('Red Line Distance vs Time'); ax[0,1].set_xlabel('Frame'); ax[0,1].set_ylabel('Distance (m)')
+        ax[0,1].grid(True, alpha=0.3)
+
+        nbins = max(5, min(30, len(dist)//5))
+        ax[1,0].hist(dist, bins=nbins, alpha=0.7, color='lightcoral', edgecolor='black')
+        ax[1,0].axvline(dist.mean(), color='red', linestyle='--', linewidth=2, label=f'Mean: {dist.mean():.2f}m')
+        ax[1,0].axvline(dist.median(), color='green', linestyle='--', linewidth=2, label=f'Median: {dist.median():.2f}m')
+        ax[1,0].set_title('Red Line Distance Distribution'); ax[1,0].legend(); ax[1,0].grid(True, alpha=0.3)
+
+        ax[1,1].plot(valid['frame_index'], dist, 'lightcoral', alpha=0.5, label='Raw data')
+        ax[1,1].plot(valid['frame_index'], mv, 'darkred', linewidth=2, label=f'Moving Avg (window={win})')
+        ax[1,1].fill_between(valid['frame_index'], mv - sd, mv + sd, alpha=0.3, color='red', label='±1 Std Dev')
+        ax[1,1].set_title('Distance Trends and Variability'); ax[1,1].legend(); ax[1,1].grid(True, alpha=0.3)
+
+        plt.tight_layout(); plt.show()
 
 # ============================ Public: SONAR vs DVL (merged/DRY) ============================
 
@@ -1123,8 +1358,9 @@ def create_contour_detection_video(npz_file_index=0, frame_start=0, frame_count=
         frame_u8 = to_uint8_gray(cones[idx])
         vis, next_aoi = process_frame_for_video(frame_u8, aoi)
         # Compute detected net distance (pixels) and overlay on the frame
+        # Use SAME AOI context to ensure consistency with blue circle
         try:
-            dist_px, ang_deg = get_red_line_distance_and_angle(frame_u8)
+            dist_px, ang_deg = get_red_line_distance_and_angle(frame_u8, aoi)
             if dist_px is not None:
                 dist_text = f"Detected net distance: {dist_px:.1f}px"
             else:
