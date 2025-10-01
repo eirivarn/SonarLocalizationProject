@@ -1,3 +1,6 @@
+# Copyright (c) 2025 Eirik Varnes
+# Licensed under the MIT License. See LICENSE file for details.
+
 # Navigation and Guidance Data Analysis Utilities
 # ===============================================
 # Extract and visualize navigation and guidance sensor data from SOLAQUA CSV exports

@@ -1,3 +1,6 @@
+# Copyright (c) 2025 Eirik Varnes
+# Licensed under the MIT License. See LICENSE file for details.
+
 from __future__ import annotations
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional

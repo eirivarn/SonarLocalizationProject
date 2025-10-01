@@ -1,3 +1,6 @@
+# Copyright (c) 2025 Eirik Varnes
+# Licensed under the MIT License. See LICENSE file for details.
+
 # uuv_sonar_viz.py
 """
 Utilities for loading Sonoptix-style multibeam sonar frames, matching video frames by

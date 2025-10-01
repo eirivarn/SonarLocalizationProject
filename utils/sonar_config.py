@@ -1,3 +1,6 @@
+# Copyright (c) 2025 Eirik Varnes
+# Licensed under the MIT License. See LICENSE file for details.
+
 """Centralized sonar configuration for SOLAQUA.
 
 Place common display, enhancement and image-analysis defaults here so all

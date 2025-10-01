@@ -1,3 +1,6 @@
+# Copyright (c) 2025 Eirik Varnes
+# Licensed under the MIT License. See LICENSE file for details.
+
 #!/usr/bin/env python3
 """
 SOLAQUA Complete Export Tool

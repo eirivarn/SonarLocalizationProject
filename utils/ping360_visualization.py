@@ -1,3 +1,6 @@
+# Copyright (c) 2025 Eirik Varnes
+# Licensed under the MIT License. See LICENSE file for details.
+
 """
 Ping360 Sonar Visualization Utilities
 
@@ -579,7 +582,7 @@ def find_ping360_files(base_path: Union[str, pathlib.Path] = ".") -> List[Tuple[
     
     Parameters:
     -----------
-    base_path : str or Path, optional
+    base_path : str, optional
         Base path to search from (default: current directory)
         
     Returns:

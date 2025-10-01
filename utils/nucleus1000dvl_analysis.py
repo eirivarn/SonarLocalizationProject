@@ -1,3 +1,6 @@
+# Copyright (c) 2025 Eirik Varnes
+# Licensed under the MIT License. See LICENSE file for details.
+
 # Nucleus1000DVL Data Analysis and Visualization Utilities
 # ========================================================
 # Extract and visualize DVL (Doppler Velocity Log) sensor data from SOLAQUA CSV exports
