@@ -27,7 +27,7 @@ from utils.sonar_utils import (
     enhance_intensity,
     cone_raster_like_display_cell,
 )
-from utils.sonar_config import SONAR_VIS_DEFAULTS, ConeGridSpec
+from utils.sonar_config import SONAR_VIS_DEFAULTS, ConeGridSpec, EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
 
 class SonarVisualizer:
     """
@@ -46,6 +46,19 @@ class SonarVisualizer:
         self.config = SONAR_VIS_DEFAULTS.copy()
         if config:
             self.config.update(config)
+
+    # -------------------------------------------------------------------------
+    # File discovery helpers
+    # -------------------------------------------------------------------------
+    def find_sonar_files(self, search_root: Union[str, Path] = None) -> List[Path]:
+        """
+        Find candidate sonar files in an exports/by_bag style directory.
+        If search_root is None, use the configured exports dir + 'by_bag'.
+        """
+        sr = Path(search_root) if search_root is not None else Path(EXPORTS_DIR_DEFAULT) / EXPORTS_SUBDIRS.get('by_bag', 'by_bag')
+        if not sr.exists():
+            return []
+        return sorted(list(sr.glob("sensor_sonoptix_echo_image__*.csv")))
 
     # -------------------------------------------------------------------------
     # Data loading / frame extraction (delegated)
@@ -262,11 +275,17 @@ class SonarVisualizer:
 # -----------------------------------------------------------------------------
 # Lightweight discovery / quick looks
 # -----------------------------------------------------------------------------
-def find_sonar_files(search_root: Union[str, Path] = "exports/by_bag") -> List[Path]:
+def find_sonar_files(search_root: Union[str, Path] = None) -> List[Path]:
     """
     Find candidate sonar files in the exports directory.
+    If search_root is None, use the configured exports dir + 'by_bag'.
     """
-    search_root = Path(search_root)
+    from utils.sonar_config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
+    if search_root is None:
+        search_root = Path(EXPORTS_DIR_DEFAULT) / EXPORTS_SUBDIRS.get('by_bag', 'by_bag')
+    else:
+        search_root = Path(search_root)
+
     if not search_root.exists():
         return []
     candidates = []

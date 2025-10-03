@@ -16,6 +16,7 @@ from utils.sonar_config import (
     SONAR_VIS_DEFAULTS, ENHANCE_DEFAULTS,
     CONE_W_DEFAULT, CONE_H_DEFAULT, CONE_FLIP_VERTICAL_DEFAULT,
     CMAP_NAME_DEFAULT, DISPLAY_RANGE_MAX_M_DEFAULT, FOV_DEG_DEFAULT,
+    EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS,
 )
 
 def load_png_bgr(path: Path) -> np.ndarray:
@@ -41,7 +42,7 @@ def put_text(bgr, s, y, x=10, scale=0.55):
 
 def export_optimized_sonar_video(
     TARGET_BAG: str,
-    EXPORTS_FOLDER: Path,
+    EXPORTS_FOLDER: Path | None,
     START_IDX: int = 0,
     END_IDX: int | None = 600,
     STRIDE: int = 1,
@@ -103,8 +104,9 @@ def export_optimized_sonar_video(
           + (f" (dist tol={NET_DISTANCE_TOLERANCE}s, pitch tol={NET_PITCH_TOLERANCE}s)" if INCLUDE_NET else ""))
     print(f"   📊 Sonar Analysis: {'enabled' if SONAR_DISTANCE_RESULTS is not None else 'disabled'}")
 
-    # --- Load sonar timestamps/frames ---
-    sonar_csv_file = Path(EXPORTS_FOLDER) / "by_bag" / f"sensor_sonoptix_echo_image__{TARGET_BAG}_video.csv"
+    # --- Resolve exports folder and load sonar timestamps/frames ---
+    exports_root = Path(EXPORTS_FOLDER) if EXPORTS_FOLDER is not None else Path(EXPORTS_DIR_DEFAULT)
+    sonar_csv_file = exports_root / EXPORTS_SUBDIRS.get('by_bag', 'by_bag') / f"sensor_sonoptix_echo_image__{TARGET_BAG}_video.csv"
     if not sonar_csv_file.exists():
         print(f"❌ ERROR: Sonar CSV not found: {sonar_csv_file}")
         return
@@ -122,7 +124,7 @@ def export_optimized_sonar_video(
     # --- Optional: load navigation (NetDistance/NetPitch) ---
     nav_complete = None
     if INCLUDE_NET:
-        nav_file = Path(EXPORTS_FOLDER) / "by_bag" / f"navigation_plane_approximation__{TARGET_BAG}_data.csv"
+        nav_file = exports_root / EXPORTS_SUBDIRS.get('by_bag', 'by_bag') / f"navigation_plane_approximation__{TARGET_BAG}_data.csv"
         if nav_file.exists():
             t0 = time.time()
             nav_complete = pd.read_csv(nav_file)

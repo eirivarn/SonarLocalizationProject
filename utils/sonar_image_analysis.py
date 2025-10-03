@@ -77,12 +77,13 @@ def load_cone_run_npz(path: str | Path):
     return cones, ts, extent, meta
 
 
-def get_available_npz_files(npz_dir: str = "exports/outputs") -> List[Path]:
-    npz_dir = Path(npz_dir)
+def get_available_npz_files(npz_dir: str | None = None) -> List[Path]:
+    from utils.sonar_config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
+    npz_dir = Path(npz_dir) if npz_dir is not None else Path(EXPORTS_DIR_DEFAULT) / EXPORTS_SUBDIRS.get('outputs', 'outputs')
     return list(npz_dir.glob("*_cones.npz")) if npz_dir.exists() else []
 
 
-def list_npz_files(npz_dir: str = "exports/outputs") -> None:
+def list_npz_files(npz_dir: str | None = None) -> None:
     npz_files = get_available_npz_files(npz_dir)
     if not npz_files:
         print(f"No NPZ files found in {npz_dir}")
@@ -479,8 +480,12 @@ def analyze_red_line_distance_over_time(npz_file_index: int = 0,
                                         frame_count: Optional[int] = None,
                                         frame_step: int = 1,
                                         save_error_frames: bool = False,
-                                        error_frames_dir: str = "exports/error_frames") -> pd.DataFrame:
-    """Analyze red line distance over time - uses SAME calculation as video display."""
+                                        error_frames_dir: str | None = None) -> pd.DataFrame:
+    """Analyze red line distance over time - uses SAME calculation as video display.
+
+    If error_frames_dir is None the directory will be created under
+    EXPORTS_DIR_DEFAULT / EXPORTS_SUBDIRS['outputs'] / 'error_frames'.
+    """
     print("=== RED LINE DISTANCE ANALYSIS OVER TIME ===")
     files = get_available_npz_files()
     if npz_file_index >= len(files):
@@ -503,7 +508,11 @@ def analyze_red_line_distance_over_time(npz_file_index: int = 0,
 
     # Set up error frame saving
     if save_error_frames:
-        error_dir = Path(error_frames_dir)
+        from utils.sonar_config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
+        if error_frames_dir is not None:
+            error_dir = Path(error_frames_dir)
+        else:
+            error_dir = Path(EXPORTS_DIR_DEFAULT) / EXPORTS_SUBDIRS.get('outputs', 'outputs') / 'error_frames'
         error_dir.mkdir(parents=True, exist_ok=True)
         print(f"Saving error frames to: {error_dir}")
 
@@ -598,8 +607,8 @@ def analyze_red_line_distance_from_sonar_csv(TARGET_BAG: str,
     print(f"   Cone Size: {CONE_W}x{CONE_H}")
     print(f"   Range: {RANGE_MIN_M}-{DISPLAY_RANGE_MAX_M}m | FOV: {FOV_DEG}°")
 
-    # Load sonar data (same as video generation)
-    sonar_csv_file = EXPORTS_FOLDER / "by_bag" / f"sensor_sonoptix_echo_image__{TARGET_BAG}_video.csv"
+    from utils.sonar_config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
+    sonar_csv_file = (Path(EXPORTS_DIR_DEFAULT) / EXPORTS_SUBDIRS.get('by_bag','by_bag')) / f"sensor_sonoptix_echo_image__{TARGET_BAG}_video.csv" if EXPORTS_DIR_DEFAULT else EXPORTS_FOLDER / "by_bag" / f"sensor_sonoptix_echo_image__{TARGET_BAG}_video.csv"
     if not sonar_csv_file.exists():
         print(f"❌ ERROR: Sonar CSV not found: {sonar_csv_file}")
         return None
@@ -1271,7 +1280,7 @@ def visualize_processing_steps(frame_index=50, npz_file_index=0, figsize=(15, 5)
 # ============================ Frame export & video ============================
 
 def pick_and_save_frame(npz_file_index: int = 0, frame_position: str | float = 'middle',
-                        output_path: str = "sample_frame.png", npz_dir: str = "exports/outputs") -> Dict:
+                        output_path: str = "sample_frame.png", npz_dir: str | None = None) -> Dict:
     files = get_available_npz_files(npz_dir)
     if not files: raise FileNotFoundError(f"No NPZ files found in {npz_dir}")
     if npz_file_index >= len(files): raise IndexError(f"NPZ index {npz_file_index} out of range 0..{len(files)-1}")

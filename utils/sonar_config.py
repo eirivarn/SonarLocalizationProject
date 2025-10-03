@@ -112,9 +112,27 @@ VIDEO_CONFIG: Dict = {
     'text_scale': 0.6,
 }
 
+# --- Repository / on-disk layout defaults ---
+# Centralize the default exports directory name so all tools use the same
+# path (can be overridden by CLI args or environment-specific settings).
+# Default set to the external Lacie disk exports folder per user request
+EXPORTS_DIR_DEFAULT: str = "/Volumes/LaCie/SOLAQUA/exports"
+
+# Standard subfolders created/used under the exports dir. Tools should join
+# these with the configured exports dir to read/write outputs.
+EXPORTS_SUBDIRS: Dict = {
+    'by_bag': 'by_bag',
+    'videos': 'videos',
+    'frames': 'frames',
+    'camera_info': 'camera_info',
+    'outputs': 'outputs',
+    'index': ''  # index files live in the root exports dir
+}
+
 __all__ = [
     'FOV_DEG_DEFAULT', 'RANGE_MIN_M_DEFAULT', 'RANGE_MAX_M_DEFAULT', 'DISPLAY_RANGE_MAX_M_DEFAULT',
     'CONE_W_DEFAULT', 'CONE_H_DEFAULT', 'CONE_FLIP_VERTICAL_DEFAULT', 'CMAP_NAME_DEFAULT',
     'SONAR_VIS_DEFAULTS', 'ENHANCE_DEFAULTS', 'ConeGridSpec',
     'IMAGE_PROCESSING_CONFIG', 'ELONGATION_CONFIG', 'TRACKING_CONFIG', 'VIDEO_CONFIG',
+    'EXPORTS_DIR_DEFAULT', 'EXPORTS_SUBDIRS',
 ]

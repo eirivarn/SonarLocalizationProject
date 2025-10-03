@@ -32,16 +32,36 @@ def base_msgtype(s: str) -> str:
     return s.rsplit("/", 1)[-1] if s else s
 
 def find_data_bags(data_dir: Union[str, Path], recursive: bool = False) -> List[Path]:
-    """Sorted list of paths to *_data.bag in data_dir."""
+    """Sorted list of paths to *_data.bag in data_dir.
+
+    This filters out macOS AppleDouble files (names starting with '._') and other
+    hidden/temporary files that may appear on mounted volumes.
+    """
     data_dir = Path(data_dir)
     bags = data_dir.rglob("*.bag") if recursive else data_dir.glob("*.bag")
-    return sorted(p for p in bags if p.name.endswith("_data.bag"))
+    def _is_valid(p: Path) -> bool:
+        name = p.name
+        # Ignore AppleDouble and other dot-prefixed files
+        if name.startswith('._') or name.startswith('.'):
+            return False
+        return name.endswith("_data.bag")
+
+    return sorted(p for p in bags if _is_valid(p))
 
 def find_video_bags(data_dir: Union[str, Path], recursive: bool = False) -> List[Path]:
-    """Sorted list of paths to *_video.bag in data_dir."""
+    """Sorted list of paths to *_video.bag in data_dir.
+
+    Filters out macOS AppleDouble and hidden files similarly to find_data_bags.
+    """
     data_dir = Path(data_dir)
     bags = data_dir.rglob("*.bag") if recursive else data_dir.glob("*.bag")
-    return sorted(p for p in bags if p.name.endswith("_video.bag"))
+    def _is_valid(p: Path) -> bool:
+        name = p.name
+        if name.startswith('._') or name.startswith('.'):
+            return False
+        return name.endswith("_video.bag")
+
+    return sorted(p for p in bags if _is_valid(p))
 
 
 # ------------------------------ Msg Registry ------------------------------
@@ -462,7 +482,7 @@ def save_dataframe(
 
 def save_all_topics_from_data_bags(
     data_dir: Union[str, Path],
-    out_dir: Union[str, Path] = "exports",
+    out_dir: Union[str, Path] = None,
     file_format: str = "csv",
     arrays_as: str = "json",
     recursive: bool = False,
@@ -480,7 +500,8 @@ def save_all_topics_from_data_bags(
     Returns index DataFrame with columns: [bag, bag_file, topic, msgtypes, rows, out_file]
     """
     data_dir = Path(data_dir)
-    out_dir = Path(out_dir)
+    from utils.sonar_config import EXPORTS_DIR_DEFAULT
+    out_dir = Path(out_dir or EXPORTS_DIR_DEFAULT)
     by_bag_dir = out_dir / "by_bag"
     by_bag_dir.mkdir(parents=True, exist_ok=True)
 
@@ -621,11 +642,12 @@ def _decode_raw_to_bgr(msg) -> Optional[np.ndarray]:
 
 def export_camera_info_for_bag(
     bagpath: Union[str, Path],
-    out_dir: Union[str, Path] = "exports/camera_info",
+    out_dir: Union[str, Path] = None,
     one_per_topic: bool = True,
 ) -> pd.DataFrame:
     bagpath = Path(bagpath)
-    out_dir = Path(out_dir)
+    from utils.sonar_config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
+    out_dir = Path(out_dir or Path(EXPORTS_DIR_DEFAULT) / EXPORTS_SUBDIRS.get('camera_info', 'camera_info'))
     out_dir.mkdir(parents=True, exist_ok=True)
     rows = []
 
@@ -866,7 +888,7 @@ def export_camera_topic_to_png_sequence(
 
 def export_all_video_bags_to_mp4(
     data_dir: Union[str, Path],
-    out_dir: Union[str, Path] = "exports",
+    out_dir: Union[str, Path] = None,
     recursive: bool = False,
     topics: Optional[Iterable[str]] = None,
     codec: str = "mp4v",
@@ -877,9 +899,10 @@ def export_all_video_bags_to_mp4(
     save_camera_info_yaml: bool = True,
 ) -> pd.DataFrame:
     data_dir = Path(data_dir)
-    out_dir = Path(out_dir)
-    vid_dir = out_dir / "videos"
-    info_dir = out_dir / "camera_info"
+    from utils.sonar_config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
+    out_dir = Path(out_dir or EXPORTS_DIR_DEFAULT)
+    vid_dir = out_dir / EXPORTS_SUBDIRS.get('videos', 'videos')
+    info_dir = out_dir / EXPORTS_SUBDIRS.get('camera_info', 'camera_info')
     vid_dir.mkdir(parents=True, exist_ok=True)
     if save_camera_info_yaml:
         info_dir.mkdir(parents=True, exist_ok=True)
@@ -924,7 +947,7 @@ def export_all_video_bags_to_mp4(
                 print(f"(error) {bag.name}:{topic}: {e}")
 
     idx = pd.DataFrame(index_rows)
-    idx_path = out_dir / "index_video_mp4.csv"
+    idx_path = out_dir / EXPORTS_SUBDIRS.get('index', '') / "index_video_mp4.csv"
     idx.to_csv(idx_path, index=False)
     print(f"\nIndex written: {idx_path} ({len(idx)} rows).")
     return idx
@@ -932,7 +955,7 @@ def export_all_video_bags_to_mp4(
 
 def export_all_video_bags_to_png(
     data_dir: Union[str, Path],
-    out_dir: Union[str, Path] = "exports",
+    out_dir: Union[str, Path] = None,
     recursive: bool = False,
     topics: Optional[Iterable[str]] = None,
     stride: int = 1,
@@ -941,8 +964,9 @@ def export_all_video_bags_to_png(
     overwrite: bool = False,
 ) -> pd.DataFrame:
     data_dir = Path(data_dir)
-    out_dir = Path(out_dir)
-    png_root = out_dir / "frames"
+    from utils.sonar_config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
+    out_dir = Path(out_dir or EXPORTS_DIR_DEFAULT)
+    png_root = out_dir / EXPORTS_SUBDIRS.get('frames', 'frames')
     png_root.mkdir(parents=True, exist_ok=True)
 
     index_rows = []

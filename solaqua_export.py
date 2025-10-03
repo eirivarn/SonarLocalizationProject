@@ -14,10 +14,10 @@ This single script handles all SOLAQUA data export operations:
 
 Usage:
     python3 solaqua_export.py --help
-    python3 solaqua_export.py --data-dir data --exports-dir exports
-    python3 solaqua_export.py --data-dir data --exports-dir exports --all
-    python3 solaqua_export.py --data-dir data --exports-dir exports --csv-only
-    python3 solaqua_export.py --data-dir data --exports-dir exports --video-only
+    python3 solaqua_export.py --data-dir /Volumes/LaCie/SOLAQUA/raw_data --exports-dir /Volumes/LaCie/SOLAQUA/exports
+    python3 solaqua_export.py --data-dir /Volumes/LaCie/SOLAQUA/raw_data --exports-dir /Volumes/LaCie/SOLAQUA/exports --all
+    python3 solaqua_export.py --data-dir /Volumes/LaCie/SOLAQUA/raw_data --exports-dir /Volumes/LaCie/SOLAQUA/exports --csv-only
+    python3 solaqua_export.py --data-dir /Volumes/LaCie/SOLAQUA/raw_data --exports-dir /Volumes/LaCie/SOLAQUA/exports --video-only
 """
 
 import argparse
@@ -39,16 +39,17 @@ from utils.dataset_export_utils import (
     find_video_bags,
 )
 import utils.sonar_utils as sonar_utils
+from utils.sonar_config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
 
 
 # ------------------------------ Convenience listings ------------------------------
 
-def load_data_index(out_dir: Path | str = "exports") -> pd.DataFrame:
+def load_data_index(out_dir: Path | str = None) -> pd.DataFrame:
     """
     Load the index created by save_all_topics_from_data_bags().
     Looks for exports/index_data_topics.csv (or .parquet).
     """
-    out_dir = Path(out_dir)
+    out_dir = Path(out_dir or EXPORTS_DIR_DEFAULT)
     csv = out_dir / "index_data_topics.csv"
     pq  = out_dir / "index_data_topics.parquet"
     if csv.exists():
@@ -61,7 +62,7 @@ def load_data_index(out_dir: Path | str = "exports") -> pd.DataFrame:
     )
 
 
-def list_exported_bag_stems(out_dir: Path | str = "exports",
+def list_exported_bag_stems(out_dir: Path | str = None,
                             bag_suffix: str = "_data") -> List[str]:
     """Return bag stems present in the export index, optionally filtered by suffix."""
     idx = load_data_index(out_dir)
@@ -74,7 +75,7 @@ class SOLAQUACompleteExporter:
     Complete SOLAQUA data export tool that handles all export operations.
     """
     
-    def __init__(self, data_dir: Union[str, Path], exports_dir: Union[str, Path] = "exports"):
+    def __init__(self, data_dir: Union[str, Path], exports_dir: Union[str, Path] = None):
         """
         Initialize the complete exporter.
         
@@ -83,7 +84,8 @@ class SOLAQUACompleteExporter:
             exports_dir: Directory where exports will be saved
         """
         self.data_dir = Path(data_dir)
-        self.exports_dir = Path(exports_dir)
+        # Use configured default if caller didn't specify exports_dir
+        self.exports_dir = Path(exports_dir or EXPORTS_DIR_DEFAULT)
         self.exports_dir.mkdir(parents=True, exist_ok=True)
         
         # Set max string digits for large numbers
@@ -511,11 +513,11 @@ class SOLAQUACompleteExporter:
         # Show output directories (only those that exist and are relevant)
         print(f"\nOutput directories:")
         subdirs = [
-            ("by_bag", "CSV/Parquet data files"),
-            ("videos", "MP4 video files"),
-            ("frames", "PNG frame sequences"),
-            ("camera_info", "Camera calibration YAML"),
-            ("outputs", "Cone NPZ files")
+            (EXPORTS_SUBDIRS.get('by_bag', 'by_bag'), "CSV/Parquet data files"),
+            (EXPORTS_SUBDIRS.get('videos', 'videos'), "MP4 video files"),
+            (EXPORTS_SUBDIRS.get('frames', 'frames'), "PNG frame sequences"),
+            (EXPORTS_SUBDIRS.get('camera_info', 'camera_info'), "Camera calibration YAML"),
+            (EXPORTS_SUBDIRS.get('outputs', 'outputs'), "Cone NPZ files")
         ]
         
         for subdir, description in subdirs:
@@ -553,10 +555,10 @@ Examples:
     )
     
     # Directories
-    parser.add_argument("--data-dir", type=str, default="data",
-                       help="Directory containing *.bag files (default: data)")
-    parser.add_argument("--exports-dir", type=str, default="exports",
-                       help="Directory for exports (default: exports)")
+    parser.add_argument("--data-dir", type=str, default="/Volumes/LaCie/SOLAQUA/raw_data",
+                       help="Directory containing *.bag files (default: /Volumes/LaCie/SOLAQUA/raw_data)")
+    parser.add_argument("--exports-dir", type=str, default="/Volumes/LaCie/SOLAQUA/exports",
+                       help="Directory for exports (default: /Volumes/LaCie/SOLAQUA/exports)")
     
     # Operation modes
     parser.add_argument("--all", action="store_true",

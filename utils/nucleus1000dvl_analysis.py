@@ -30,7 +30,7 @@ class Nucleus1000DVLAnalyzer:
     Main class for analyzing Nucleus1000DVL data from CSV files
     """
     
-    def __init__(self, by_bag_folder="exports/by_bag"):
+    def __init__(self, by_bag_folder: str | None = None):
         """
         Initialize analyzer with path to by_bag folder
         
@@ -39,7 +39,12 @@ class Nucleus1000DVLAnalyzer:
         by_bag_folder : str
             Path to folder containing CSV files
         """
-        self.by_bag_folder = Path(by_bag_folder)
+        # Import config defaults here to avoid top-level import cycles
+        from utils.sonar_config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
+
+        # Resolve the by_bag folder: prefer explicit argument, otherwise use config
+        resolved = Path(by_bag_folder) if by_bag_folder is not None else Path(EXPORTS_DIR_DEFAULT) / EXPORTS_SUBDIRS.get('by_bag', 'by_bag')
+        self.by_bag_folder = Path(resolved)
         self.data = {}
         self.available_bags = []
         self.available_sensors = []
@@ -47,7 +52,7 @@ class Nucleus1000DVLAnalyzer:
         if self.by_bag_folder.exists():
             self._discover_files()
         else:
-            print(f"⚠️  Warning: {by_bag_folder} does not exist")
+            print(f"⚠️  Warning: {self.by_bag_folder} does not exist")
     
     def _discover_files(self):
         """Discover available nucleus1000dvl and sensor_dvl files"""
@@ -496,7 +501,7 @@ class Nucleus1000DVLAnalyzer:
             else:
                 print("   ❌ No data available")
 
-    def compare_bottomtrack_across_bags(self, output_folder="exports/outputs", export_plots=False):
+    def compare_bottomtrack_across_bags(self, output_folder: str | None = None, export_plots=False):
         """
         Create comparison plots for bottomtrack velocity across all available bags.
 
@@ -508,15 +513,20 @@ class Nucleus1000DVLAnalyzer:
 
         print(f"📊 Comparing bottomtrack across {len(self.available_bags)} bags")
         # Delegate to the interactive bottomtrack plot (handles multi-bag)
+        # Resolve output folder using configured defaults if not provided
+        if output_folder is None:
+            from utils.sonar_config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
+            output_folder = str(Path(EXPORTS_DIR_DEFAULT) / EXPORTS_SUBDIRS.get('outputs', 'outputs'))
+
         if HAS_PLOTLY:
             try:
-                self.plot_bottomtrack_velocity(None, interactive=True)
+                self.plot_bottomtrack_velocity(output_folder, interactive=True)
             except Exception as e:
                 print(f"⚠️ Failed to create interactive bottomtrack comparison: {e}")
         else:
             print("❌ Plotly not available. Install plotly to view interactive comparisons.")
 
-    def compute_summary_stats(self, export_summary=True, output_folder="exports/outputs"):
+    def compute_summary_stats(self, export_summary=True, output_folder: str | None = None):
         """
         Compute the statistical summary used in the notebook and optionally export it.
 
@@ -544,6 +554,10 @@ class Nucleus1000DVLAnalyzer:
 
         summary_df = pd.DataFrame(summary_stats)
         if not summary_df.empty and export_summary:
+            # Resolve output folder using config defaults when omitted
+            if output_folder is None:
+                from utils.sonar_config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
+                output_folder = Path(EXPORTS_DIR_DEFAULT) / EXPORTS_SUBDIRS.get('outputs', 'outputs')
             outp = Path(output_folder) / "nucleus1000dvl_detailed_summary.csv"
             outp.parent.mkdir(parents=True, exist_ok=True)
             summary_df.to_csv(outp, index=False)
@@ -817,7 +831,9 @@ def create_comprehensive_dvl_dashboard(analyzer, bag_name=None, output_html="dvl
     fig.update_xaxes(title_text="Time (minutes)", row=n_sensors, col=1)
     
     # Save to HTML
-    output_path = Path("exports/outputs") / output_html
+    # Resolve output path using config defaults
+    from utils.sonar_config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
+    output_path = Path(EXPORTS_DIR_DEFAULT) / EXPORTS_SUBDIRS.get('outputs', 'outputs') / output_html
     output_path.parent.mkdir(parents=True, exist_ok=True)
     
     pyo.plot(fig, filename=str(output_path), auto_open=False)
@@ -826,9 +842,9 @@ def create_comprehensive_dvl_dashboard(analyzer, bag_name=None, output_html="dvl
     return fig
 
 
-def run_full_notebook_workflow(by_bag_folder="exports/by_bag", bag_selection=None,
+def run_full_notebook_workflow(by_bag_folder: str | None = None, bag_selection=None,
                                sensor_selection=None, export_summary=True, export_plots=False,
-                               output_folder="exports/outputs", interactive=HAS_PLOTLY,
+                               output_folder: str | None = None, interactive=HAS_PLOTLY,
                                plot_style=None):
     """
     Run the main analysis workflow that the notebook performs.

@@ -15,6 +15,7 @@ from typing import Optional, Tuple, Union, List
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from utils.sonar_config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
 
 class Ping360Visualizer:
     """
@@ -576,7 +577,7 @@ class Ping360Visualizer:
         return summary
 
 
-def find_ping360_files(base_path: Union[str, pathlib.Path] = ".") -> List[Tuple[pathlib.Path, Optional[pathlib.Path]]]:
+def find_ping360_files(base_path: Union[str, pathlib.Path] = None) -> List[Tuple[pathlib.Path, Optional[pathlib.Path]]]:
     """
     Find Ping360 CSV files in the exports directory.
     
@@ -590,9 +591,14 @@ def find_ping360_files(base_path: Union[str, pathlib.Path] = ".") -> List[Tuple[
     List[Tuple[Path, Optional[Path]]]
         List of (pings_csv, config_csv) tuples
     """
-    base_path = pathlib.Path(base_path)
-    exports_dir = base_path / "exports" / "by_bag"
-    
+    from utils.sonar_config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
+    if base_path is None:
+        exports_dir = pathlib.Path(EXPORTS_DIR_DEFAULT) / EXPORTS_SUBDIRS.get('by_bag', 'by_bag')
+    else:
+        base_path = pathlib.Path(base_path)
+        # If caller provides a base path, treat it as the root and join the 'by_bag' subdir
+        exports_dir = base_path / EXPORTS_SUBDIRS.get('by_bag', 'by_bag')
+
     if not exports_dir.exists():
         return []
     
@@ -624,7 +630,8 @@ def print_ping360_files(base_path: Union[str, pathlib.Path] = "."):
     files = find_ping360_files(base_path)
     
     if not files:
-        print("❌ No Ping360 files found in exports/by_bag/")
+        # Use configured path in the message for clarity
+        print(f"❌ No Ping360 files found in {pathlib.Path(EXPORTS_DIR_DEFAULT) / EXPORTS_SUBDIRS.get('by_bag','by_bag')}/")
         return
     
     print("🔍 Found Ping360 files:")

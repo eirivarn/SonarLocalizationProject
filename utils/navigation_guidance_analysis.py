@@ -34,7 +34,7 @@ class NavigationGuidanceAnalyzer:
     Main class for analyzing navigation and guidance data from CSV files
     """
     
-    def __init__(self, by_bag_folder="exports/by_bag"):
+    def __init__(self, by_bag_folder: str | None = None):
         """
         Initialize analyzer with path to by_bag folder
         
@@ -43,7 +43,9 @@ class NavigationGuidanceAnalyzer:
         by_bag_folder : str
             Path to folder containing CSV files
         """
-        self.by_bag_folder = Path(by_bag_folder)
+        from utils.sonar_config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
+        resolved = Path(by_bag_folder) if by_bag_folder is not None else Path(EXPORTS_DIR_DEFAULT) / EXPORTS_SUBDIRS.get('by_bag', 'by_bag')
+        self.by_bag_folder = Path(resolved)
         self.data = {}
         self.available_bags = []
         self.available_sensors = []
@@ -742,10 +744,12 @@ class NavigationGuidanceAnalyzer:
         summary_df = pd.DataFrame(summary_data)
         
         # Save to exports/outputs folder
-        output_path = Path("exports/outputs") / output_file
+        from utils.sonar_config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
+        out_root = Path(EXPORTS_DIR_DEFAULT) / EXPORTS_SUBDIRS.get('outputs', 'outputs')
+        output_path = Path(out_root) / output_file
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        
+
         summary_df.to_csv(output_path, index=False)
         print(f"✅ Summary exported to: {output_path}")
-        
+
         return summary_df

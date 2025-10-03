@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from typing import Dict, Tuple, Optional
 
-def load_all_distance_data_for_bag(target_bag: str, exports_folder: str = "/Users/eirikvarnes/code/SOLAQUA/exports") -> Tuple[Dict, Dict]:
+def load_all_distance_data_for_bag(target_bag: str, exports_folder: str | None = None) -> Tuple[Dict, Dict]:
     """
     Load all distance measurement data for a specific bag.
     
@@ -23,14 +23,15 @@ def load_all_distance_data_for_bag(target_bag: str, exports_folder: str = "/User
     print(f"🎯 LOADING ALL DISTANCE DATA FOR BAG: {target_bag}")
     print("=" * 60)
     
-    data_folder = Path(exports_folder)
+    from utils.sonar_config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
+    data_folder = Path(exports_folder) if exports_folder is not None else Path(EXPORTS_DIR_DEFAULT) / EXPORTS_SUBDIRS.get('by_bag', 'by_bag')
     distance_measurements = {}
     raw_data = {}
     
     # 1. Load Navigation Data
     print("📡 1. Loading Navigation Data...")
     try:
-        nav_file = data_folder / "by_bag" / f"navigation_plane_approximation__{target_bag}_data.csv"
+        nav_file = data_folder / f"navigation_plane_approximation__{target_bag}_data.csv"
         if nav_file.exists():
             nav_data = pd.read_csv(nav_file, usecols=['ts_oslo', 'NetDistance', 'Altitude'])
             nav_data['timestamp'] = pd.to_datetime(nav_data['ts_oslo']).dt.tz_convert('UTC')
@@ -43,11 +44,11 @@ def load_all_distance_data_for_bag(target_bag: str, exports_folder: str = "/User
     except Exception as e:
         print(f"   ❌ Error loading navigation: {e}")
         raw_data['navigation'] = None
-    
+
     # 2. Load Guidance Data  
     print("📡 2. Loading Guidance Data...")
     try:
-        guidance_file = data_folder / "by_bag" / f"guidance__{target_bag}_data.csv"
+        guidance_file = data_folder / f"guidance__{target_bag}_data.csv"
         if guidance_file.exists():
             guidance_data = pd.read_csv(guidance_file)
             guidance_data['timestamp'] = pd.to_datetime(guidance_data['ts_oslo']).dt.tz_convert('UTC')
@@ -64,11 +65,11 @@ def load_all_distance_data_for_bag(target_bag: str, exports_folder: str = "/User
     except Exception as e:
         print(f"   ❌ Error loading guidance: {e}")
         raw_data['guidance'] = None
-    
+
     # 3. Load DVL Altimeter
     print("📡 3. Loading DVL Altimeter...")
     try:
-        dvl_alt_file = data_folder / "by_bag" / f"nucleus1000dvl_altimeter__{target_bag}_data.csv"
+        dvl_alt_file = data_folder / f"nucleus1000dvl_altimeter__{target_bag}_data.csv"
         if dvl_alt_file.exists():
             dvl_alt = pd.read_csv(dvl_alt_file)
             dvl_alt['timestamp'] = pd.to_datetime(dvl_alt['ts_utc'])
@@ -86,11 +87,11 @@ def load_all_distance_data_for_bag(target_bag: str, exports_folder: str = "/User
             print(f"   ❌ DVL altimeter file not found")
     except Exception as e:
         print(f"   ❌ Error loading DVL altimeter: {e}")
-    
+
     # 4. Load USBL
     print("📡 4. Loading USBL...")
     try:
-        usbl_file = data_folder / "by_bag" / f"sensor_usbl__{target_bag}_data.csv"
+        usbl_file = data_folder / f"sensor_usbl__{target_bag}_data.csv"
         if usbl_file.exists():
             usbl = pd.read_csv(usbl_file)
             usbl['timestamp'] = pd.to_datetime(usbl['ts_utc'])
@@ -115,11 +116,11 @@ def load_all_distance_data_for_bag(target_bag: str, exports_folder: str = "/User
             print(f"   ❌ USBL file not found")
     except Exception as e:
         print(f"   ❌ Error loading USBL: {e}")
-    
+
     # 5. Load DVL Position
     print("📡 5. Loading DVL Position...")
     try:
-        dvl_pos_file = data_folder / "by_bag" / f"sensor_dvl_position__{target_bag}_data.csv"
+        dvl_pos_file = data_folder / f"sensor_dvl_position__{target_bag}_data.csv"
         if dvl_pos_file.exists():
             dvl_pos = pd.read_csv(dvl_pos_file)
             dvl_pos['timestamp'] = pd.to_datetime(dvl_pos['ts_utc'])
@@ -142,7 +143,7 @@ def load_all_distance_data_for_bag(target_bag: str, exports_folder: str = "/User
     # 6. Load Navigation Position
     print("📡 6. Loading Navigation Position...")
     try:
-        nav_pos_file = data_folder / "by_bag" / f"navigation_plane_approximation_position__{target_bag}_data.csv"
+        nav_pos_file = data_folder / f"navigation_plane_approximation_position__{target_bag}_data.csv"
         if nav_pos_file.exists():
             nav_pos = pd.read_csv(nav_pos_file)
             nav_pos['timestamp'] = pd.to_datetime(nav_pos['ts_utc'])
@@ -161,20 +162,20 @@ def load_all_distance_data_for_bag(target_bag: str, exports_folder: str = "/User
             print(f"   ❌ Navigation position file not found")
     except Exception as e:
         print(f"   ❌ Error loading navigation position: {e}")
-    
+
     # 7. Load INS Z Position
     print("📡 7. Loading INS Z Position...")
     try:
-        ins_file = data_folder / "by_bag" / f"nucleus1000dvl_ins__{target_bag}_data.csv"
+        ins_file = data_folder / f"nucleus1000dvl_ins__{target_bag}_data.csv"
         if ins_file.exists():
             ins_data = pd.read_csv(ins_file)
             ins_data['timestamp'] = pd.to_datetime(ins_data['ts_utc'])
-            
+
             # Find z position column
             z_cols = [col for col in ins_data.columns if 'z' in col.lower() and ('pos' in col.lower() or 'position' in col.lower() or col.lower() == 'z')]
             depth_cols = [col for col in ins_data.columns if 'depth' in col.lower()]
             altitude_cols = [col for col in ins_data.columns if 'alt' in col.lower()]
-            
+
             z_position_col = None
             if z_cols:
                 z_position_col = z_cols[0]
@@ -182,7 +183,7 @@ def load_all_distance_data_for_bag(target_bag: str, exports_folder: str = "/User
                 z_position_col = depth_cols[0]
             elif altitude_cols:
                 z_position_col = altitude_cols[0]
-            
+
             if z_position_col:
                 z_values = ins_data[z_position_col].dropna()
                 if len(z_values) > 0:
@@ -364,7 +365,7 @@ def extract_raw_sonar_data_with_configurable_rmax(
     target_bag: str,
     frame_idx: int,
     rmax: float = None,
-    exports_folder: str = "/Users/eirikvarnes/code/SOLAQUA/exports"
+    exports_folder: Optional[str] = None
 ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Dict, Dict]:
     """
     Extract raw sonar data and process it with a configurable rmax setting.
@@ -396,7 +397,9 @@ def extract_raw_sonar_data_with_configurable_rmax(
     print(f"   📝 Description: {sonar_params['description']}")
     
     # 2. Load raw sonar data
-    sonar_csv_file = Path(exports_folder) / "by_bag" / f"sensor_sonoptix_echo_image__{target_bag}_video.csv"
+    from utils.sonar_config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
+    exports_root = Path(exports_folder) if exports_folder is not None else Path(EXPORTS_DIR_DEFAULT)
+    sonar_csv_file = exports_root / EXPORTS_SUBDIRS.get('by_bag', 'by_bag') / f"sensor_sonoptix_echo_image__{target_bag}_video.csv"
     
     if not sonar_csv_file.exists():
         print(f"❌ Sonar data file not found: {sonar_csv_file}")
@@ -475,8 +478,10 @@ def process_sonar_data_and_visualize(
         print(f"❌ Failed to extract raw sonar data for {target_bag}, frame {frame_index}")
         return
 
-    # Get synchronized distance measurements and angle data for this frame
-    sonar_csv_file = Path(exports_folder) / "by_bag" / f"sensor_sonoptix_echo_image__{target_bag}_video.csv"
+    # Resolve exports folder from config if needed and get synchronized distance measurements
+    from utils.sonar_config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
+    exports_root = Path(exports_folder) if exports_folder is not None else Path(EXPORTS_DIR_DEFAULT)
+    sonar_csv_file = exports_root / EXPORTS_SUBDIRS.get('by_bag', 'by_bag') / f"sensor_sonoptix_echo_image__{target_bag}_video.csv"
     if not sonar_csv_file.exists():
         print(f"❌ Sonar CSV file not found: {sonar_csv_file}")
         return
