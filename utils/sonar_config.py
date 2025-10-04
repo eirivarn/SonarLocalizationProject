@@ -74,28 +74,38 @@ class ConeGridSpec:
     img_h: int = CONE_H_DEFAULT
 
 # --- Image-analysis / contour-detection defaults (moved from sonar_image_analysis) ---
-# Core image processing configuration - simplified
+# Core image processing configuration - NO BLURRING, sharp objects
 IMAGE_PROCESSING_CONFIG: Dict = {
-    # Momentum merging (core feature)
+    # Momentum merging (core feature) - connects net parts
     'use_momentum_merging': True,
     'momentum_search_radius': 1,
     'momentum_threshold': 0.1,
     'momentum_decay': 0.9,
     'momentum_boost': 10.0,
     
-    # Basic edge detection
-    'blur_kernel_size': (31, 31),
+    # Sharp edge detection - NO BLUR
     'canny_low_threshold': 60,
     'canny_high_threshold': 180,
     'min_contour_area': 200,
-    'morph_close_kernel': 5,
+    'morph_close_kernel': 3,       # Minimal closing to connect very close edges
     'edge_dilation_iterations': 1,
 }
 
 # Simple tracking configuration
 TRACKING_CONFIG: Dict = {
-    'aoi_expansion_pixels': 20,  # How much to expand AOI around detection
+    'aoi_expansion_pixels': 15,  # How much to expand AOI around detection
 }
+
+# Exclusion zone configuration - prevent merging with other objects
+EXCLUSION_CONFIG: Dict = {
+    'enable_exclusions': True,
+    'min_secondary_area': 100,     # Minimum area for secondary contours to track
+    'exclusion_radius': 5,        # Radius around secondary contours to exclude
+    'max_exclusion_zones': 5,      # Maximum number of exclusion zones to track
+    'zone_decay_frames': 3,       # How many frames to keep exclusion zones
+}
+
+# Video output configuration
 
 # Video output configuration  
 VIDEO_CONFIG: Dict = {

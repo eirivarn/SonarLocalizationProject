@@ -54,20 +54,26 @@ class FrameAnalysisResult:
         }
 
 class SonarDataProcessor:
-    """CORE processor: AOI tracking + momentum merging."""
+    """Advanced processor: Object separation + momentum merging to prevent merging."""
     
     def __init__(self, img_config: Dict = None):
         self.img_config = img_config or IMAGE_PROCESSING_CONFIG
         self.last_center = None  # Track last center position
         self.current_aoi = None  # Track rectangular AOI around last detection
+        self.exclusion_zones = []  # Track other large contours to prevent merging
+        self.object_ownership_map = None  # Track which pixels belong to which objects
+        self.frame_shape = None  # Remember frame dimensions
         
     def reset_tracking(self):
-        """Reset tracking state."""
+        """Reset all tracking state."""
         self.last_center = None
         self.current_aoi = None
+        self.exclusion_zones = []
+        self.object_ownership_map = None
+        self.frame_shape = None
         
     def preprocess_frame(self, frame_u8: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """CORE preprocessing: momentum merging + edge detection."""
+        """Preprocessing with object separation to prevent merging."""
         # Apply momentum-based merging first (this helps connect separated net parts)
         if self.img_config.get('use_momentum_merging', True):
             momentum_enhanced = directional_momentum_merge(
@@ -80,24 +86,64 @@ class SonarDataProcessor:
         else:
             momentum_enhanced = frame_u8
         
-        # Then apply standard edge detection
-        return preprocess_edges(momentum_enhanced, self.img_config)
+        # Use object separation preprocessing
+        return preprocess_edges_with_object_separation(momentum_enhanced, self.object_ownership_map, self.img_config)
+        
+    def update_object_ownership(self, frame_u8: np.ndarray):
+        """Update object ownership tracking to prevent merging"""
+        H, W = frame_u8.shape[:2]
+        self.frame_shape = (H, W)
+        
+        # First pass: find all contours without any filtering
+        _, raw_edges = preprocess_edges(frame_u8, self.img_config)
+        raw_contours, _ = cv2.findContours(raw_edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        # Create object masks
+        object_masks = create_object_masks(raw_contours, (H, W))
+        
+        # Update ownership tracking
+        self.object_ownership_map = track_object_ownership(
+            object_masks, 
+            self.object_ownership_map, 
+            (H, W)
+        )
+        
+        return object_masks
         
     def find_best_contour(self, contours):
-        """Find the best contour using CORE selection logic."""
-        return select_best_contour_core(contours, self.last_center, self.current_aoi, self.img_config)
+        """Find the best contour - object separation already handled in preprocessing."""
+        return select_best_contour_core(
+            contours, 
+            self.last_center, 
+            self.current_aoi, 
+            self.img_config
+        )
         
     def analyze_frame(self, frame_u8: np.ndarray, extent: Tuple[float,float,float,float] = None) -> FrameAnalysisResult:
-        """SIMPLIFIED frame analysis."""
-        # Preprocess
+        """Frame analysis with object ownership tracking to prevent merging."""
+        H, W = frame_u8.shape[:2]
+        
+        # STEP 1: Update object ownership (CRITICAL - prevents merging at pixel level)
+        object_masks = self.update_object_ownership(frame_u8)
+        
+        # STEP 2: Preprocess with object separation (masks out other objects)
         _, edges_proc = self.preprocess_frame(frame_u8)
+        
+        # STEP 3: Find contours on separated edges (net should be separated now)
         contours, _ = cv2.findContours(edges_proc, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
         
-        # Find best contour - SIMPLE!
+        # STEP 4: Select best contour (should be clean net contour)
         best_contour, features, stats = self.find_best_contour(contours)
         
+        # STEP 5: Update exclusion zones for visualization
+        self.exclusion_zones = update_exclusion_zones(
+            contours, 
+            self.exclusion_zones, 
+            best_contour, 
+            self.img_config
+        )
+        
         # Extract distance and angle
-        H, W = frame_u8.shape[:2]
         distance_pixels, angle_degrees = _distance_angle_from_contour(best_contour, W, H)
         
         # Convert to meters if extent provided
@@ -108,19 +154,37 @@ class SonarDataProcessor:
             px2m_y = height_m / H
             distance_meters = y_min + distance_pixels * px2m_y
         
-        # Update tracking - remember center AND AOI
+        # Update simple tracking
         if best_contour is not None and features:
             self.last_center = (features['centroid_x'], features['centroid_y'])
-            # Simple AOI: expand bounding rect by 20 pixels
+            
+            # Simple AOI: expand bounding rect
             x, y, w, h = features['rect']
-            expansion = 20
-            H, W = frame_u8.shape[:2]
+            expansion = 25
             self.current_aoi = (
                 max(0, x - expansion),
                 max(0, y - expansion),
                 min(W - max(0, x - expansion), w + 2*expansion),
                 min(H - max(0, y - expansion), h + 2*expansion)
             )
+        
+        # Create tracking status with object separation information
+        status_parts = []
+        if self.current_aoi:
+            status_parts.append("SEPARATED_AOI")
+        else:
+            status_parts.append("SEPARATED_SEARCH")
+            
+        if len(self.exclusion_zones) > 0:
+            status_parts.append(f"EX{len(self.exclusion_zones)}")
+            
+        # Count separated objects
+        if self.object_ownership_map is not None:
+            unique_objects = len(np.unique(self.object_ownership_map)) - 1  # -1 for background
+            if unique_objects > 1:
+                status_parts.append(f"OBJ{unique_objects}")
+        
+        tracking_status = "_".join(status_parts)
         
         # Create result
         return FrameAnalysisResult(
@@ -130,7 +194,7 @@ class SonarDataProcessor:
             distance_meters=distance_meters,
             detection_success=best_contour is not None,
             contour_features=features,
-            tracking_status="CORE_AOI" if self.current_aoi else "CORE_SIMPLE",
+            tracking_status=tracking_status,
             stats=stats,
             edges_processed=edges_proc
         )
@@ -245,18 +309,6 @@ def to_uint8_gray(frame01: np.ndarray) -> np.ndarray:
     safe = np.clip(safe, 0.0, 1.0)
     return (safe * 255.0).astype(np.uint8)
 
-def elapsed_seconds_from_timestamps(stamps: pd.Series | pd.DatetimeIndex | np.ndarray,
-                                    estimated_fps: float,
-                                    count: int) -> np.ndarray:
-    """Return elapsed seconds from timestamps if valid, else an index/fps ramp."""
-    try:
-        t = pd.to_datetime(stamps)
-        if t.isnull().all():
-            raise ValueError
-        return (t - t[0]).total_seconds()
-    except Exception:
-        return np.arange(count) / float(max(estimated_fps, 1e-6))
-
 def apply_smoothing(series: pd.Series | np.ndarray,
                     window_size: int = 15,
                     polyorder: int = 3,
@@ -337,6 +389,378 @@ def select_best_contour_core(contours, last_center=None, aoi=None, cfg_img=IMAGE
     stats = {'total_contours': total, 'best_score': best_score}
     return best, (best_feat or {}), stats
 
+# ============================ Object Separation and Masking Functions ============================
+
+def create_object_masks(contours, frame_shape):
+    """Create individual masks for each contour to track object ownership"""
+    H, W = frame_shape
+    object_masks = []
+    
+    for i, contour in enumerate(contours):
+        mask = np.zeros((H, W), dtype=np.uint8)
+        cv2.fillPoly(mask, [contour], 255)
+        object_masks.append({
+            'mask': mask,
+            'contour': contour,
+            'area': cv2.contourArea(contour),
+            'id': i
+        })
+    
+    return object_masks
+
+def track_object_ownership(current_masks, previous_ownership_map, frame_shape):
+    """Track which pixels belong to which objects across frames"""
+    from utils.sonar_config import EXCLUSION_CONFIG
+    min_area = EXCLUSION_CONFIG.get('min_secondary_area', 50)
+    
+    H, W = frame_shape
+    
+    # Initialize ownership map if needed
+    if previous_ownership_map is None:
+        ownership_map = np.zeros((H, W), dtype=np.int32)  # 0 = unassigned
+    else:
+        ownership_map = previous_ownership_map.copy()
+    
+    # Sort masks by area (largest first - likely the net)
+    sorted_masks = sorted(current_masks, key=lambda x: x['area'], reverse=True)
+    
+    # Assign object IDs (1 = net, 2+ = other objects)
+    for mask_idx, mask_data in enumerate(sorted_masks):
+        if mask_data['area'] < min_area:
+            continue
+            
+        object_id = mask_idx + 1  # Start from 1 (0 is unassigned)
+        mask = mask_data['mask']
+        
+        # For the largest object (likely net), be more permissive
+        if mask_idx == 0:  # Largest object (net)
+            # Only claim pixels that are currently unassigned or were previously net
+            net_pixels = (mask > 0) & ((ownership_map == 0) | (ownership_map == 1))
+            ownership_map[net_pixels] = 1
+        else:  # Smaller objects (fish, debris)
+            # Claim all pixels for this object (more aggressive)
+            object_pixels = mask > 0
+            ownership_map[object_pixels] = object_id
+    
+    return ownership_map
+
+def create_net_protection_mask(ownership_map, net_id=1):
+    """Create a mask that protects the net from merging with other objects"""
+    # Create mask where only net pixels (ID=1) and unassigned pixels (ID=0) are allowed
+    net_protection_mask = ((ownership_map == net_id) | (ownership_map == 0)).astype(np.uint8) * 255
+    return net_protection_mask
+
+def preprocess_edges_with_object_separation(frame_u8, ownership_map, cfg=IMAGE_PROCESSING_CONFIG):
+    """Preprocess edges but mask out pixels belonging to other objects"""
+    # Standard preprocessing
+    proc = prepare_input_gray(frame_u8, cfg)
+    edges = cv2.Canny(proc, cfg.get('canny_low_threshold', 50), cfg.get('canny_high_threshold', 150))
+    
+    # Morphological operations
+    mks = int(cfg.get('morph_close_kernel', 0))
+    dil = int(cfg.get('edge_dilation_iterations', 0))
+    out = edges
+    if mks > 0:
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (mks, mks))
+        out = cv2.morphologyEx(out, cv2.MORPH_CLOSE, kernel)
+    if dil > 0:
+        kernel2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
+        out = cv2.dilate(out, kernel2, iterations=dil)
+    
+    # CRITICAL: Apply object separation mask
+    if ownership_map is not None:
+        net_protection_mask = create_net_protection_mask(ownership_map)
+        # Only keep edges that are in net-allowed areas
+        out = cv2.bitwise_and(out, net_protection_mask)
+    
+    return edges, out
+
+# ============================ Original Spatial Exclusion Memory Functions ============================
+
+def update_exclusion_memory_map(memory_map, contours, selected_contour, frame_shape, decay_rate=0.9):
+    """Update spatial memory map of excluded areas"""
+    from utils.sonar_config import EXCLUSION_CONFIG
+    min_area = EXCLUSION_CONFIG.get('min_secondary_area', 50)
+    memory_radius = EXCLUSION_CONFIG.get('exclusion_radius', 10)
+    
+    H, W = frame_shape
+    
+    # Initialize memory map if needed
+    if memory_map is None:
+        memory_map = np.zeros((H, W), dtype=np.float32)
+    else:
+        # Decay existing memory
+        memory_map *= decay_rate
+    
+    # Add exclusion areas for other contours (not the selected net contour)
+    for contour in contours:
+        area = cv2.contourArea(contour)
+        if area < min_area:
+            continue
+            
+        # Skip if this is the selected net contour
+        if selected_contour is not None and np.array_equal(contour, selected_contour):
+            continue
+        
+        # Create mask for this contour with expanded area
+        mask = np.zeros((H, W), dtype=np.uint8)
+        cv2.fillPoly(mask, [contour], 255)
+        
+        # Expand the exclusion area around the contour
+        if memory_radius > 0:
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (memory_radius*2, memory_radius*2))
+            mask = cv2.dilate(mask, kernel)
+        
+        # Add to memory map (areas where other contours were present)
+        memory_map[mask > 0] = np.maximum(memory_map[mask > 0], 1.0)
+    
+    return memory_map
+
+def filter_contour_by_exclusion_memory(contour, memory_map, threshold=0.3):
+    """Filter contour points that are in excluded memory areas"""
+    if memory_map is None or contour is None or len(contour) == 0:
+        return contour
+    
+    # Check which contour points are in excluded areas
+    filtered_points = []
+    
+    for point in contour:
+        x, y = point[0]
+        if 0 <= y < memory_map.shape[0] and 0 <= x < memory_map.shape[1]:
+            # If this point has low exclusion memory, keep it
+            if memory_map[y, x] < threshold:
+                filtered_points.append(point)
+        else:
+            # Keep points outside frame bounds
+            filtered_points.append(point)
+    
+    # Return filtered contour, but ensure we don't remove too many points
+    if len(filtered_points) < len(contour) * 0.3:  # Keep at least 30% of points
+        return contour  # Return original if too much was filtered
+    
+    return np.array(filtered_points, dtype=contour.dtype) if filtered_points else contour
+
+def select_best_contour_with_spatial_memory(contours, last_center=None, aoi=None, exclusion_zones=None, memory_map=None, cfg_img=IMAGE_PROCESSING_CONFIG):
+    """Enhanced contour selection that uses spatial memory to prevent merging"""
+    min_area = float(cfg_img.get('min_contour_area', 100))
+    aoi_boost = 2.0
+    
+    from utils.sonar_config import EXCLUSION_CONFIG
+    exclusion_penalty = 0.5  # Stronger penalty for spatial memory
+    exclusion_radius = EXCLUSION_CONFIG.get('exclusion_radius', 10)
+    memory_threshold = 0.3  # Threshold for exclusion memory
+    
+    best, best_feat, best_score = None, None, 0.0
+    total = 0
+
+    for c in contours or []:
+        area = cv2.contourArea(c)
+        if area < min_area:
+            continue
+        total += 1
+        
+        # SPATIAL MEMORY FILTERING: Remove points that were near other contours
+        filtered_contour = filter_contour_by_exclusion_memory(c, memory_map, memory_threshold)
+        
+        # Recalculate area after filtering
+        filtered_area = cv2.contourArea(filtered_contour)
+        if filtered_area < min_area:
+            continue  # Skip if too much was filtered out
+        
+        # Calculate features on filtered contour
+        feat = compute_contour_features(filtered_contour)
+        
+        # CORE SCORING: area × elongation (using filtered contour)
+        elongation = max(feat['aspect_ratio'], feat['ellipse_elongation'])
+        base_score = filtered_area * elongation
+        
+        # MEMORY PENALTY: Penalize contours that overlap with exclusion memory
+        memory_penalty = 1.0
+        if memory_map is not None:
+            # Check how much of the contour overlaps with excluded areas
+            mask = np.zeros(memory_map.shape, dtype=np.uint8)
+            cv2.fillPoly(mask, [filtered_contour], 255)
+            
+            # Calculate overlap with exclusion memory
+            overlap_area = np.sum((mask > 0) & (memory_map > memory_threshold))
+            contour_area_pixels = np.sum(mask > 0)
+            
+            if contour_area_pixels > 0:
+                overlap_ratio = overlap_area / contour_area_pixels
+                memory_penalty = 1.0 - (overlap_ratio * exclusion_penalty)
+        
+        # AOI boost
+        if aoi is not None:
+            cx, cy = feat['centroid_x'], feat['centroid_y']
+            ax, ay, aw, ah = aoi
+            if ax <= cx <= ax + aw and ay <= cy <= ay + ah:
+                base_score *= aoi_boost
+        
+        # Traditional exclusion zone penalty (for immediate zones)
+        zone_penalty = 1.0
+        if exclusion_zones:
+            cx, cy = feat['centroid_x'], feat['centroid_y']
+            for zone in exclusion_zones:
+                zone_dist = np.sqrt((cx - zone['center'][0])**2 + (cy - zone['center'][1])**2)
+                if zone_dist < exclusion_radius:
+                    proximity_factor = 1.0 - (zone_dist / exclusion_radius)
+                    penalty = 0.3 * zone['confidence'] * proximity_factor
+                    zone_penalty *= (1.0 - penalty)
+        
+        # Distance penalty if we have last position
+        distance_penalty = 1.0
+        if last_center is not None:
+            cx, cy = feat['centroid_x'], feat['centroid_y']
+            distance = np.sqrt((cx - last_center[0])**2 + (cy - last_center[1])**2)
+            distance_penalty = max(0.5, 1.0 - distance / 200.0)
+        
+        # FINAL SCORE with spatial memory consideration
+        final_score = base_score * memory_penalty * zone_penalty * distance_penalty
+        
+        if final_score > best_score:
+            best, best_feat, best_score = filtered_contour, feat, final_score
+
+    stats = {
+        'total_contours': total,
+        'best_score': best_score,
+        'exclusion_zones_count': len(exclusion_zones) if exclusion_zones else 0,
+        'memory_active': memory_map is not None
+    }
+    return best, (best_feat or {}), stats
+
+# ============================ Original Exclusion Zone Functions ============================
+
+def update_exclusion_zones(contours, current_exclusion_zones, selected_contour, cfg=None):
+    """Update exclusion zones by tracking other large contours"""
+    if cfg is None:
+        cfg = IMAGE_PROCESSING_CONFIG
+    
+    from utils.sonar_config import EXCLUSION_CONFIG
+    
+    # Check if exclusions are enabled
+    if not EXCLUSION_CONFIG.get('enable_exclusions', True):
+        return []
+    
+    min_area = EXCLUSION_CONFIG.get('min_secondary_area', 50)
+    max_zones = EXCLUSION_CONFIG.get('max_exclusion_zones', 5)
+    zone_decay_frames = EXCLUSION_CONFIG.get('zone_decay_frames', 3)
+    zone_decay = 1.0 - (1.0 / max(1, zone_decay_frames))  # Convert frames to decay factor
+    
+    # Decay existing zones
+    decayed_zones = []
+    for zone in current_exclusion_zones:
+        zone['confidence'] *= zone_decay
+        if zone['confidence'] > 0.1:  # Keep zones above threshold
+            decayed_zones.append(zone)
+    
+    # Find new large contours (excluding the selected one)
+    new_zones = []
+    for contour in contours:
+        area = cv2.contourArea(contour)
+        if area < min_area:
+            continue
+            
+        # Skip if this is the selected contour
+        if selected_contour is not None and np.array_equal(contour, selected_contour):
+            continue
+            
+        # Get centroid
+        M = cv2.moments(contour)
+        if M['m00'] == 0:
+            continue
+        cx = int(M['m10'] / M['m00'])
+        cy = int(M['m01'] / M['m00'])
+        
+        # Check if this matches an existing zone (update instead of create new)
+        updated_existing = False
+        for zone in decayed_zones:
+            zone_dist = np.sqrt((cx - zone['center'][0])**2 + (cy - zone['center'][1])**2)
+            if zone_dist < 30:  # Close to existing zone
+                zone['center'] = (cx, cy)
+                zone['area'] = area
+                zone['confidence'] = min(1.0, zone['confidence'] + 0.3)
+                updated_existing = True
+                break
+                
+        if not updated_existing:
+            new_zones.append({
+                'center': (cx, cy),
+                'area': area,
+                'confidence': 0.5,
+                'contour': contour
+            })
+    
+    # Combine and limit zones
+    all_zones = decayed_zones + new_zones
+    all_zones.sort(key=lambda z: z['confidence'], reverse=True)
+    return all_zones[:max_zones]
+
+def select_best_contour_with_exclusion(contours, last_center=None, aoi=None, exclusion_zones=None, cfg_img=IMAGE_PROCESSING_CONFIG):
+    """Enhanced contour selection that avoids exclusion zones"""
+    min_area = float(cfg_img.get('min_contour_area', 100))
+    aoi_boost = 2.0
+    
+    from utils.sonar_config import EXCLUSION_CONFIG
+    
+    # Check if exclusions are enabled
+    if not EXCLUSION_CONFIG.get('enable_exclusions', True) or not exclusion_zones:
+        exclusion_zones = []
+    
+    exclusion_penalty = 0.3  # Fixed penalty for exclusion zones
+    exclusion_radius = EXCLUSION_CONFIG.get('exclusion_radius', 10)
+    
+    best, best_feat, best_score = None, None, 0.0
+    total = 0
+
+    for c in contours or []:
+        area = cv2.contourArea(c)
+        if area < min_area:
+            continue
+        total += 1
+        
+        # Basic features
+        feat = compute_contour_features(c)
+        
+        # CORE SCORING: area × elongation
+        elongation = max(feat['aspect_ratio'], feat['ellipse_elongation'])
+        base_score = area * elongation
+        
+        # AOI boost
+        if aoi is not None:
+            cx, cy = feat['centroid_x'], feat['centroid_y']
+            ax, ay, aw, ah = aoi
+            if ax <= cx <= ax + aw and ay <= cy <= ay + ah:
+                base_score *= aoi_boost
+        
+        # Exclusion zone penalty
+        if exclusion_zones:
+            cx, cy = feat['centroid_x'], feat['centroid_y']
+            for zone in exclusion_zones:
+                zone_dist = np.sqrt((cx - zone['center'][0])**2 + (cy - zone['center'][1])**2)
+                if zone_dist < exclusion_radius:
+                    # Apply penalty based on zone confidence and proximity
+                    proximity_factor = 1.0 - (zone_dist / exclusion_radius)
+                    penalty = exclusion_penalty * zone['confidence'] * proximity_factor
+                    base_score *= (1.0 - penalty)
+        
+        # Distance penalty if we have last position
+        final_score = base_score
+        if last_center is not None:
+            cx, cy = feat['centroid_x'], feat['centroid_y']
+            distance = np.sqrt((cx - last_center[0])**2 + (cy - last_center[1])**2)
+            distance_factor = max(0.5, 1.0 - distance / 200.0)
+            final_score *= distance_factor
+        
+        if final_score > best_score:
+            best, best_feat, best_score = c, feat, final_score
+
+    stats = {
+        'total_contours': total, 
+        'best_score': best_score,
+        'exclusion_zones_count': len(exclusion_zones) if exclusion_zones else 0
+    }
+    return best, (best_feat or {}), stats
+
 # ============================ Momentum vs Blur (shared) ============================
 
 def directional_momentum_merge(frame, search_radius=3, momentum_threshold=0.2,
@@ -386,17 +810,14 @@ def fast_directional_enhance(frame, threshold=0.2, boost=1.5):
     return np.clip(result, 0, 255).astype(np.uint8)
 
 def prepare_input_gray(frame_u8: np.ndarray, cfg=IMAGE_PROCESSING_CONFIG) -> np.ndarray:
-    if cfg.get('use_momentum_merging', True):
-        return directional_momentum_merge(
-            frame_u8,
-            search_radius=cfg.get('momentum_search_radius', 3),
-            momentum_threshold=cfg.get('momentum_threshold', 0.2),
-            momentum_decay=cfg.get('momentum_decay', 0.8),
-            momentum_boost=cfg.get('momentum_boost', 1.5),
-        )
-    else:
-        k = cfg.get('blur_kernel_size', (15, 15))
-        return cv2.GaussianBlur(frame_u8, k, 0)
+    """Prepare input using momentum merging for sharp, well-defined objects"""
+    return directional_momentum_merge(
+        frame_u8,
+        search_radius=cfg.get('momentum_search_radius', 3),
+        momentum_threshold=cfg.get('momentum_threshold', 0.2),
+        momentum_decay=cfg.get('momentum_decay', 0.8),
+        momentum_boost=cfg.get('momentum_boost', 1.5),
+    )
 
 def preprocess_edges(frame_u8: np.ndarray, cfg=IMAGE_PROCESSING_CONFIG) -> Tuple[np.ndarray, np.ndarray]:
     proc = prepare_input_gray(frame_u8, cfg)
@@ -1399,20 +1820,21 @@ def process_frame_for_video(frame_u8: np.ndarray, prev_aoi: Optional[Tuple[int,i
 # ============================ DIAGNOSTIC & UTILITY FUNCTIONS ============================
 
 def basic_image_processing_pipeline(img_u8: np.ndarray, show=True, figsize=(15, 10)) -> Dict[str, np.ndarray]:
-    blurred = cv2.GaussianBlur(img_u8, (15, 15), 0)
+    """Sharp image processing pipeline with momentum merging"""
+    momentum_enhanced = directional_momentum_merge(img_u8)
     edges = cv2.Canny(img_u8, 50, 150)
-    edges_blurred = cv2.Canny(blurred, 50, 150)
+    edges_momentum = cv2.Canny(momentum_enhanced, 50, 150)
     _, thresh = cv2.threshold(img_u8, 127, 255, cv2.THRESH_BINARY)
-    diff = cv2.absdiff(edges, edges_blurred)
+    diff = cv2.absdiff(edges, edges_momentum)
 
-    res = {'original': img_u8, 'blurred': blurred, 'edges': edges, 'edges_blurred': edges_blurred, 'thresh': thresh, 'diff': diff}
+    res = {'original': img_u8, 'momentum_enhanced': momentum_enhanced, 'edges': edges, 'edges_momentum': edges_momentum, 'thresh': thresh, 'diff': diff}
     if show:
         fig, axes = plt.subplots(2, 3, figsize=figsize)
         axes[0,0].imshow(img_u8, cmap='gray');       axes[0,0].set_title('Original');        axes[0,0].axis('off')
-        axes[0,1].imshow(blurred, cmap='gray');      axes[0,1].set_title('Gaussian Blur');   axes[0,1].axis('off')
+        axes[0,1].imshow(momentum_enhanced, cmap='gray');      axes[0,1].set_title('Momentum Enhanced');   axes[0,1].axis('off')
         axes[0,2].imshow(thresh, cmap='gray');       axes[0,2].set_title('Binary Threshold');axes[0,2].axis('off')
         axes[1,0].imshow(edges, cmap='gray');        axes[1,0].set_title('Canny Edges');     axes[1,0].axis('off')
-        axes[1,1].imshow(edges_blurred, cmap='gray');axes[1,1].set_title('Canny + Blur');    axes[1,1].axis('off')
+        axes[1,1].imshow(edges_momentum, cmap='gray');axes[1,1].set_title('Canny + Momentum');    axes[1,1].axis('off')
         axes[1,2].imshow(diff, cmap='gray');         axes[1,2].set_title('Edge Difference'); axes[1,2].axis('off')
         plt.tight_layout(); plt.show()
     return res
@@ -1439,7 +1861,7 @@ def visualize_processing_steps(frame_index=50, npz_file_index=0, figsize=(15, 5)
 
     fig, ax = plt.subplots(1, 5, figsize=(18, 4))
     ax[0].imshow(u8, cmap='gray');               ax[0].set_title(f'Original Frame {frame_index}'); ax[0].axis('off')
-    ax[1].imshow(proc, cmap='gray');             ax[1].set_title('Momentum Merge' if IMAGE_PROCESSING_CONFIG['use_momentum_merging'] else f'Gaussian {IMAGE_PROCESSING_CONFIG["blur_kernel_size"]}'); ax[1].axis('off')
+    ax[1].imshow(proc, cmap='gray');             ax[1].set_title('Momentum Merge (Sharp)'); ax[1].axis('off')
     ax[2].imshow(edges_raw, cmap='gray');        ax[2].set_title(f'Canny {IMAGE_PROCESSING_CONFIG["canny_low_threshold"]},{IMAGE_PROCESSING_CONFIG["canny_high_threshold"]}'); ax[2].axis('off')
     ax[3].imshow(edges_proc, cmap='gray');       ax[3].set_title(f'Close:{IMAGE_PROCESSING_CONFIG["morph_close_kernel"]} Dilate:{IMAGE_PROCESSING_CONFIG["edge_dilation_iterations"]}'); ax[3].axis('off')
     ax[4].imshow(cv2.cvtColor(cont_vis, cv2.COLOR_BGR2RGB)); ax[4].set_title(f'Contours ≥{min_area}'); ax[4].axis('off')
@@ -1602,15 +2024,10 @@ def create_contour_detection_video(npz_file_index=0, frame_start=0, frame_count=
                                    frame_step=5, output_path='contour_detection_video.mp4'):
     print("=== CONTOUR DETECTION VIDEO CREATION ===")
     print(f"Creating video with {frame_count} frames, stepping by {frame_step}...")
-    if IMAGE_PROCESSING_CONFIG.get('use_momentum_merging', True):
-        print(f"  Image Processing: MOMENTUM MERGING (radius={IMAGE_PROCESSING_CONFIG['momentum_search_radius']}, "
-              f"threshold={IMAGE_PROCESSING_CONFIG['momentum_threshold']}, decay={IMAGE_PROCESSING_CONFIG['momentum_decay']}), "
-              f"canny=({IMAGE_PROCESSING_CONFIG['canny_low_threshold']}, {IMAGE_PROCESSING_CONFIG['canny_high_threshold']}), "
-              f"min_area={IMAGE_PROCESSING_CONFIG['min_contour_area']}")
-    else:
-        print(f"  Image Processing: blur={IMAGE_PROCESSING_CONFIG['blur_kernel_size']}, "
-              f"canny=({IMAGE_PROCESSING_CONFIG['canny_low_threshold']}, {IMAGE_PROCESSING_CONFIG['canny_high_threshold']}), "
-              f"min_area={IMAGE_PROCESSING_CONFIG['min_contour_area']}")
+    print(f"  Image Processing: MOMENTUM MERGING (radius={IMAGE_PROCESSING_CONFIG['momentum_search_radius']}, "
+          f"threshold={IMAGE_PROCESSING_CONFIG['momentum_threshold']}, decay={IMAGE_PROCESSING_CONFIG['momentum_decay']}), "
+          f"canny=({IMAGE_PROCESSING_CONFIG['canny_low_threshold']}, {IMAGE_PROCESSING_CONFIG['canny_high_threshold']}), "
+          f"min_area={IMAGE_PROCESSING_CONFIG['min_contour_area']})")
     print(f"  Tracking: boost={TRACKING_CONFIG['aoi_boost_factor']}x, expansion={TRACKING_CONFIG['aoi_expansion_pixels']}px")
     print(f"  Video: fps={VIDEO_CONFIG['fps']}, show_contours={VIDEO_CONFIG['show_all_contours']}, show_ellipse={VIDEO_CONFIG['show_ellipse']}")
 
@@ -1782,6 +2199,53 @@ def create_enhanced_contour_detection_video_with_processor(npz_file_index=0, fra
             cv2.putText(vis, 'AOI', (ax + 5, ay + 20),
                        cv2.FONT_HERSHEY_SIMPLEX, VIDEO_CONFIG['text_scale'], (0,255,255), 1)
         
+        # Draw object ownership map (colored overlay) - CRITICAL for showing separation
+        if processor.object_ownership_map is not None:
+            ownership_map = processor.object_ownership_map
+            # Create colored overlay for different objects
+            ownership_overlay = np.zeros_like(vis)
+            
+            # Assign different colors to different objects
+            unique_objects = np.unique(ownership_map)
+            colors = [
+                [0, 0, 0],        # Background (ID=0)
+                [0, 255, 0],      # Net (ID=1) - Green
+                [0, 0, 255],      # Object 2 - Red  
+                [255, 0, 0],      # Object 3 - Blue
+                [0, 255, 255],    # Object 4 - Yellow
+                [255, 0, 255],    # Object 5 - Magenta
+                [255, 255, 0],    # Object 6 - Cyan
+            ]
+            
+            for obj_id in unique_objects:
+                if obj_id > 0 and obj_id < len(colors):
+                    mask = ownership_map == obj_id
+                    ownership_overlay[mask] = colors[obj_id]
+            
+            # Blend with original image (lighter overlay)
+            alpha = 0.2  # Light transparency to see the separation
+            vis = cv2.addWeighted(vis, 1-alpha, ownership_overlay, alpha, 0)
+        
+        # Draw exclusion zones (orange circles with labels)
+        if processor.exclusion_zones:
+            for i, zone in enumerate(processor.exclusion_zones):
+                cx, cy = zone['center']
+                radius = int(zone.get('area', 100) ** 0.5 * 0.5)  # Scale radius based on area
+                confidence = zone['confidence']
+                
+                # Draw circle with opacity based on confidence
+                color = (0, 165, 255)  # Orange in BGR
+                thickness = max(1, int(confidence * 3))
+                cv2.circle(vis, (cx, cy), radius, color, thickness)
+                
+                # Draw center dot
+                cv2.circle(vis, (cx, cy), 3, color, -1)
+                
+                # Add label
+                label = f'EX{i} ({confidence:.1f})'
+                cv2.putText(vis, label, (cx + radius + 5, cy),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+        
         # Draw best contour and features
         if result.detection_success and result.best_contour is not None:
             best_contour = result.best_contour
@@ -1837,13 +2301,25 @@ def create_enhanced_contour_detection_video_with_processor(npz_file_index=0, fra
         else:
             lost += 1
         
-        # Add frame info and status
+        # Add frame info and status - enhanced for object separation
+        exclusion_count = len(processor.exclusion_zones)
+        
         frame_info = f'Frame: {idx} | {status}'
         cv2.putText(vis, frame_info, (10, H - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1)
         
-        # Add ellipse info
-        ellipse_info = f'Ellipse Frames: {ellipse_tracked}/{i+1}'
-        cv2.putText(vis, ellipse_info, (10, H - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1)
+        # Add object separation info (CRITICAL feature visualization)
+        separation_info_parts = []
+        if exclusion_count > 0:
+            separation_info_parts.append(f'Zones: {exclusion_count}')
+        
+        if processor.object_ownership_map is not None:
+            unique_objects = len(np.unique(processor.object_ownership_map)) - 1  # -1 for background
+            if unique_objects > 1:
+                separation_info_parts.append(f'Objects: {unique_objects}')
+        
+        if separation_info_parts:
+            separation_info = ' | '.join(separation_info_parts) + ' (separated at pixel level)'
+            cv2.putText(vis, separation_info, (10, H - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0,255,100), 1)
         
         vw.write(vis)
         
