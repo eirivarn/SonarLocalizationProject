@@ -120,14 +120,19 @@ class SonarDataProcessor:
         )
         
     def analyze_frame(self, frame_u8: np.ndarray, extent: Tuple[float,float,float,float] = None) -> FrameAnalysisResult:
-        """Frame analysis with object ownership tracking to prevent merging."""
+        """Frame analysis with optional object ownership tracking to prevent merging."""
         H, W = frame_u8.shape[:2]
         
-        # STEP 1: Update object ownership (CRITICAL - prevents merging at pixel level)
-        object_masks = self.update_object_ownership(frame_u8)
-        
-        # STEP 2: Preprocess with object separation (masks out other objects)
-        _, edges_proc = self.preprocess_frame(frame_u8)
+        # STEP 1: Conditionally update object ownership based on config toggle
+        if self.img_config.get('use_pixel_ownership', True):
+            # Use pixel ownership tracking to prevent merging
+            object_masks = self.update_object_ownership(frame_u8)
+            # STEP 2: Preprocess with object separation (masks out other objects)
+            _, edges_proc = self.preprocess_frame(frame_u8)
+        else:
+            # Skip pixel ownership tracking for faster processing
+            # STEP 2: Simple preprocessing without object separation
+            _, edges_proc = preprocess_edges(frame_u8, self.img_config)
         
         # STEP 3: Find contours on separated edges (net should be separated now)
         contours, _ = cv2.findContours(edges_proc, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)

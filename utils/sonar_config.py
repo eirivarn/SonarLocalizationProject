@@ -89,6 +89,17 @@ IMAGE_PROCESSING_CONFIG: Dict = {
     'min_contour_area': 200,
     'morph_close_kernel': 3,       # Minimal closing to connect very close edges
     'edge_dilation_iterations': 1,
+    
+    # === PIXEL OWNERSHIP TRACKING TOGGLE ===
+    'use_pixel_ownership': False,   # MASTER SWITCH: Enable/disable pixel ownership tracking system
+                                   # Set to False to disable object separation and speed up processing
+                                   # 
+                                   # TRUE  = Prevents fish/debris from merging with net (slower, more accurate)
+                                   # FALSE = Faster processing but objects may merge together
+                                   #
+                                   # You can change this setting dynamically:
+                                   # IMAGE_PROCESSING_CONFIG['use_pixel_ownership'] = False  # for speed
+                                   # IMAGE_PROCESSING_CONFIG['use_pixel_ownership'] = True   # for accuracy
 }
 
 # Simple tracking configuration
