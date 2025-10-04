@@ -189,7 +189,7 @@ Loads exported sonar and video frames, aligns by timestamp, and renders synchron
 
 **Output**
 - Side-by-side MP4 named by first sonar frame time (Europe/Oslo):
-  `YYYYMMDD_HHMMSS_micro+TZ_sonar_video.mp4`
+-  `YYYYMMDD_HHMMSS_micro+TZ_sonar_video.mp4`
 
 ---
 
@@ -212,4 +212,3 @@ Loads exported sonar and video frames, aligns by timestamp, and renders synchron
    - `sonar_video.ipynb` → align & render side-by-side video
 
 That’s it — you should see outputs appear under `exports/`.
-
