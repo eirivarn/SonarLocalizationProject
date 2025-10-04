@@ -292,7 +292,7 @@ def find_sonar_files(search_root: Union[str, Path] = None) -> List[Path]:
     for p in search_root.rglob("*"):
         if p.suffix.lower() in {".csv", ".parquet"}:
             name = p.name.lower()
-            if any(tok in name for tok in ["sonoptix", "echo", "ping360", "ping"]):
+            if any(tok in name for tok in ["sonoptix", "echo"]):
                 candidates.append(p)
     return sorted(candidates)
 

@@ -80,7 +80,7 @@ class Nucleus1000DVLAnalyzer:
         for file in sensor_dvl_files:
             parts = file.stem.split("__")
             if len(parts) >= 2:
-                sensor_name = parts[0]
+                sensor_name = parts[0].replace("sensor_dvl_", "")
                 bag_name = parts[1].replace("_data", "")
                 
                 sensors.add(sensor_name)
@@ -89,10 +89,31 @@ class Nucleus1000DVLAnalyzer:
         self.available_bags = sorted(list(bags))
         self.available_sensors = sorted(list(sensors))
         
-        print(f"🔍 Found DVL data:")
-        print(f"   📅 Bags: {len(self.available_bags)}")
-        print(f"   📊 Sensors: {len(self.available_sensors)}")
-        print(f"   Sensors: {', '.join(self.available_sensors)}")
+        # Create a mapping of bag -> available sensors
+        self.bag_sensor_map = {}
+        for bag in self.available_bags:
+            self.bag_sensor_map[bag] = set()
+            
+                # Populate the mapping
+        for file in nucleus_files:
+            parts = file.stem.split("__")
+            if len(parts) >= 2:
+                sensor_name = parts[0].replace("nucleus1000dvl_", "")
+                bag_name = parts[1].replace("_data", "")
+                if bag_name in self.bag_sensor_map:
+                    self.bag_sensor_map[bag_name].add(sensor_name)
+                    
+        for file in sensor_dvl_files:
+            parts = file.stem.split("__")
+            if len(parts) >= 2:
+                sensor_name = parts[0].replace("sensor_dvl_", "")
+                bag_name = parts[1].replace("_data", "")
+                if bag_name in self.bag_sensor_map:
+                    self.bag_sensor_map[bag_name].add(sensor_name)
+    
+    def get_sensors_for_bag(self, bag_name):
+        """Get list of sensors available for a specific bag"""
+        return sorted(list(self.bag_sensor_map.get(bag_name, set())))
     
     def load_sensor_data(self, sensor_type, bag_name=None, verbose=True):
         """
@@ -120,7 +141,7 @@ class Nucleus1000DVLAnalyzer:
             # Load all bags for this sensor
             all_data = {}
             for bag in self.available_bags:
-                data = self._load_single_file(f"nucleus1000dvl_{sensor_type}", bag, verbose=verbose)
+                data = self._load_single_file(self._get_sensor_prefix(sensor_type), bag, verbose=verbose)
                 if data is not None:
                     all_data[bag] = data
             
@@ -135,7 +156,14 @@ class Nucleus1000DVLAnalyzer:
                 print(f"   Available bags: {', '.join(self.available_bags)}")
                 return None
             
-            return self._load_single_file(f"nucleus1000dvl_{sensor_type}", bag_name, verbose=verbose)
+            return self._load_single_file(self._get_sensor_prefix(sensor_type), bag_name, verbose=verbose)
+    
+    def _get_sensor_prefix(self, sensor_type):
+        """Get the correct file prefix for a sensor type"""
+        if sensor_type in ['position', 'velocity']:
+            return f"sensor_dvl_{sensor_type}"
+        else:
+            return f"nucleus1000dvl_{sensor_type}"
     
     def _load_single_file(self, sensor_prefix, bag_name, verbose=True):
         """Load a single CSV file"""
@@ -878,10 +906,14 @@ def run_full_notebook_workflow(by_bag_folder: str | None = None, bag_selection=N
         return {'error': 'no_bag'}
 
     print(f"\n📅 Using bag: {selected_bag}")
+    
+    # Get sensors available for this specific bag
+    available_sensors_for_bag = analyzer.get_sensors_for_bag(selected_bag)
+    print(f"   🔧 Sensors available for this bag: {', '.join(available_sensors_for_bag)}")
 
     # Basic exploration
     print("\n📊 Basic data exploration for selected bag")
-    for sensor in analyzer.available_sensors:
+    for sensor in available_sensors_for_bag:
         print(f"\n🔧 {sensor.upper()} Data:")
         data = analyzer.load_sensor_data(sensor, selected_bag, verbose=False)
         if data is not None and len(data) > 0:

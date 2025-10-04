@@ -24,7 +24,18 @@ def load_all_distance_data_for_bag(target_bag: str, exports_folder: str | None =
     print("=" * 60)
     
     from utils.sonar_config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
-    data_folder = Path(exports_folder) if exports_folder is not None else Path(EXPORTS_DIR_DEFAULT) / EXPORTS_SUBDIRS.get('by_bag', 'by_bag')
+    if exports_folder is None:
+        data_folder = Path(EXPORTS_DIR_DEFAULT) / EXPORTS_SUBDIRS.get('by_bag', 'by_bag')
+    else:
+        # If exports_folder is provided, check if it's the root exports dir or by_bag dir
+        ef_path = Path(exports_folder)
+        if ef_path.name == 'by_bag' or (ef_path / 'by_bag').exists():
+            # User passed the exports root, append by_bag
+            data_folder = ef_path if ef_path.name == 'by_bag' else ef_path / 'by_bag'
+        else:
+            # User passed the full by_bag path
+            data_folder = ef_path
+            
     distance_measurements = {}
     raw_data = {}
     

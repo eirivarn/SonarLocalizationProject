@@ -80,7 +80,9 @@ def load_cone_run_npz(path: str | Path):
 def get_available_npz_files(npz_dir: str | None = None) -> List[Path]:
     from utils.sonar_config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
     npz_dir = Path(npz_dir) if npz_dir is not None else Path(EXPORTS_DIR_DEFAULT) / EXPORTS_SUBDIRS.get('outputs', 'outputs')
-    return list(npz_dir.glob("*_cones.npz")) if npz_dir.exists() else []
+    if not npz_dir.exists():
+        return []
+    return [f for f in npz_dir.glob("*_cones.npz") if not f.name.startswith('._')]
 
 
 def list_npz_files(npz_dir: str | None = None) -> None:

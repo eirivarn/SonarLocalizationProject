@@ -112,6 +112,15 @@ VIDEO_CONFIG: Dict = {
     'text_scale': 0.6,
 }
 
+# --- Navigation analysis defaults ---
+NAVIGATION_ANALYSIS_CONFIG: Dict = {
+    'export_summary': False,  # Export data summary to CSV
+    'export_plots': False,   # Save plots to files
+    'bag_selection': None,   # None for all bags, or specify like "2024-08-22_14-06-43"
+    'sensor_selection': None, # None for all sensors, or specify like ["bottomtrack", "ins"]
+    'plot_style': 'static',   # 'static' or 'interactive' for plots
+}
+
 # --- Repository / on-disk layout defaults ---
 # Centralize the default exports directory name so all tools use the same
 # path (can be overridden by CLI args or environment-specific settings).
@@ -134,5 +143,6 @@ __all__ = [
     'CONE_W_DEFAULT', 'CONE_H_DEFAULT', 'CONE_FLIP_VERTICAL_DEFAULT', 'CMAP_NAME_DEFAULT',
     'SONAR_VIS_DEFAULTS', 'ENHANCE_DEFAULTS', 'ConeGridSpec',
     'IMAGE_PROCESSING_CONFIG', 'ELONGATION_CONFIG', 'TRACKING_CONFIG', 'VIDEO_CONFIG',
+    'NAVIGATION_ANALYSIS_CONFIG',
     'EXPORTS_DIR_DEFAULT', 'EXPORTS_SUBDIRS',
 ]

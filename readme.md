@@ -19,9 +19,25 @@ pip install -r requirements.txt
 2. Export data from ROS bag files (CSV, MP4, and cone NPZ):
 
 ```bash
-# Export CSVs, videos and NPZ cones into the `exports/` directory
-python3 solaqua_export.py --data-dir data --exports-dir exports --all
+# Export CSVs, videos and NPZ cones into the `exports/` directory.
+# Example (recommended when using the external LaCie disk):
+python3 solaqua_export.py --data-dir /Volumes/LaCie/SOLAQUA/raw_data \
+    --exports-dir /Volumes/LaCie/SOLAQUA/exports --all
 ```
+
+Notes on defaults and config
+ - The exporter and notebooks read their defaults from `utils/sonar_config.py`.
+   - `EXPORTS_DIR_DEFAULT` and `EXPORTS_SUBDIRS` are the canonical locations used
+     by helper functions and notebooks when you don't pass explicit `--exports-dir`
+     or by-bag paths. You can change those values in `utils/sonar_config.py` or
+     override them at runtime with the CLI flags shown above.
+ - When working with an external macOS-mounted disk (like the recommended
+   `/Volumes/LaCie/...` layout), the exporter now automatically ignores macOS
+   AppleDouble files (names beginning with `._`) and other dot-prefixed hidden
+   files. Those can otherwise be picked up as `*.bag` candidates and cause
+   spurious UTF-8 decode errors during inspection. If you still see errors,
+   check that the external volume is mounted and that your `.bag` files are
+   real (non-dot-prefixed) files.
 
 Notes: `solaqua_export.py` uses `utils/dataset_export_utils.py` to enumerate bag topics and write CSV/Parquet and NPZ sidecars. The NPZ files contain preprocessed cone images, timestamps and `extent` metadata required for accurate pixel→meter conversion.
 
