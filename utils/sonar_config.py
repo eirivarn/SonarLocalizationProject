@@ -74,41 +74,59 @@ class ConeGridSpec:
     img_h: int = CONE_H_DEFAULT
 
 # --- Image-analysis / contour-detection defaults (moved from sonar_image_analysis) ---
+# Core image processing configuration - simplified
 IMAGE_PROCESSING_CONFIG: Dict = {
+    # Momentum merging (core feature)
     'use_momentum_merging': True,
-    'momentum_search_radius': 3,
+    'momentum_search_radius': 1,
     'momentum_threshold': 0.1,
     'momentum_decay': 0.9,
-    'momentum_boost': 5.0,
+    'momentum_boost': 10.0,
+    
+    # Basic edge detection
     'blur_kernel_size': (31, 31),
-    'canny_low_threshold': 40,
-    'canny_high_threshold': 120,
-    'min_contour_area': 100,
+    'canny_low_threshold': 60,
+    'canny_high_threshold': 180,
+    'min_contour_area': 200,
     'morph_close_kernel': 5,
-    'edge_dilation_iterations': 2,
-    'extreme_angle_threshold_deg': 20.0,  # Degrees from horizontal to trigger ellipse center fallback
+    'edge_dilation_iterations': 1,
+}
+
+# Simple tracking configuration
+TRACKING_CONFIG: Dict = {
+    'aoi_expansion_pixels': 20,  # How much to expand AOI around detection
+}
+
+# Video output configuration  
+VIDEO_CONFIG: Dict = {
+    'fps': 15,
+    'show_all_contours': True,
+    'show_bounding_box': True,
+    'text_scale': 0.6,
 }
 
 ELONGATION_CONFIG: Dict = {
-    'aspect_ratio_weight': 0.4,
-    'ellipse_elongation_weight': 0.7,
+    'aspect_ratio_weight': 0.1,
+    'ellipse_elongation_weight': 0.1,
     'solidity_weight': 0.1,
     'extent_weight': 0.0,
     'perimeter_weight': 0.0,
 }
 
 TRACKING_CONFIG: Dict = {
-    'aoi_boost_factor': 1000.0,
-    'aoi_expansion_pixels': 10,
+    'aoi_boost_factor': 2.0,  # Reasonable boost for contours inside AOI
+    'aoi_expansion_pixels': 1,
     'ellipse_smoothing_alpha': 0.2,  # Smoothing factor (0.0 = no smoothing, 1.0 = instant jump)
-    'ellipse_max_movement_pixels': 10.0,  # Maximum pixels ellipse center can move per frame
+    'ellipse_max_movement_pixels': 4.0,  # Maximum pixels ellipse center can move per frame
+    'max_frames_outside_aoi': 5,  # Max consecutive frames to allow best contour outside ellipse AOI
+    'ellipse_expansion_factor': 0.1,  # Factor to expand detected contour ellipse for AOI
 }
 
 VIDEO_CONFIG: Dict = {
     'fps': 15,
     'show_all_contours': True,
     'show_ellipse': True,
-    'show_bounding_box': True,
+    'show_bounding_box': False,
     'text_scale': 0.6,
 }
 
