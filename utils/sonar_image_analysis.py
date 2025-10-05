@@ -18,6 +18,47 @@ from utils.sonar_utils import (
 )
 from utils.sonar_config import IMAGE_PROCESSING_CONFIG, TRACKING_CONFIG, VIDEO_CONFIG, ConeGridSpec
 
+# ============================ ELLIPSE MANIPULATION UTILITIES ============================
+
+def modify_ellipse_aspect_ratio(ellipse_params, aspect_ratio: float = 1.0):
+    """
+    Modify the aspect ratio of an ellipse to make it thinner/longer or wider/shorter.
+    
+    Args:
+        ellipse_params: OpenCV ellipse parameters ((cx, cy), (minor_axis, major_axis), angle)
+        aspect_ratio: Desired major_axis / minor_axis ratio
+                     >1.0 = thinner, longer ellipse 
+                     <1.0 = wider, shorter ellipse
+                     1.0 = no change
+    
+    Returns:
+        Modified ellipse parameters with adjusted axes
+    """
+    if ellipse_params is None or aspect_ratio == 1.0:
+        return ellipse_params
+        
+    (cx, cy), (minor_axis, major_axis), angle = ellipse_params
+    
+    # Calculate the area to preserve (optional - you can comment this out if you want size changes)
+    original_area = np.pi * (minor_axis / 2) * (major_axis / 2)
+    
+    # Apply aspect ratio modification
+    # If aspect_ratio > 1.0, we want major_axis / minor_axis = aspect_ratio
+    if major_axis >= minor_axis:
+        # Normal case: major is already larger
+        new_minor = minor_axis / np.sqrt(aspect_ratio)
+        new_major = major_axis * np.sqrt(aspect_ratio)
+    else:
+        # Edge case: minor is larger, so swap and apply
+        new_major = minor_axis * np.sqrt(aspect_ratio)
+        new_minor = major_axis / np.sqrt(aspect_ratio)
+    
+    # Ensure we maintain reasonable sizes (prevent too small ellipses)
+    new_minor = max(new_minor, 5.0)  # Minimum 5 pixels
+    new_major = max(new_major, 5.0)  # Minimum 5 pixels
+    
+    return ((cx, cy), (new_minor, new_major), angle)
+
 # ============================ CORE DATA STRUCTURES ============================
 
 class FrameAnalysisResult:
@@ -63,6 +104,11 @@ class SonarDataProcessor:
         self.exclusion_zones = []  # Track other large contours to prevent merging
         self.object_ownership_map = None  # Track which pixels belong to which objects
         self.frame_shape = None  # Remember frame dimensions
+        self.last_valid_distance = None  # Track last valid distance for filtering
+        
+        # ELLIPSE TRACKING STATE for smooth movement
+        self.last_ellipse_center = None  # (cx, cy) for smooth interpolation
+        self.last_ellipse_params = None  # Full ellipse parameters for consistency
         
     def reset_tracking(self):
         """Reset all tracking state."""
@@ -71,6 +117,9 @@ class SonarDataProcessor:
         self.exclusion_zones = []
         self.object_ownership_map = None
         self.frame_shape = None
+        self.last_valid_distance = None
+        self.last_ellipse_center = None
+        self.last_ellipse_params = None
         
     def preprocess_frame(self, frame_u8: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """Preprocessing with object separation to prevent merging."""
@@ -151,6 +200,10 @@ class SonarDataProcessor:
         # Extract distance and angle
         distance_pixels, angle_degrees = _distance_angle_from_contour(best_contour, W, H)
         
+        # DISTANCE VALIDATION: Filter out invalid distances (negative or outside image bounds)
+        if self.img_config.get('use_distance_validation', True):
+            distance_pixels = self._validate_distance(distance_pixels, H)
+        
         # Convert to meters if extent provided
         distance_meters = None
         if distance_pixels is not None and extent is not None:
@@ -159,24 +212,58 @@ class SonarDataProcessor:
             px2m_y = height_m / H
             distance_meters = y_min + distance_pixels * px2m_y
         
-        # Update simple tracking
-        if best_contour is not None and features:
-            self.last_center = (features['centroid_x'], features['centroid_y'])
-            
-            # Simple AOI: expand bounding rect
-            x, y, w, h = features['rect']
-            expansion = 25
-            self.current_aoi = (
-                max(0, x - expansion),
-                max(0, y - expansion),
-                min(W - max(0, x - expansion), w + 2*expansion),
-                min(H - max(0, y - expansion), h + 2*expansion)
-            )
+        # Update SMOOTH ellipse tracking (prevents jumping/flickering)
+        if best_contour is not None and features and len(best_contour) >= 5:
+            # Get current ellipse parameters
+            try:
+                current_ellipse = cv2.fitEllipse(best_contour)
+                current_center = current_ellipse[0]  # (cx, cy)
+                
+                # Apply smooth tracking with movement limiting
+                smooth_center = self._smooth_ellipse_movement(current_center, W, H)
+                
+                # Apply aspect ratio modification to the ellipse
+                aspect_ratio = TRACKING_CONFIG.get('ellipse_aspect_ratio', 1.0)
+                modified_ellipse = modify_ellipse_aspect_ratio(current_ellipse, aspect_ratio)
+                
+                # Update the ellipse center to use the smoothed center
+                if modified_ellipse is not None:
+                    _, (minor_axis, major_axis), angle = modified_ellipse
+                    modified_ellipse = (smooth_center, (minor_axis, major_axis), angle)
+                
+                # Update tracking state with smoothed center and modified ellipse
+                self.last_center = smooth_center
+                self.last_ellipse_center = smooth_center
+                self.last_ellipse_params = modified_ellipse
+                
+                # Create AOI around smoothed ellipse center
+                expansion = TRACKING_CONFIG.get('aoi_expansion_pixels', 25)
+                x, y = int(smooth_center[0]), int(smooth_center[1])
+                self.current_aoi = (
+                    max(0, x - expansion),
+                    max(0, y - expansion),
+                    min(W, 2*expansion),  # width
+                    min(H, 2*expansion)   # height
+                )
+            except:
+                # Fallback to simple centroid tracking if ellipse fitting fails
+                self.last_center = (features['centroid_x'], features['centroid_y'])
+                x, y, w, h = features['rect']
+                expansion = 25
+                self.current_aoi = (
+                    max(0, x - expansion),
+                    max(0, y - expansion),
+                    min(W - max(0, x - expansion), w + 2*expansion),
+                    min(H - max(0, y - expansion), h + 2*expansion)
+                )
         
-        # Create tracking status with object separation information
+        # Create tracking status with smooth ellipse information
         status_parts = []
         if self.current_aoi:
-            status_parts.append("SEPARATED_AOI")
+            if self.last_ellipse_center is not None:
+                status_parts.append("SMOOTH_ELLIPSE_AOI")
+            else:
+                status_parts.append("SEPARATED_AOI")
         else:
             status_parts.append("SEPARATED_SEARCH")
             
@@ -223,6 +310,84 @@ class SonarDataProcessor:
         except Exception as e:
             print(f"Error processing frame {frame_idx}: {e}")
             return None
+
+    def _validate_distance(self, distance_pixels: Optional[float], image_height: int) -> Optional[float]:
+        """
+        Validate distance measurement and use last valid value if current is invalid.
+        
+        Args:
+            distance_pixels: Raw distance measurement in pixels
+            image_height: Height of the image in pixels
+            
+        Returns:
+            Validated distance or None if no valid distance available
+        """
+        # Check if current distance is valid
+        if distance_pixels is not None:
+            # Distance must be non-negative and within image bounds
+            if 0 <= distance_pixels <= image_height:
+                # Valid distance - store it and return
+                self.last_valid_distance = distance_pixels
+                return distance_pixels
+            else:
+                # Invalid distance - use last valid distance if available
+                if self.last_valid_distance is not None:
+                    return self.last_valid_distance
+                else:
+                    return None
+        else:
+            # No distance detected - use last valid distance if available
+            if self.last_valid_distance is not None:
+                return self.last_valid_distance
+            else:
+                return None
+
+    def _smooth_ellipse_movement(self, current_center: tuple, image_width: int, image_height: int) -> tuple:
+        """
+        Apply smooth ellipse movement with speed limiting to prevent jumping/flickering.
+        
+        Args:
+            current_center: (cx, cy) of current detected ellipse
+            image_width: Width of image for bounds checking
+            image_height: Height of image for bounds checking
+            
+        Returns:
+            Smoothed ellipse center (cx, cy)
+        """
+        from utils.sonar_config import TRACKING_CONFIG
+        
+        # Get smoothing parameters
+        smoothing_alpha = TRACKING_CONFIG.get('ellipse_smoothing_alpha', 0.2)
+        max_movement = TRACKING_CONFIG.get('ellipse_max_movement_pixels', 4.0)
+        
+        # If no previous ellipse, use current as-is
+        if self.last_ellipse_center is None:
+            return current_center
+        
+        # Calculate movement distance
+        last_cx, last_cy = self.last_ellipse_center
+        curr_cx, curr_cy = current_center
+        
+        dx = curr_cx - last_cx
+        dy = curr_cy - last_cy
+        movement_distance = (dx*dx + dy*dy) ** 0.5  # Using power instead of np.sqrt
+        
+        # Limit movement speed to prevent jumping
+        if movement_distance > max_movement:
+            # Scale down movement to maximum allowed
+            scale = max_movement / movement_distance
+            dx *= scale
+            dy *= scale
+            
+        # Apply exponential smoothing
+        smooth_cx = last_cx + smoothing_alpha * dx
+        smooth_cy = last_cy + smoothing_alpha * dy
+        
+        # Ensure smoothed center stays within image bounds
+        smooth_cx = max(0, min(image_width - 1, smooth_cx))
+        smooth_cy = max(0, min(image_height - 1, smooth_cy))
+        
+        return (smooth_cx, smooth_cy)
 
 # ============================ NPZ I/O ============================
 
@@ -2197,11 +2362,22 @@ def create_enhanced_contour_detection_video_with_processor(npz_file_index=0, fra
         if VIDEO_CONFIG.get('show_all_contours', True) and contours:
             cv2.drawContours(vis, contours, -1, (255, 200, 100), 1)
         
-        # Draw rectangular AOI (yellow)
-        if processor.current_aoi is not None:
+        # Draw elliptical AOI (yellow) if ellipse tracking is active
+        if processor.last_ellipse_params is not None:
+            # Draw the smoothed ellipse AOI
+            ellipse_aoi = processor.last_ellipse_params
+            cv2.ellipse(vis, ellipse_aoi, (0, 255, 255), 2)  # Yellow ellipse
+            
+            # Add AOI label at ellipse center
+            cx, cy = ellipse_aoi[0]
+            cv2.putText(vis, 'ELLIPSE AOI', (int(cx) + 10, int(cy) - 10),
+                       cv2.FONT_HERSHEY_SIMPLEX, VIDEO_CONFIG['text_scale'], (0,255,255), 1)
+        
+        # Fallback: Draw rectangular AOI (yellow) if no ellipse tracking
+        elif processor.current_aoi is not None:
             ax, ay, aw, ah = processor.current_aoi
             cv2.rectangle(vis, (ax, ay), (ax+aw, ay+ah), (0, 255, 255), 2)
-            cv2.putText(vis, 'AOI', (ax + 5, ay + 20),
+            cv2.putText(vis, 'RECT AOI', (ax + 5, ay + 20),
                        cv2.FONT_HERSHEY_SIMPLEX, VIDEO_CONFIG['text_scale'], (0,255,255), 1)
         
         # Draw object ownership map (colored overlay) - CRITICAL for showing separation

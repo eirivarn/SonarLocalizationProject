@@ -112,7 +112,7 @@ IMAGE_PROCESSING_CONFIG: Dict = {
     'min_contour_area': 200,          # Minimum pixel area to consider as valid contour
                                       # ↑ Higher = filters out small noise, may miss small net parts
                                       # ↓ Lower = detects smaller objects, more noise/false positives
-    'morph_close_kernel': 3,          # Kernel size for closing gaps in contours (3-7 range)
+    'morph_close_kernel': 1,          # Kernel size for closing gaps in contours (3-7 range)
                                       # ↑ Higher = closes larger gaps, may connect separate objects
                                       # ↓ Lower = preserves gaps, may leave net broken
     'edge_dilation_iterations': 1,    # Additional edge strengthening iterations
@@ -124,6 +124,11 @@ IMAGE_PROCESSING_CONFIG: Dict = {
                                       # TRUE  = Prevents fish/debris merging with net (slower, accurate)
                                       # FALSE = Faster processing, but objects may merge together
                                       # Toggle dynamically: IMAGE_PROCESSING_CONFIG['use_pixel_ownership'] = True/False
+    
+    # === DISTANCE VALIDATION FILTER ===
+    'use_distance_validation': True,  # Filter invalid distance measurements
+                                      # TRUE  = Uses last valid distance when current is negative/out of bounds
+                                      # FALSE = No filtering, raw distance values used (may have jumps/errors)
 }
 
 # === OBJECT TRACKING CONFIGURATION ===
@@ -135,18 +140,25 @@ TRACKING_CONFIG: Dict = {
     'aoi_boost_factor': 2.0,          # Score boost for contours inside AOI 
                                       # ↑ Higher = strongly prefers previous net location
                                       # ↓ Lower = more willing to jump to new net locations
-    'ellipse_smoothing_alpha': 0.2,   # Smoothing for ellipse center movement 
-                                      # ↑ Higher (→1.0) = instant jumps, jittery tracking
-                                      # ↓ Lower (→0.0) = very smooth, slow to adapt to movement
-    'ellipse_max_movement_pixels': 4.0,  # Max ellipse center movement per frame 
+    'ellipse_smoothing_alpha': 0.3,   # Smoothing for ellipse center movement (ACTIVELY USED) 
+                                      # ↑ Higher (→1.0) = instant jumps, very responsive but jittery
+                                      # ↓ Lower (→0.0) = very smooth movement, slow to adapt
+                                      # RECOMMENDED: 0.1-0.3 for stable tracking
+    'ellipse_max_movement_pixels': 8.0,  # Max ellipse center movement per frame (ACTIVELY USED)
                                          # ↑ Higher = allows faster net movement, may jump to noise
-                                         # ↓ Lower = smoother tracking, may lose fast-moving nets
+                                         # ↓ Lower = prevents jumping/flickering, very stable tracking  
+                                         # RECOMMENDED: 2.0-6.0 pixels for smooth movement
     'max_frames_outside_aoi': 5,      # Max frames to track contour outside AOI 
                                       # ↑ Higher = more persistent tracking of lost nets
                                       # ↓ Lower = quickly abandons tracking when net moves away
     'ellipse_expansion_factor': 0.1,  # Factor to expand ellipse for AOI 
                                       # ↑ Higher = larger elliptical AOI, more stable tracking
                                       # ↓ Lower = tighter elliptical AOI, more precise but may lose net
+    'ellipse_aspect_ratio': 5.0,     # Aspect ratio modification for ellipse (major/minor axis ratio)
+                                      # ↑ Higher (>1.0) = elongated ellipse, thinner and longer 
+                                      # ↓ Lower (<1.0) = wider ellipse, shorter and fatter
+                                      # 1.0 = no modification, uses natural contour ellipse
+                                      # RECOMMENDED: 1.5-3.0 for fishing net tracking
 }
 
 # === EXCLUSION ZONE CONFIGURATION ===
