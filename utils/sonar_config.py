@@ -109,7 +109,7 @@ TRACKING_CONFIG: Dict = {
 
 # Exclusion zone configuration - prevent merging with other objects
 EXCLUSION_CONFIG: Dict = {
-    'enable_exclusions': True,
+    'enable_exclusions': False,  # Master toggle for exclusion zones
     'min_secondary_area': 100,     # Minimum area for secondary contours to track
     'exclusion_radius': 5,        # Radius around secondary contours to exclude
     'max_exclusion_zones': 5,      # Maximum number of exclusion zones to track
