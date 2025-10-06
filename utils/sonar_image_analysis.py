@@ -110,6 +110,9 @@ class SonarDataProcessor:
         self.last_ellipse_center = None  # (cx, cy) for smooth interpolation
         self.last_ellipse_params = None  # Full ellipse parameters for consistency
         
+        # UNIFIED MASKING SYSTEM (NEW)
+        self.masking_system = None  # Will be initialized on first frame
+        
     def reset_tracking(self):
         """Reset all tracking state."""
         self.last_center = None
@@ -120,23 +123,23 @@ class SonarDataProcessor:
         self.last_valid_distance = None
         self.last_ellipse_center = None
         self.last_ellipse_params = None
+        self.masking_system = None  # Reset masking system
         
     def preprocess_frame(self, frame_u8: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """Preprocessing with object separation to prevent merging."""
-        # Apply momentum-based merging first (this helps connect separated net parts)
-        if self.img_config.get('use_momentum_merging', True):
-            momentum_enhanced = directional_momentum_merge(
-                frame_u8, 
-                search_radius=self.img_config.get('momentum_search_radius', 1),
-                momentum_threshold=self.img_config.get('momentum_threshold', 0.1),
-                momentum_decay=self.img_config.get('momentum_decay', 0.9),
-                momentum_boost=self.img_config.get('momentum_boost', 10.0)
-            )
-        else:
-            momentum_enhanced = frame_u8
+        """Enhanced preprocessing with unified masking system for AOI-aware processing."""
         
-        # Use object separation preprocessing
-        return preprocess_edges_with_object_separation(momentum_enhanced, self.object_ownership_map, self.img_config)
+        # Initialize masking system if not already done
+        if not hasattr(self, 'masking_system') or self.masking_system is None:
+            self.masking_system = SonarMaskingSystem(frame_u8.shape, self.img_config)
+        
+        # Update AOI based on last detected net (if available)
+        if hasattr(self, 'last_ellipse_params') and self.last_ellipse_params is not None:
+            self.masking_system.update_aoi(net_ellipse=self.last_ellipse_params)
+        
+        # Use new unified preprocessing with masking system
+        raw_edges, processed_edges = preprocess_edges_with_masking(frame_u8, self.masking_system, self.img_config)
+        
+        return raw_edges, processed_edges
         
     def update_object_ownership(self, frame_u8: np.ndarray):
         """Update object ownership tracking to prevent merging"""
@@ -180,8 +183,8 @@ class SonarDataProcessor:
             _, edges_proc = self.preprocess_frame(frame_u8)
         else:
             # Skip pixel ownership tracking for faster processing
-            # STEP 2: Simple preprocessing without object separation
-            _, edges_proc = preprocess_edges(frame_u8, self.img_config)
+            # STEP 2: Enhanced preprocessing with exclusion masking
+            _, edges_proc = preprocess_edges_with_exclusions(frame_u8, self.exclusion_zones, self.img_config)
         
         # STEP 3: Find contours on separated edges (net should be separated now)
         contours, _ = cv2.findContours(edges_proc, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
@@ -196,6 +199,28 @@ class SonarDataProcessor:
             best_contour, 
             self.img_config
         )
+        
+        # STEP 5.5: Update masking system with detected objects (NEW)
+        if self.masking_system is not None:
+            # Convert contours to object format for masking system
+            detected_objects = []
+            for i, contour in enumerate(contours):
+                if contour is not best_contour:  # Don't include the net contour as exclusion
+                    area = cv2.contourArea(contour)
+                    if area > 0:
+                        moments = cv2.moments(contour)
+                        if moments["m00"] != 0:
+                            cx = int(moments["m10"] / moments["m00"])
+                            cy = int(moments["m01"] / moments["m00"])
+                            detected_objects.append({
+                                'contour': contour,
+                                'area': area,
+                                'center': (cx, cy),
+                                'id': i
+                            })
+            
+            # Update dynamic exclusions in masking system
+            self.masking_system.update_dynamic_exclusions(detected_objects)
         
         # Extract distance and angle
         distance_pixels, angle_degrees = _distance_angle_from_contour(best_contour, W, H)
@@ -235,6 +260,10 @@ class SonarDataProcessor:
                 self.last_center = smooth_center
                 self.last_ellipse_center = smooth_center
                 self.last_ellipse_params = modified_ellipse
+                
+                # Update AOI in masking system (NEW)
+                if self.masking_system is not None:
+                    self.masking_system.update_aoi(net_ellipse=modified_ellipse)
                 
                 # Create AOI around smoothed ellipse center
                 expansion = TRACKING_CONFIG.get('aoi_expansion_pixels', 25)
@@ -979,17 +1008,842 @@ def fast_directional_enhance(frame, threshold=0.2, boost=1.5):
     result[boost_mask] += boost * enhanced[boost_mask]
     return np.clip(result, 0, 255).astype(np.uint8)
 
-def prepare_input_gray(frame_u8: np.ndarray, cfg=IMAGE_PROCESSING_CONFIG) -> np.ndarray:
-    """Prepare input using momentum merging for sharp, well-defined objects"""
-    return directional_momentum_merge(
+def apply_best_morphological_enhancement(frame_u8: np.ndarray, cfg=IMAGE_PROCESSING_CONFIG) -> Tuple[np.ndarray, str]:
+    """
+    Apply the best performing morphological enhancement to the frame.
+    Tests ellipse, cross, and rectangular kernels to find optimal connectivity.
+    
+    Args:
+        frame_u8: Input frame (uint8 grayscale)
+        cfg: Configuration dictionary
+        
+    Returns:
+        Tuple of (enhanced_frame, method_description)
+    """
+    morph_results = {}
+    
+    # Test all kernel types and sizes
+    for kernel_type, cv_type in [('ellipse', cv2.MORPH_ELLIPSE), ('cross', cv2.MORPH_CROSS), ('rect', cv2.MORPH_RECT)]:
+        for size in [3, 5, 7, 9, 11]:
+            kernel = cv2.getStructuringElement(cv_type, (size, size))
+            closed = cv2.morphologyEx(frame_u8, cv2.MORPH_CLOSE, kernel)
+            closed_nonzero = np.count_nonzero(closed)
+            morph_results[f'{kernel_type}_{size}'] = closed_nonzero
+    
+    # Find and apply best morphological approach
+    best_morph_key = max(morph_results, key=morph_results.get)
+    best_morph_type, best_morph_size = best_morph_key.split('_')
+    best_morph_size = int(best_morph_size)
+    
+    if best_morph_type == 'ellipse':
+        best_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (best_morph_size, best_morph_size))
+    elif best_morph_type == 'cross':
+        best_kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (best_morph_size, best_morph_size))
+    elif best_morph_type == 'rect':
+        best_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (best_morph_size, best_morph_size))
+    
+    enhanced_frame = cv2.morphologyEx(frame_u8, cv2.MORPH_CLOSE, best_kernel)
+    method_description = f"Best Morphological ({best_morph_type.title()} {best_morph_size}x{best_morph_size})"
+    
+    return enhanced_frame, method_description
+
+def apply_best_directional_enhancement(frame_u8: np.ndarray, cfg=IMAGE_PROCESSING_CONFIG) -> Tuple[np.ndarray, str]:
+    """
+    Apply the best performing directional morphological enhancement.
+    Tests different angles to find optimal net orientation.
+    
+    Args:
+        frame_u8: Input frame (uint8 grayscale)
+        cfg: Configuration dictionary
+        
+    Returns:
+        Tuple of (enhanced_frame, method_description)
+    """
+    orientations = [0, 30, 60, 90, 120, 150]
+    directional_results = {}
+    
+    for angle in orientations:
+        kernel_size = 11
+        aspect_ratio = 3
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size * aspect_ratio, kernel_size))
+        M = cv2.getRotationMatrix2D((kernel_size * aspect_ratio // 2, kernel_size // 2), angle, 1.0)
+        rotated_kernel = cv2.warpAffine(kernel.astype(np.float32), M, (kernel_size * aspect_ratio, kernel_size))
+        rotated_kernel = (rotated_kernel > 0.5).astype(np.uint8)
+        directional_closed = cv2.morphologyEx(frame_u8, cv2.MORPH_CLOSE, rotated_kernel)
+        directional_results[angle] = np.count_nonzero(directional_closed)
+    
+    # Apply best directional approach
+    best_angle = max(directional_results, key=directional_results.get)
+    best_dir_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11 * 3, 11))
+    M = cv2.getRotationMatrix2D((11 * 3 // 2, 11 // 2), best_angle, 1.0)
+    best_dir_kernel = cv2.warpAffine(best_dir_kernel.astype(np.float32), M, (11 * 3, 11))
+    best_dir_kernel = (best_dir_kernel > 0.5).astype(np.uint8)
+    enhanced_frame = cv2.morphologyEx(frame_u8, cv2.MORPH_CLOSE, best_dir_kernel)
+    method_description = f"Best Directional ({best_angle}°)"
+    
+    return enhanced_frame, method_description
+
+def apply_iterative_momentum_enhancement(frame_u8: np.ndarray, cfg=IMAGE_PROCESSING_CONFIG, passes: int = None) -> Tuple[np.ndarray, str]:
+    """
+    Apply iterative momentum enhancement for stronger connectivity.
+    
+    Args:
+        frame_u8: Input frame (uint8 grayscale)
+        cfg: Configuration dictionary
+        passes: Number of additional momentum passes (if None, uses cfg['iterative_momentum_passes'])
+        
+    Returns:
+        Tuple of (enhanced_frame, method_description)
+    """
+    # Use config value if passes not explicitly provided
+    if passes is None:
+        passes = cfg.get('iterative_momentum_passes', 2)
+    
+    enhanced_frame = frame_u8.copy()
+    for i in range(passes):
+        enhanced_frame = directional_momentum_merge(
+            enhanced_frame,
+            search_radius=cfg.get('momentum_search_radius', 3),
+            momentum_threshold=cfg.get('momentum_threshold', 0.2),
+            momentum_decay=cfg.get('momentum_decay', 0.8),
+            momentum_boost=cfg.get('momentum_boost', 1.5),
+        )
+    method_description = f"Iterative Momentum ({passes}x)"
+    return enhanced_frame, method_description
+
+def apply_combination_enhancement(frame_u8: np.ndarray, cfg=IMAGE_PROCESSING_CONFIG) -> Tuple[np.ndarray, str]:
+    """
+    Apply combination enhancement: iterative momentum + best directional.
+    
+    Args:
+        frame_u8: Input frame (uint8 grayscale)
+        cfg: Configuration dictionary
+        
+    Returns:
+        Tuple of (enhanced_frame, method_description)
+    """
+    # First: apply iterative momentum using config
+    iterative_enhanced, _ = apply_iterative_momentum_enhancement(frame_u8, cfg)
+    
+    # Find best directional angle
+    orientations = [0, 30, 60, 90, 120, 150]
+    directional_results = {}
+    for angle in orientations:
+        kernel_size = 11
+        aspect_ratio = 3
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size * aspect_ratio, kernel_size))
+        M = cv2.getRotationMatrix2D((kernel_size * aspect_ratio // 2, kernel_size // 2), angle, 1.0)
+        rotated_kernel = cv2.warpAffine(kernel.astype(np.float32), M, (kernel_size * aspect_ratio, kernel_size))
+        rotated_kernel = (rotated_kernel > 0.5).astype(np.uint8)
+        directional_closed = cv2.morphologyEx(frame_u8, cv2.MORPH_CLOSE, rotated_kernel)
+        directional_results[angle] = np.count_nonzero(directional_closed)
+    
+    # Apply combination
+    best_angle = max(directional_results, key=directional_results.get)
+    kernel_size = 7
+    aspect_ratio = 4
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size * aspect_ratio, kernel_size))
+    M = cv2.getRotationMatrix2D((kernel_size * aspect_ratio // 2, kernel_size // 2), best_angle, 1.0)
+    optimal_kernel = cv2.warpAffine(kernel.astype(np.float32), M, (kernel_size * aspect_ratio, kernel_size))
+    optimal_kernel = (optimal_kernel > 0.5).astype(np.uint8)
+    
+    enhanced_frame = iterative_enhanced.copy()
+    for i in range(2):
+        enhanced_frame = cv2.morphologyEx(enhanced_frame, cv2.MORPH_CLOSE, optimal_kernel)
+    
+    method_description = f"Combination (Iterative + Directional {best_angle}°)"
+    return enhanced_frame, method_description
+
+def prepare_input_gray(frame_u8: np.ndarray, cfg=IMAGE_PROCESSING_CONFIG, masking_system=None) -> np.ndarray:
+    """
+    Prepare input using configurable enhancement modes for optimal net detection.
+    Now includes integrated masking system support.
+    
+    Enhancement modes:
+    - 'momentum': Standard momentum enhancement only (fastest)
+    - 'iterative': Iterative momentum enhancement (configurable passes)
+    - 'best_morph': Best morphological closing (ellipse/cross/rect)
+    - 'best_directional': Best directional morphological closing
+    - 'combination': Combination (iterative + directional)
+    
+    Args:
+        frame_u8: Input frame (uint8 grayscale)
+        cfg: Configuration dictionary
+        masking_system: Optional SonarMaskingSystem instance for advanced masking
+    """
+    # Start with base momentum enhancement
+    momentum_enhanced = directional_momentum_merge(
         frame_u8,
         search_radius=cfg.get('momentum_search_radius', 3),
         momentum_threshold=cfg.get('momentum_threshold', 0.2),
         momentum_decay=cfg.get('momentum_decay', 0.8),
         momentum_boost=cfg.get('momentum_boost', 1.5),
     )
+    
+    # Apply masking to momentum enhancement if enabled and system provided
+    if masking_system is not None:
+        integration_points = masking_system.get_integration_points()
+        if integration_points.get('momentum_merging', False):
+            mask = masking_system.generate_mask()
+            momentum_enhanced = masking_system.apply_mask_to_image(momentum_enhanced, mask)
+    
+    # Apply additional enhancement based on mode
+    enhancement_mode = cfg.get('enhancement_mode', 'momentum')
+    
+    if enhancement_mode == 'momentum':
+        # Apply final masking to momentum result if enabled
+        if masking_system is not None and masking_system.get_integration_points().get('enhancement', False):
+            mask = masking_system.generate_mask()
+            momentum_enhanced = masking_system.apply_mask_to_image(momentum_enhanced, mask)
+        return momentum_enhanced
+        
+    elif enhancement_mode == 'iterative':
+        # Apply iterative momentum enhancement using configurable passes
+        enhanced_frame, _ = apply_iterative_momentum_enhancement(momentum_enhanced, cfg)
+        
+    elif enhancement_mode == 'best_morph':
+        # Apply best morphological enhancement to momentum result
+        enhanced_frame, _ = apply_best_morphological_enhancement(momentum_enhanced, cfg)
+        
+    elif enhancement_mode == 'best_directional':
+        # Apply best directional enhancement to momentum result
+        enhanced_frame, _ = apply_best_directional_enhancement(momentum_enhanced, cfg)
+        
+    elif enhancement_mode == 'combination':
+        # Apply combination enhancement starting from momentum result
+        enhanced_frame, _ = apply_combination_enhancement(momentum_enhanced, cfg)
+        
+    else:
+        # Unknown mode, fall back to standard momentum
+        print(f"Warning: Unknown enhancement_mode '{enhancement_mode}', using 'momentum'")
+        enhanced_frame = momentum_enhanced
+    
+    # Apply final masking to enhanced result if enabled
+    if masking_system is not None and masking_system.get_integration_points().get('enhancement', False):
+        mask = masking_system.generate_mask()
+        enhanced_frame = masking_system.apply_mask_to_image(enhanced_frame, mask)
+        
+    return enhanced_frame
+
+# ============================ UNIFIED MASKING SYSTEM ============================
+
+class SonarMaskingSystem:
+    """
+    Unified pixel-level masking system for preventing unwanted object merging.
+    
+    Integrates static exclusion zones, dynamic object exclusions, and pixel ownership
+    tracking into a single coherent system that can be applied at multiple points
+    in the image processing pipeline.
+    """
+    
+    def __init__(self, frame_shape: Tuple[int, int], cfg: Dict = None):
+        """
+        Initialize the masking system.
+        
+        Args:
+            frame_shape: (height, width) of the frames to process
+            cfg: Configuration dictionary (uses IMAGE_PROCESSING_CONFIG if None)
+        """
+        self.frame_shape = frame_shape
+        self.cfg = cfg or IMAGE_PROCESSING_CONFIG
+        self.masking_config = self.cfg.get('masking_system', {})
+        
+        # State tracking
+        self.static_mask = None
+        self.dynamic_zones = []
+        self.ownership_map = None
+        self.frame_count = 0
+        
+        # AOI (Area of Interest) tracking
+        self.current_aoi = None
+        self.aoi_config = self.masking_config.get('aoi_integration', {})
+        
+        # Initialize static mask if zones are defined
+        self._initialize_static_mask()
+        
+    def _initialize_static_mask(self):
+        """Create the static exclusion mask from predefined zones."""
+        static_zones = self.masking_config.get('static_zones', [])
+        if not static_zones:
+            return
+            
+        H, W = self.frame_shape
+        self.static_mask = np.ones((H, W), dtype=np.uint8) * 255
+        
+        for zone in static_zones:
+            center = zone.get('center')
+            shape = zone.get('shape', 'circle')
+            
+            if shape == 'circle':
+                radius = zone.get('radius', 10)
+                cv2.circle(self.static_mask, center, radius, 0, -1)
+            elif shape == 'ellipse':
+                axes = zone.get('axes', (10, 5))
+                angle = zone.get('angle', 0)
+                cv2.ellipse(self.static_mask, center, axes, angle, 0, 360, 0, -1)
+            elif shape == 'polygon':
+                points = np.array(zone.get('points', []), dtype=np.int32)
+                cv2.fillPoly(self.static_mask, [points], 0)
+    
+    def update_dynamic_exclusions(self, detected_objects: List[Dict]):
+        """
+        Update dynamic exclusion zones based on detected objects.
+        
+        Args:
+            detected_objects: List of object dictionaries with 'contour', 'area', 'center'
+        """
+        if not self.masking_config.get('enabled', True):
+            return
+            
+        dyn_config = self.masking_config.get('dynamic_exclusions', {})
+        min_area = dyn_config.get('min_object_area', 150)
+        base_radius = dyn_config.get('exclusion_radius', 8)
+        scale_factor = dyn_config.get('radius_scale_factor', 1.2)
+        max_zones = dyn_config.get('max_zones', 8)
+        merge_threshold = dyn_config.get('merge_distance_threshold', 15)
+        
+        # Age existing zones
+        for zone in self.dynamic_zones:
+            zone['age'] += 1
+        
+        # Remove expired zones
+        max_age = dyn_config.get('zone_lifetime_frames', 5)
+        self.dynamic_zones = [z for z in self.dynamic_zones if z['age'] < max_age]
+        
+        # Add new zones from detected objects
+        for obj in detected_objects:
+            if obj.get('area', 0) < min_area:
+                continue
+                
+            center = obj.get('center')
+            if center is None:
+                continue
+            
+            # Check if we should prevent exclusion zones inside AOI
+            if (self.aoi_config.get('enabled', True) and 
+                self.aoi_config.get('prevent_exclusions_in_aoi', True) and 
+                self.current_aoi is not None):
+                
+                # Check if object center is inside AOI
+                if self._is_point_in_aoi(center):
+                    # Skip creating exclusion zone for objects inside AOI
+                    continue
+                
+                # Also check minimum distance from AOI edge
+                buffer_distance = self.aoi_config.get('exclusion_buffer_from_aoi', 10)
+                if buffer_distance > 0:
+                    distance_to_aoi = self._distance_to_aoi_edge(center)
+                    if distance_to_aoi < buffer_distance:
+                        # Too close to AOI, skip exclusion zone creation
+                        continue
+                
+            # Calculate radius based on object size
+            area = obj.get('area', min_area)
+            radius = int(base_radius * (area / min_area) ** 0.5 * scale_factor)
+            
+            # Check if we should merge with existing zone
+            merged = False
+            for existing_zone in self.dynamic_zones:
+                existing_center = existing_zone['center']
+                distance = np.sqrt((center[0] - existing_center[0])**2 + 
+                                 (center[1] - existing_center[1])**2)
+                
+                if distance < merge_threshold:
+                    # Merge zones - update position and radius
+                    existing_zone['center'] = (
+                        (center[0] + existing_center[0]) / 2,
+                        (center[1] + existing_center[1]) / 2
+                    )
+                    existing_zone['radius'] = max(existing_zone['radius'], radius)
+                    existing_zone['age'] = 0  # Reset age
+                    merged = True
+                    break
+            
+            if not merged and len(self.dynamic_zones) < max_zones:
+                self.dynamic_zones.append({
+                    'center': center,
+                    'radius': radius,
+                    'age': 0,
+                    'object_id': obj.get('id', len(self.dynamic_zones))
+                })
+    
+    def update_aoi(self, aoi_definition: Dict = None, net_contour=None, net_ellipse=None):
+        """
+        Update the Area of Interest (AOI) for masking decisions.
+        
+        Args:
+            aoi_definition: Direct AOI definition with 'center', 'radius', or 'contour'
+            net_contour: OpenCV contour of detected net
+            net_ellipse: Ellipse parameters ((cx, cy), (w, h), angle) of detected net
+        """
+        if not self.aoi_config.get('enabled', True):
+            self.current_aoi = None
+            return
+        
+        if aoi_definition is not None:
+            # Use provided AOI definition
+            self.current_aoi = aoi_definition
+            
+        elif net_ellipse is not None:
+            # Create AOI from net ellipse with expansion
+            (cx, cy), (w, h), angle = net_ellipse
+            expansion = self.aoi_config.get('aoi_expansion_for_masking', 5)
+            
+            # Expand ellipse for AOI
+            if self.aoi_config.get('use_tracking_aoi', True):
+                from utils.sonar_config import TRACKING_CONFIG
+                tracking_expansion = TRACKING_CONFIG.get('aoi_expansion_pixels', 15)
+                ellipse_factor = TRACKING_CONFIG.get('ellipse_expansion_factor', 0.1)
+                
+                expanded_w = w * (1 + ellipse_factor) + tracking_expansion + expansion
+                expanded_h = h * (1 + ellipse_factor) + tracking_expansion + expansion
+            else:
+                expanded_w = w + expansion * 2
+                expanded_h = h + expansion * 2
+            
+            self.current_aoi = {
+                'type': 'ellipse',
+                'center': (cx, cy),
+                'axes': (expanded_w, expanded_h),
+                'angle': angle
+            }
+            
+        elif net_contour is not None:
+            # Create AOI from net contour with expansion
+            expansion = self.aoi_config.get('aoi_expansion_for_masking', 5)
+            
+            # Get bounding rectangle and expand
+            x, y, w, h = cv2.boundingRect(net_contour)
+            self.current_aoi = {
+                'type': 'rectangle',
+                'bounds': (x - expansion, y - expansion, 
+                          x + w + expansion, y + h + expansion)
+            }
+            
+        else:
+            # No AOI information provided, use fallback
+            fallback_radius = self.aoi_config.get('fallback_aoi_radius', 50)
+            H, W = self.frame_shape
+            self.current_aoi = {
+                'type': 'circle',
+                'center': (W // 2, H // 2),
+                'radius': fallback_radius
+            }
+    
+    def _create_aoi_mask(self) -> np.ndarray:
+        """
+        Create a binary mask representing the current AOI.
+        
+        Returns:
+            Binary mask where 255=inside AOI, 0=outside AOI
+        """
+        if self.current_aoi is None:
+            # No AOI defined, return all-allowed mask
+            return np.ones(self.frame_shape, dtype=np.uint8) * 255
+        
+        H, W = self.frame_shape
+        aoi_mask = np.zeros((H, W), dtype=np.uint8)
+        
+        aoi_type = self.current_aoi.get('type', 'circle')
+        
+        if aoi_type == 'circle':
+            center = self.current_aoi['center']
+            radius = self.current_aoi['radius']
+            cv2.circle(aoi_mask, (int(center[0]), int(center[1])), int(radius), 255, -1)
+            
+        elif aoi_type == 'ellipse':
+            center = self.current_aoi['center']
+            axes = self.current_aoi['axes']
+            angle = self.current_aoi.get('angle', 0)
+            cv2.ellipse(aoi_mask, (int(center[0]), int(center[1])), 
+                       (int(axes[0]//2), int(axes[1]//2)), angle, 0, 360, 255, -1)
+            
+        elif aoi_type == 'rectangle':
+            bounds = self.current_aoi['bounds']
+            x1, y1, x2, y2 = map(int, bounds)
+            cv2.rectangle(aoi_mask, (x1, y1), (x2, y2), 255, -1)
+            
+        elif aoi_type == 'contour':
+            contour = np.array(self.current_aoi['contour'], dtype=np.int32)
+            cv2.fillPoly(aoi_mask, [contour], 255)
+        
+        return aoi_mask
+    
+    def _is_point_in_aoi(self, point: Tuple[float, float]) -> bool:
+        """
+        Check if a point is inside the current AOI.
+        
+        Args:
+            point: (x, y) coordinates to check
+            
+        Returns:
+            True if point is inside AOI, False otherwise
+        """
+        if self.current_aoi is None:
+            return False
+        
+        x, y = point
+        aoi_type = self.current_aoi.get('type', 'circle')
+        
+        if aoi_type == 'circle':
+            center = self.current_aoi['center']
+            radius = self.current_aoi['radius']
+            distance = np.sqrt((x - center[0])**2 + (y - center[1])**2)
+            return distance <= radius
+            
+        elif aoi_type == 'ellipse':
+            center = self.current_aoi['center']
+            axes = self.current_aoi['axes']
+            angle = self.current_aoi.get('angle', 0)
+            
+            # Transform point to ellipse coordinate system
+            cos_a = np.cos(np.radians(angle))
+            sin_a = np.sin(np.radians(angle))
+            
+            dx = x - center[0]
+            dy = y - center[1]
+            
+            # Rotate point
+            x_rot = dx * cos_a + dy * sin_a
+            y_rot = -dx * sin_a + dy * cos_a
+            
+            # Check ellipse equation
+            a, b = axes[0] / 2, axes[1] / 2
+            return (x_rot**2 / a**2) + (y_rot**2 / b**2) <= 1
+            
+        elif aoi_type == 'rectangle':
+            bounds = self.current_aoi['bounds']
+            x1, y1, x2, y2 = bounds
+            return x1 <= x <= x2 and y1 <= y <= y2
+            
+        elif aoi_type == 'contour':
+            contour = np.array(self.current_aoi['contour'], dtype=np.int32)
+            result = cv2.pointPolygonTest(contour, (float(x), float(y)), False)
+            return result >= 0
+        
+        return False
+    
+    def _distance_to_aoi_edge(self, point: Tuple[float, float]) -> float:
+        """
+        Calculate the minimum distance from a point to the AOI edge.
+        
+        Args:
+            point: (x, y) coordinates
+            
+        Returns:
+            Distance to AOI edge (positive if outside, negative if inside)
+        """
+        if self.current_aoi is None:
+            return float('inf')
+        
+        x, y = point
+        aoi_type = self.current_aoi.get('type', 'circle')
+        
+        if aoi_type == 'circle':
+            center = self.current_aoi['center']
+            radius = self.current_aoi['radius']
+            distance_to_center = np.sqrt((x - center[0])**2 + (y - center[1])**2)
+            return distance_to_center - radius
+            
+        elif aoi_type == 'ellipse':
+            # Simplified distance calculation for ellipse
+            center = self.current_aoi['center']
+            axes = self.current_aoi['axes']
+            # Use average radius as approximation
+            avg_radius = (axes[0] + axes[1]) / 4
+            distance_to_center = np.sqrt((x - center[0])**2 + (y - center[1])**2)
+            return distance_to_center - avg_radius
+            
+        elif aoi_type == 'rectangle':
+            bounds = self.current_aoi['bounds']
+            x1, y1, x2, y2 = bounds
+            
+            # Calculate distance to rectangle edges
+            if x1 <= x <= x2 and y1 <= y <= y2:
+                # Inside rectangle, find closest edge
+                distances = [x - x1, x2 - x, y - y1, y2 - y]
+                return -min(distances)  # Negative because inside
+            else:
+                # Outside rectangle
+                dx = max(x1 - x, 0, x - x2)
+                dy = max(y1 - y, 0, y - y2)
+                return np.sqrt(dx**2 + dy**2)
+                
+        elif aoi_type == 'contour':
+            contour = np.array(self.current_aoi['contour'], dtype=np.int32)
+            return cv2.pointPolygonTest(contour, (float(x), float(y)), True)
+        
+        return float('inf')
+    
+    def generate_mask(self, mask_type: str = 'combined') -> np.ndarray:
+        """
+        Generate the appropriate mask for the current frame with AOI-aware logic.
+        
+        Key behavior: If AOI is defined and aoi_overrides_exclusions is True,
+        pixels inside the AOI can merge even if they're in exclusion zones.
+        
+        Args:
+            mask_type: Type of mask to generate:
+                      'static' - Only static exclusion zones
+                      'dynamic' - Only dynamic exclusion zones  
+                      'ownership' - Only ownership-based mask
+                      'combined' - All masks combined (default)
+        
+        Returns:
+            Binary mask where 0=excluded pixels, 255=allowed pixels
+        """
+        if not self.masking_config.get('enabled', True):
+            return np.ones(self.frame_shape, dtype=np.uint8) * 255
+        
+        H, W = self.frame_shape
+        exclusion_mask = np.ones((H, W), dtype=np.uint8) * 255
+        
+        # Step 1: Create standard exclusion mask
+        # Apply static mask
+        if mask_type in ['static', 'combined'] and self.static_mask is not None:
+            exclusion_mask = cv2.bitwise_and(exclusion_mask, self.static_mask)
+        
+        # Apply dynamic exclusions
+        if mask_type in ['dynamic', 'combined'] and self.dynamic_zones:
+            for zone in self.dynamic_zones:
+                center = (int(zone['center'][0]), int(zone['center'][1]))
+                radius = zone['radius']
+                cv2.circle(exclusion_mask, center, radius, 0, -1)
+        
+        # Apply ownership-based exclusions
+        if mask_type in ['ownership', 'combined'] and self.ownership_map is not None:
+            # Implementation for ownership-based masking would go here
+            pass
+        
+        # Step 2: Apply AOI-aware logic
+        if self.aoi_config.get('enabled', True):
+            aoi_mask = self._create_aoi_mask()
+            
+            if self.current_aoi is not None:
+                # Check if AOI pixel clipping is enabled
+                if self.aoi_config.get('aoi_pixel_clipping', True):
+                    # STRICT AOI MODE: ONLY pixels inside AOI are considered
+                    # Everything outside AOI is completely excluded (set to 0)
+                    final_mask = aoi_mask.copy()  # Start with AOI as base mask
+                    
+                    # Apply exclusions ONLY within the AOI
+                    if self.aoi_config.get('aoi_overrides_exclusions', True):
+                        # Inside AOI: ignore all exclusions (AOI pixels stay at 255)
+                        pass  # final_mask already = aoi_mask (255 inside, 0 outside)
+                    else:
+                        # Inside AOI: still apply exclusions
+                        # Combine AOI with exclusions: only pixels that are both inside AOI AND not excluded
+                        final_mask = cv2.bitwise_and(aoi_mask, exclusion_mask)
+                        
+                else:
+                    # FLEXIBLE AOI MODE: AOI overrides exclusions but allows processing outside
+                    # Key logic: Inside AOI = allowed to merge (255), Outside AOI = respect exclusions
+                    
+                    # Create inverse AOI mask (0=inside AOI, 255=outside AOI)
+                    aoi_inverse = cv2.bitwise_not(aoi_mask)
+                    
+                    if self.aoi_config.get('aoi_overrides_exclusions', True):
+                        # Inside AOI: allow all pixels (override exclusions)
+                        inside_aoi_allowed = aoi_mask  # 255 where inside AOI
+                        
+                        # Outside AOI: apply exclusion mask
+                        outside_aoi_masked = cv2.bitwise_and(aoi_inverse, exclusion_mask)
+                        
+                        # Combine: inside AOI gets full access, outside AOI respects exclusions
+                        final_mask = cv2.bitwise_or(inside_aoi_allowed, outside_aoi_masked)
+                    else:
+                        # Apply exclusions everywhere, but still distinguish AOI vs non-AOI
+                        final_mask = exclusion_mask
+            else:
+                # No AOI defined, use standard exclusion mask
+                final_mask = exclusion_mask
+        else:
+            # AOI-aware logic disabled, use standard exclusion mask
+            final_mask = exclusion_mask
+        
+        # Step 3: Apply feathering for smooth transitions (but respect strict AOI boundary)
+        feather_radius = self.masking_config.get('mask_application', {}).get('feather_radius', 3)
+        if feather_radius > 0 and not self.aoi_config.get('strict_aoi_boundary', True):
+            # Only apply feathering if strict AOI boundary is disabled
+            kernel_size = feather_radius * 2 + 1
+            final_mask = cv2.GaussianBlur(final_mask, (kernel_size, kernel_size), feather_radius / 3.0)
+            _, final_mask = cv2.threshold(final_mask, 127, 255, cv2.THRESH_BINARY)
+        
+        return final_mask
+    
+    def apply_mask_to_image(self, image: np.ndarray, mask: np.ndarray = None, 
+                           preserve_structures: bool = None) -> np.ndarray:
+        """
+        Apply masking to an image with optional structure preservation.
+        
+        Args:
+            image: Input image to mask
+            mask: Mask to apply (if None, generates combined mask)
+            preserve_structures: Whether to preserve thin structures
+            
+        Returns:
+            Masked image
+        """
+        if mask is None:
+            mask = self.generate_mask()
+        
+        # Apply preserve thin structures logic if enabled
+        app_config = self.masking_config.get('mask_application', {})
+        if preserve_structures is None:
+            preserve_structures = app_config.get('preserve_thin_structures', True)
+        
+        if preserve_structures:
+            # Find thin structures and protect them
+            min_width = app_config.get('min_structure_width', 2)
+            skeleton = cv2.ximgproc.thinning(image) if hasattr(cv2, 'ximgproc') else image
+            
+            # Dilate skeleton to minimum width
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (min_width, min_width))
+            protected_structures = cv2.dilate(skeleton, kernel, iterations=1)
+            
+            # Combine with mask
+            mask = cv2.bitwise_or(mask, protected_structures)
+        
+        # Apply gradient falloff if enabled
+        if app_config.get('gradient_falloff', True):
+            # Create distance transform for smooth intensity falloff
+            dist_transform = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
+            max_dist = np.max(dist_transform)
+            if max_dist > 0:
+                normalized_dist = dist_transform / max_dist
+                return (image * normalized_dist).astype(image.dtype)
+        
+        # Standard binary masking
+        return cv2.bitwise_and(image, mask)
+    
+    def get_integration_points(self) -> Dict[str, bool]:
+        """Get which pipeline stages should apply masking."""
+        return {
+            'enhancement': self.masking_config.get('apply_to_enhancement', True),
+            'edge_detection': self.masking_config.get('apply_to_edge_detection', True),
+            'contour_detection': self.masking_config.get('apply_to_contour_detection', True),
+            'momentum_merging': self.masking_config.get('apply_to_momentum_merging', True),
+        }
+
+
+def create_masking_system(frame_shape: Tuple[int, int], cfg: Dict = None) -> SonarMaskingSystem:
+    """Factory function to create a masking system instance."""
+    return SonarMaskingSystem(frame_shape, cfg)
+
+
+# ============================ LEGACY MASKING FUNCTIONS (DEPRECATED) ============================
+# These functions are kept for backward compatibility but should be replaced with SonarMaskingSystem
+
+def create_exclusion_mask(frame_shape: Tuple[int, int], exclusion_zones: List, cfg=IMAGE_PROCESSING_CONFIG) -> np.ndarray:
+    """
+    Create a binary mask from exclusion zones to prevent pixel merging.
+    
+    Args:
+        frame_shape: (height, width) of the frame
+        exclusion_zones: List of exclusion zone dictionaries with 'center' and 'radius'
+        cfg: Configuration dictionary
+        
+    Returns:
+        Binary mask where 0 = excluded pixels, 255 = allowed pixels
+    """
+    from utils.sonar_config import EXCLUSION_CONFIG
+    
+    if not EXCLUSION_CONFIG.get('enable_pixel_masking', True) or not exclusion_zones:
+        # Return all-white mask (no exclusions)
+        return np.full(frame_shape, 255, dtype=np.uint8)
+    
+    H, W = frame_shape
+    mask = np.full((H, W), 255, dtype=np.uint8)  # Start with all pixels allowed
+    
+    mask_radius = int(EXCLUSION_CONFIG.get('masking_radius', 12))
+    feather_radius = int(EXCLUSION_CONFIG.get('masking_feather', 3))
+    
+    for zone in exclusion_zones:
+        if zone.get('active', True):  # Only process active zones
+            center = zone.get('center')
+            if center is not None:
+                cx, cy = int(center[0]), int(center[1])
+                
+                # Create circular exclusion
+                cv2.circle(mask, (cx, cy), mask_radius, 0, -1)  # Black circle = excluded
+    
+    # Apply feathering for smoother transitions (reduces harsh masking artifacts)
+    if feather_radius > 0:
+        # Blur the mask to create soft edges
+        kernel_size = feather_radius * 2 + 1
+        mask = cv2.GaussianBlur(mask, (kernel_size, kernel_size), feather_radius / 3.0)
+        # Re-threshold to binary for performance
+        _, mask = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)
+    
+    return mask
+
+def apply_exclusion_mask_to_edges(edges: np.ndarray, exclusion_mask: np.ndarray) -> np.ndarray:
+    """
+    Apply exclusion mask to edge image to prevent excluded pixels from forming contours.
+    
+    Args:
+        edges: Binary edge image from Canny detection
+        exclusion_mask: Binary mask (0=excluded, 255=allowed)
+        
+    Returns:
+        Masked edge image with exclusion zones removed
+    """
+    # Simple bitwise AND - very fast operation
+    return cv2.bitwise_and(edges, exclusion_mask)
+
+def preprocess_edges_with_masking(frame_u8: np.ndarray, masking_system=None, cfg=IMAGE_PROCESSING_CONFIG) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Enhanced edge preprocessing with integrated masking system support.
+    
+    Args:
+        frame_u8: Input grayscale frame
+        masking_system: Optional SonarMaskingSystem instance
+        cfg: Configuration dictionary
+        
+    Returns:
+        Tuple of (raw_edges, processed_edges) with masking applied at appropriate stages
+    """
+    # Step 1: Prepare input with masking integration
+    proc = prepare_input_gray(frame_u8, cfg, masking_system)
+    
+    # Step 2: Edge detection
+    edges = cv2.Canny(proc, cfg.get('canny_low_threshold', 50), cfg.get('canny_high_threshold', 150))
+    
+    # Step 3: Apply masking to edges if enabled
+    if masking_system is not None:
+        integration_points = masking_system.get_integration_points()
+        if integration_points.get('edge_detection', False):
+            mask = masking_system.generate_mask()
+            edges = cv2.bitwise_and(edges, mask)
+    
+    # Step 4: Morphological processing
+    mks = int(cfg.get('morph_close_kernel', 0))
+    dil = int(cfg.get('edge_dilation_iterations', 0))
+    out = edges
+    
+    if mks > 0:
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (mks, mks))
+        out = cv2.morphologyEx(out, cv2.MORPH_CLOSE, kernel)
+    
+    if dil > 0:
+        kernel2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
+        out = cv2.dilate(out, kernel2, iterations=dil)
+    
+    # Step 5: Final masking application if needed
+    if masking_system is not None:
+        integration_points = masking_system.get_integration_points()
+        if integration_points.get('edge_detection', False):
+            mask = masking_system.generate_mask()
+            out = cv2.bitwise_and(out, mask)
+    
+    return edges, out
+
 
 def preprocess_edges(frame_u8: np.ndarray, cfg=IMAGE_PROCESSING_CONFIG) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Legacy edge preprocessing function (maintained for backward compatibility).
+    For new implementations, use preprocess_edges_with_masking().
+    """
     proc = prepare_input_gray(frame_u8, cfg)
     edges = cv2.Canny(proc, cfg.get('canny_low_threshold', 50), cfg.get('canny_high_threshold', 150))
     mks = int(cfg.get('morph_close_kernel', 0))
@@ -1001,6 +1855,42 @@ def preprocess_edges(frame_u8: np.ndarray, cfg=IMAGE_PROCESSING_CONFIG) -> Tuple
     if dil > 0:
         kernel2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
         out = cv2.dilate(out, kernel2, iterations=dil)
+    return edges, out
+
+def preprocess_edges_with_exclusions(frame_u8: np.ndarray, exclusion_zones: List = None, cfg=IMAGE_PROCESSING_CONFIG) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Enhanced edge preprocessing that applies exclusion masking to prevent pixel merging.
+    
+    Args:
+        frame_u8: Input grayscale frame
+        exclusion_zones: List of exclusion zone dictionaries
+        cfg: Configuration dictionary
+        
+    Returns:
+        Tuple of (raw_edges, processed_edges) with exclusion masking applied
+    """
+    from utils.sonar_config import EXCLUSION_CONFIG
+    
+    # Step 1: Standard edge processing
+    proc = prepare_input_gray(frame_u8, cfg)
+    edges = cv2.Canny(proc, cfg.get('canny_low_threshold', 50), cfg.get('canny_high_threshold', 150))
+    
+    # Step 2: Apply exclusion masking EARLY in the pipeline
+    if EXCLUSION_CONFIG.get('enable_pixel_masking', True) and exclusion_zones:
+        exclusion_mask = create_exclusion_mask(frame_u8.shape, exclusion_zones, cfg)
+        edges = apply_exclusion_mask_to_edges(edges, exclusion_mask)
+    
+    # Step 3: Morphological operations on masked edges
+    mks = int(cfg.get('morph_close_kernel', 0))
+    dil = int(cfg.get('edge_dilation_iterations', 0))
+    out = edges
+    if mks > 0:
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (mks, mks))
+        out = cv2.morphologyEx(out, cv2.MORPH_CLOSE, kernel)
+    if dil > 0:
+        kernel2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
+        out = cv2.dilate(out, kernel2, iterations=dil)
+    
     return edges, out
 
 # ============================ Contour features & scoring ============================
@@ -2427,6 +3317,21 @@ def create_enhanced_contour_detection_video_with_processor(npz_file_index=0, fra
                 cv2.putText(vis, label, (cx + radius + 5, cy),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
         
+        # Draw exclusion mask overlay (NEW - shows pixel-level masking)
+        if processor.exclusion_zones:
+            from utils.sonar_config import EXCLUSION_CONFIG
+            if EXCLUSION_CONFIG.get('enable_pixel_masking', True):
+                exclusion_mask = create_exclusion_mask(frame_u8.shape, processor.exclusion_zones)
+                
+                # Create red overlay for excluded pixels (where mask is black/0)
+                mask_overlay = np.zeros_like(vis)
+                excluded_pixels = exclusion_mask == 0  # Black areas in mask = excluded
+                mask_overlay[excluded_pixels] = [0, 0, 128]  # Dark red for excluded areas
+                
+                # Blend with very light transparency to show exclusion without blocking view
+                alpha = 0.15  # Very light overlay
+                vis = cv2.addWeighted(vis, 1-alpha, mask_overlay, alpha, 0)
+        
         # Draw best contour and features
         if result.detection_success and result.best_contour is not None:
             best_contour = result.best_contour
@@ -2492,6 +3397,13 @@ def create_enhanced_contour_detection_video_with_processor(npz_file_index=0, fra
         separation_info_parts = []
         if exclusion_count > 0:
             separation_info_parts.append(f'Zones: {exclusion_count}')
+            
+            # Add masking status
+            from utils.sonar_config import EXCLUSION_CONFIG
+            if EXCLUSION_CONFIG.get('enable_pixel_masking', True):
+                separation_info_parts.append('Masking: ON')
+            else:
+                separation_info_parts.append('Masking: OFF')
         
         if processor.object_ownership_map is not None:
             unique_objects = len(np.unique(processor.object_ownership_map)) - 1  # -1 for background
@@ -2499,7 +3411,7 @@ def create_enhanced_contour_detection_video_with_processor(npz_file_index=0, fra
                 separation_info_parts.append(f'Objects: {unique_objects}')
         
         if separation_info_parts:
-            separation_info = ' | '.join(separation_info_parts) + ' (separated at pixel level)'
+            separation_info = ' | '.join(separation_info_parts) + ' (pixel-level separation)'
             cv2.putText(vis, separation_info, (10, H - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0,255,100), 1)
         
         vw.write(vis)

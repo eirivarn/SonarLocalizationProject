@@ -85,6 +85,18 @@ class ConeGridSpec:
 # --- Image-analysis / contour-detection defaults (moved from sonar_image_analysis) ---
 # Core image processing configuration for sonar net detection
 IMAGE_PROCESSING_CONFIG: Dict = {
+    # === ENHANCEMENT MODE SELECTION ===
+    # Controls which enhancement algorithm to apply after momentum merging
+    'enhancement_mode': 'best_directional',   # Enhancement algorithm to use:
+                                      # 'momentum' = Standard momentum enhancement only (FASTEST)
+                                      # 'iterative' = Iterative momentum enhancement (configurable passes)
+                                      # 'best_morph' = Best morphological closing (ellipse/cross/rect)
+                                      # 'best_directional' = Best directional morphological closing
+                                      # 'combination' = Combination (iterative + directional)
+    'iterative_momentum_passes': 1,   # Number of additional momentum passes for 'iterative' mode
+                                      # ↑ Higher = stronger connections, longer processing
+                                      # ↓ Lower = faster processing, weaker connections
+    
     # === MOMENTUM MERGING PARAMETERS ===
     # Controls how broken net segments are connected together
     'use_momentum_merging': True,     # Enable momentum-based pixel merging (CORE FEATURE)
@@ -119,11 +131,68 @@ IMAGE_PROCESSING_CONFIG: Dict = {
                                       # ↑ Higher = thicker/stronger edges, may merge nearby objects
                                       # ↓ Lower (0) = thinner edges, may lose weak net connections
     
-    # === PIXEL OWNERSHIP TRACKING TOGGLE ===
-    'use_pixel_ownership': False,     # MASTER SWITCH: Enable/disable pixel ownership tracking
-                                      # TRUE  = Prevents fish/debris merging with net (slower, accurate)
-                                      # FALSE = Faster processing, but objects may merge together
-                                      # Toggle dynamically: IMAGE_PROCESSING_CONFIG['use_pixel_ownership'] = True/False
+    # === ADVANCED MASKING & EXCLUSION SYSTEM ===
+    # Unified pixel-level masking for preventing unwanted object merging
+    'masking_system': {
+        'enabled': True,                    # Master switch for all masking features
+        'mode': 'static',                 # Masking strategy:
+                                           # 'static' = Fixed exclusion zones only
+                                           # 'dynamic' = Object-based exclusion zones
+                                           # 'adaptive' = Combines static + dynamic + ownership
+                                           # 'ownership' = Full pixel ownership tracking (slowest)
+        
+        # === STATIC EXCLUSION ZONES ===
+        'static_zones': [],                 # List of permanent exclusion areas
+                                           # Format: [{'center': (x, y), 'radius': r, 'shape': 'circle'}]
+                                           # Shape options: 'circle', 'ellipse', 'polygon'
+        
+        # === DYNAMIC OBJECT EXCLUSIONS ===
+        'dynamic_exclusions': {
+            'min_object_area': 150,         # Minimum area to create exclusion zone
+            'exclusion_radius': 8,          # Base radius around excluded objects
+            'radius_scale_factor': 1.2,     # Scale radius based on object size
+            'max_zones': 8,                 # Maximum dynamic exclusion zones
+            'zone_lifetime_frames': 5,      # Frames to keep zones active
+            'merge_distance_threshold': 15, # Merge nearby zones if closer than this
+        },
+        
+        # === PIXEL OWNERSHIP TRACKING ===
+        'ownership_tracking': {
+            'enabled': False,               # Enable full pixel ownership system
+            'net_priority': 10,             # Priority level for net pixels (higher = more protected)
+            'fish_priority': 3,             # Priority level for fish/debris pixels
+            'background_priority': 1,       # Priority level for background pixels
+            'ownership_decay': 0.95,        # How quickly ownership fades (per frame)
+            'transfer_threshold': 0.3,      # Threshold for ownership transfer
+        },
+        
+        # === MASKING APPLICATION ===
+        'mask_application': {
+            'feather_radius': 3,            # Gaussian blur radius for soft mask edges
+            'gradient_falloff': False,       # Apply distance-based intensity falloff
+            'preserve_thin_structures': False, # Special handling for thin net lines
+            'min_structure_width': 2,       # Minimum width to preserve (pixels)
+        },
+        
+        # === AOI-AWARE EXCLUSION LOGIC ===
+        'aoi_integration': {
+            'enabled': True,                # Enable AOI-aware masking
+            'aoi_overrides_exclusions': True, # Pixels inside AOI can merge even if excluded
+            'prevent_exclusions_in_aoi': True, # Prevent creating new exclusion zones inside AOI
+            'aoi_pixel_clipping': True,     # ONLY process pixels inside AOI (clip everything outside)
+            'strict_aoi_boundary': True,    # Apply hard boundary at AOI edge (no feathering across boundary)
+            'aoi_expansion_for_masking': 5, # Extra pixels to expand AOI for masking purposes
+            'use_tracking_aoi': True,       # Use TRACKING_CONFIG AOI parameters
+            'fallback_aoi_radius': 50,      # Default AOI radius if no tracking AOI available
+            'exclusion_buffer_from_aoi': 10, # Minimum distance from AOI edge to create exclusions
+        },
+        
+        # === INTEGRATION POINTS ===
+        'apply_to_enhancement': True,       # Apply masking during enhancement phase
+        'apply_to_edge_detection': True,    # Apply masking during edge detection
+        'apply_to_contour_detection': True, # Apply masking during contour detection
+        'apply_to_momentum_merging': True,  # Apply masking during momentum merging
+    },
     
     # === DISTANCE VALIDATION FILTER ===
     'use_distance_validation': True,  # Filter invalid distance measurements
@@ -161,22 +230,18 @@ TRACKING_CONFIG: Dict = {
                                       # RECOMMENDED: 1.5-3.0 for fishing net tracking
 }
 
-# === EXCLUSION ZONE CONFIGURATION ===
-# Prevents fish/debris from being included in net detection 
+# === LEGACY EXCLUSION CONFIGURATION (DEPRECATED) ===
+# Use IMAGE_PROCESSING_CONFIG['masking_system'] instead for new implementations
+# Note: These are static values for backward compatibility
 EXCLUSION_CONFIG: Dict = {
-    'enable_exclusions': False,        # Master switch for exclusion system 
-    'min_secondary_area': 100,        # Min area for objects to create exclusion zones 
-                                      # ↑ Higher = only large fish/debris create exclusions
-                                      # ↓ Lower = small objects also create exclusions, may over-exclude
-    'exclusion_radius': 5,            # Pixel radius around excluded objects 
-                                      # ↑ Higher = larger exclusion zones, may exclude valid net parts
-                                      # ↓ Lower = smaller exclusions, fish may still merge with net
-    'max_exclusion_zones': 5,         # Max number of exclusion zones to track 
-                                      # ↑ Higher = tracks more objects, more computation
-                                      # ↓ Lower = fewer tracked objects, may miss some fish/debris
-    'zone_decay_frames': 3,           # Frames to keep exclusion zones active 
-                                      # ↑ Higher = longer memory of fish locations, more stable
-                                      # ↓ Lower = shorter memory, adapts faster to moving objects
+    'enable_exclusions': True,
+    'enable_pixel_masking': True,
+    'min_secondary_area': 150,
+    'exclusion_radius': 8,
+    'masking_radius': 12,
+    'max_exclusion_zones': 8,
+    'zone_decay_frames': 5,
+    'masking_feather': 3,
 }
 
 # === VIDEO OUTPUT CONFIGURATION ===
