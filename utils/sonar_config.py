@@ -140,7 +140,9 @@ TRACKING_CONFIG: Dict = {
     'ellipse_smoothing_alpha': 0.2,  # Smoothing factor (0.0 = no smoothing, 1.0 = instant jump)
     'ellipse_max_movement_pixels': 4.0,  # Maximum pixels ellipse center can move per frame
     'max_frames_outside_aoi': 5,  # Max consecutive frames to allow best contour outside ellipse AOI
-    'ellipse_expansion_factor': 0.1,  # Factor to expand detected contour ellipse for AOI
+    'ellipse_expansion_factor': 0.2,  # Factor to expand detected contour ellipse for AOI 
+    'center_smoothing_alpha': 0.2,  # Smoothing factor for center tracking (0.0 = no smoothing, 1.0 = instant jump)
+    'use_elliptical_aoi': True,  # Use elliptical AOI instead of rectangular
 }
 
 VIDEO_CONFIG: Dict = {

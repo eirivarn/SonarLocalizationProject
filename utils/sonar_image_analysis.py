@@ -65,6 +65,7 @@ class SonarDataProcessor:
         """Reset tracking state."""
         self.last_center = None
         self.current_aoi = None
+        self.smoothed_center = None
         
     def preprocess_frame(self, frame_u8: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """Simple preprocessing without object separation."""
@@ -92,8 +93,56 @@ class SonarDataProcessor:
         # STEP 3: Select best contour
         best_contour, features, stats = self.find_best_contour(contours)
         
-        # Extract distance and angle
-        distance_pixels, angle_degrees = _distance_angle_from_contour(best_contour, W, H)
+        # Update tracking with elliptical AOI FIRST
+        if best_contour is not None and features:
+            # Update center tracking
+            new_center = (features['centroid_x'], features['centroid_y'])
+            
+            # Import TRACKING_CONFIG for elliptical AOI parameters
+            from utils.sonar_config import TRACKING_CONFIG
+            
+            # Smooth center position
+            if TRACKING_CONFIG.get('use_elliptical_aoi', True):
+                smoothing_alpha = TRACKING_CONFIG.get('center_smoothing_alpha', 0.3)
+                self.smoothed_center = smooth_center_position(self.smoothed_center, new_center, smoothing_alpha)
+                
+                # Create elliptical AOI
+                expansion_factor = TRACKING_CONFIG.get('ellipse_expansion_factor', 0.3)
+                aoi_mask, ellipse_center = create_elliptical_aoi(best_contour, expansion_factor, (H, W))
+                
+                # Store AOI as mask and ellipse center for visualization
+                self.current_aoi = {
+                    'mask': aoi_mask,
+                    'center': ellipse_center,
+                    'smoothed_center': self.smoothed_center,
+                    'type': 'elliptical'
+                }
+            else:
+                # Fallback to rectangular AOI
+                x, y, w, h = features['rect']
+                expansion = 25
+                self.current_aoi = {
+                    'rect': (
+                        max(0, x - expansion),
+                        max(0, y - expansion),
+                        min(W - max(0, x - expansion), w + 2*expansion),
+                        min(H - max(0, y - expansion), h + 2*expansion)
+                    ),
+                    'type': 'rectangular'
+                }
+            
+            # Update last_center for backward compatibility
+            self.last_center = new_center
+        
+        # Extract distance and angle using smoothed center for stable tracking
+        if best_contour is not None and self.smoothed_center is not None:
+            # Use smoothed center for stable distance/angle measurements
+            distance_pixels, angle_degrees = _distance_angle_from_smoothed_center(
+                best_contour, self.smoothed_center, W, H
+            )
+        else:
+            # Fallback to raw contour calculation
+            distance_pixels, angle_degrees = _distance_angle_from_contour(best_contour, W, H)
         
         # Convert to meters if extent provided
         distance_meters = None
@@ -102,20 +151,6 @@ class SonarDataProcessor:
             height_m = y_max - y_min
             px2m_y = height_m / H
             distance_meters = y_min + distance_pixels * px2m_y
-        
-        # Update simple tracking
-        if best_contour is not None and features:
-            self.last_center = (features['centroid_x'], features['centroid_y'])
-            
-            # Simple AOI: expand bounding rect
-            x, y, w, h = features['rect']
-            expansion = 25
-            self.current_aoi = (
-                max(0, x - expansion),
-                max(0, y - expansion),
-                min(W - max(0, x - expansion), w + 2*expansion),
-                min(H - max(0, y - expansion), h + 2*expansion)
-            )
         
         # Create simple tracking status
         status_parts = []
@@ -264,6 +299,107 @@ def rects_overlap(a: Tuple[int,int,int,int], b: Tuple[int,int,int,int]) -> bool:
     bx, by, bw, bh = b
     return not (ax+aw < bx or bx+bw < ax or ay+ah < by or by+bh < ay)
 
+def create_elliptical_aoi(contour: np.ndarray, expansion_factor: float, image_shape: Tuple[int, int]) -> Tuple[np.ndarray, Tuple[float, float]]:
+    """Create an elliptical AOI from a contour.
+    
+    Args:
+        contour: Input contour
+        expansion_factor: Factor to expand the ellipse (e.g., 0.3 = 30% larger)
+        image_shape: (height, width) of the image
+        
+    Returns:
+        Tuple of (ellipse_mask, (center_x, center_y))
+    """
+    H, W = image_shape
+    
+    # Fit ellipse to contour
+    if len(contour) >= 5:  # Need at least 5 points to fit ellipse
+        ellipse = cv2.fitEllipse(contour)
+        (center_x, center_y), (width, height), angle = ellipse
+        
+        # Expand the ellipse
+        expanded_width = width * (1 + expansion_factor)
+        expanded_height = height * (1 + expansion_factor)
+        expanded_ellipse = ((center_x, center_y), (expanded_width, expanded_height), angle)
+        
+        # Create mask
+        mask = np.zeros((H, W), dtype=np.uint8)
+        cv2.ellipse(mask, expanded_ellipse, 255, -1)
+        
+        return mask, (center_x, center_y)
+    else:
+        # Fallback to circular AOI if we can't fit ellipse
+        moments = cv2.moments(contour)
+        if moments['m00'] != 0:
+            center_x = int(moments['m10'] / moments['m00'])
+            center_y = int(moments['m01'] / moments['m00'])
+        else:
+            center_x, center_y = W//2, H//2
+        
+        # Create circular mask with expansion
+        radius = int(cv2.contourArea(contour) ** 0.5 * (1 + expansion_factor))
+        mask = np.zeros((H, W), dtype=np.uint8)
+        cv2.circle(mask, (center_x, center_y), radius, 255, -1)
+        
+        return mask, (center_x, center_y)
+
+def point_in_aoi(point_x: float, point_y: float, aoi) -> bool:
+    """Check if a point is inside the AOI (Area of Interest).
+    
+    Args:
+        point_x, point_y: Point coordinates
+        aoi: AOI definition (can be rectangular tuple or elliptical dict)
+        
+    Returns:
+        True if point is inside AOI
+    """
+    if aoi is None:
+        return False
+    
+    if isinstance(aoi, dict):
+        aoi_type = aoi.get('type', 'rectangular')
+        
+        if aoi_type == 'elliptical' and 'mask' in aoi:
+            # Check if point is inside elliptical mask
+            mask = aoi['mask']
+            if 0 <= point_y < mask.shape[0] and 0 <= point_x < mask.shape[1]:
+                return mask[int(point_y), int(point_x)] > 0
+            return False
+        elif aoi_type == 'rectangular' and 'rect' in aoi:
+            # Check if point is inside rectangular AOI
+            ax, ay, aw, ah = aoi['rect']
+            return ax <= point_x <= ax + aw and ay <= point_y <= ay + ah
+    else:
+        # Legacy rectangular AOI (tuple format)
+        ax, ay, aw, ah = aoi
+        return ax <= point_x <= ax + aw and ay <= point_y <= ay + ah
+    
+    return False
+
+def smooth_center_position(current_center: Tuple[float, float], 
+                          new_center: Tuple[float, float], 
+                          smoothing_alpha: float) -> Tuple[float, float]:
+    """Smooth the center position using exponential moving average.
+    
+    Args:
+        current_center: Current smoothed center position
+        new_center: New detected center position
+        smoothing_alpha: Smoothing factor (0.0 = no change, 1.0 = instant jump)
+        
+    Returns:
+        New smoothed center position
+    """
+    if current_center is None:
+        return new_center
+    
+    curr_x, curr_y = current_center
+    new_x, new_y = new_center
+    
+    smoothed_x = curr_x + smoothing_alpha * (new_x - curr_x)
+    smoothed_y = curr_y + smoothing_alpha * (new_y - curr_y)
+    
+    return (smoothed_x, smoothed_y)
+
 # ============================ Core contour selection ============================
 
 def select_best_contour_core(contours, last_center=None, aoi=None, cfg_img=IMAGE_PROCESSING_CONFIG) -> Tuple[Optional[np.ndarray], Optional[Dict], Dict]:
@@ -290,8 +426,7 @@ def select_best_contour_core(contours, last_center=None, aoi=None, cfg_img=IMAGE
         # AOI boost: simple 2x boost if center is inside AOI
         if aoi is not None:
             cx, cy = feat['centroid_x'], feat['centroid_y']
-            ax, ay, aw, ah = aoi
-            if ax <= cx <= ax + aw and ay <= cy <= ay + ah:
+            if point_in_aoi(cx, cy, aoi):
                 base_score *= aoi_boost
         
         # Distance penalty if we have last position
@@ -508,6 +643,44 @@ def _distance_angle_from_contour(contour, image_width: int, image_height: int) -
             # Line is nearly vertical, use center y
             distance = cy
 
+        red_line_angle = (float(angle) + 90.0) % 360.0
+        return float(distance), red_line_angle
+
+    except Exception:
+        return None, None
+
+def _distance_angle_from_smoothed_center(contour, smoothed_center: Tuple[float, float], 
+                                       image_width: int, image_height: int) -> Tuple[Optional[float], Optional[float]]:
+    """Calculate net distance using smoothed center position for stable tracking."""
+    if contour is None or len(contour) < 5 or smoothed_center is None:
+        return None, None
+    
+    try:
+        # Get ellipse angle from contour, but use smoothed center for position
+        (_, _), (minor_axis, major_axis), angle = cv2.fitEllipse(contour)
+        
+        # Use smoothed center position
+        cx, cy = smoothed_center
+        
+        # Calculate intersection of net's major axis with center beam (x = image_width/2)
+        ang_r = np.radians(angle + 90.0)  # Major axis direction
+        cos_ang = np.cos(ang_r)
+        sin_ang = np.sin(ang_r)
+        
+        # Find intersection with vertical center line
+        center_x = image_width / 2
+        
+        if abs(cos_ang) > 1e-6:  # Avoid division by zero
+            # Solve: cx + t * cos_ang = center_x
+            t = (center_x - cx) / cos_ang
+            intersect_y = cy + t * sin_ang
+            
+            # Use the intersection point directly (blue dot position)
+            distance = intersect_y
+        else:
+            # Line is nearly vertical, use smoothed center y
+            distance = cy
+        
         red_line_angle = (float(angle) + 90.0) % 360.0
         return float(distance), red_line_angle
     except Exception:
@@ -1429,12 +1602,44 @@ def create_enhanced_contour_detection_video_with_processor(npz_file_index=0, fra
         if VIDEO_CONFIG.get('show_all_contours', True) and contours:
             cv2.drawContours(vis, contours, -1, (255, 200, 100), 1)
         
-        # Draw rectangular AOI (yellow)
+        # Draw AOI (yellow)
         if processor.current_aoi is not None:
-            ax, ay, aw, ah = processor.current_aoi
-            cv2.rectangle(vis, (ax, ay), (ax+aw, ay+ah), (0, 255, 255), 2)
-            cv2.putText(vis, 'AOI', (ax + 5, ay + 20),
-                       cv2.FONT_HERSHEY_SIMPLEX, VIDEO_CONFIG['text_scale'], (0,255,255), 1)
+            if isinstance(processor.current_aoi, dict):
+                aoi_type = processor.current_aoi.get('type', 'rectangular')
+                
+                if aoi_type == 'elliptical':
+                    # Draw elliptical AOI mask outline
+                    aoi_mask = processor.current_aoi['mask']
+                    aoi_contours, _ = cv2.findContours(aoi_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    if aoi_contours:
+                        cv2.drawContours(vis, aoi_contours, -1, (0, 255, 255), 2)
+                    
+                    # Draw ellipse center (current detection)
+                    ellipse_center = processor.current_aoi['center']
+                    cv2.circle(vis, (int(ellipse_center[0]), int(ellipse_center[1])), 3, (0, 255, 255), -1)
+                    
+                    # Draw smoothed center (tracking center) - red dot
+                    if 'smoothed_center' in processor.current_aoi and processor.current_aoi['smoothed_center']:
+                        smoothed = processor.current_aoi['smoothed_center']
+                        cv2.circle(vis, (int(smoothed[0]), int(smoothed[1])), 5, (0, 0, 255), -1)
+                        cv2.putText(vis, 'TRACK', (int(smoothed[0]) + 8, int(smoothed[1]) - 8),
+                                   cv2.FONT_HERSHEY_SIMPLEX, VIDEO_CONFIG['text_scale']*0.7, (0,0,255), 1)
+                    
+                    cv2.putText(vis, 'AOI-E', (int(ellipse_center[0]) + 8, int(ellipse_center[1]) + 8),
+                               cv2.FONT_HERSHEY_SIMPLEX, VIDEO_CONFIG['text_scale'], (0,255,255), 1)
+                
+                elif aoi_type == 'rectangular' and 'rect' in processor.current_aoi:
+                    # Draw rectangular AOI
+                    ax, ay, aw, ah = processor.current_aoi['rect']
+                    cv2.rectangle(vis, (ax, ay), (ax+aw, ay+ah), (0, 255, 255), 2)
+                    cv2.putText(vis, 'AOI-R', (ax + 5, ay + 20),
+                               cv2.FONT_HERSHEY_SIMPLEX, VIDEO_CONFIG['text_scale'], (0,255,255), 1)
+            else:
+                # Legacy rectangular AOI (backward compatibility)
+                ax, ay, aw, ah = processor.current_aoi
+                cv2.rectangle(vis, (ax, ay), (ax+aw, ay+ah), (0, 255, 255), 2)
+                cv2.putText(vis, 'AOI', (ax + 5, ay + 20),
+                           cv2.FONT_HERSHEY_SIMPLEX, VIDEO_CONFIG['text_scale'], (0,255,255), 1)
         
         # Draw best contour and features
         if result.detection_success and result.best_contour is not None:
