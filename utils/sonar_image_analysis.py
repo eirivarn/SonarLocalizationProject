@@ -8,9 +8,10 @@ import json
 import numpy as np
 import pandas as pd
 import cv2
-import matplotlib.pyplot as plt
 from scipy.signal import savgol_filter
 from scipy.ndimage import uniform_filter1d
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 from utils.sonar_utils import (
     load_df, get_sonoptix_frame,
@@ -224,22 +225,6 @@ def get_available_npz_files(npz_dir: str | None = None) -> List[Path]:
         return []
     return [f for f in npz_dir.glob("*_cones.npz") if not f.name.startswith('._')]
 
-
-def list_npz_files(npz_dir: str | None = None) -> None:
-    npz_files = get_available_npz_files(npz_dir)
-    if not npz_files:
-        print(f"No NPZ files found in {npz_dir}")
-        return
-
-    print(f"Available NPZ files in {npz_dir}:")
-    for i, npz_path in enumerate(npz_files):
-        try:
-            cones, timestamps, _, _ = load_cone_run_npz(npz_path)
-            print(f"  {i}: {npz_path.name}")
-            print(f"     {cones.shape[0]} frames, {timestamps[0].strftime('%H:%M:%S')} to {timestamps[-1].strftime('%H:%M:%S')}")
-        except Exception as e:
-            print(f"  {i}: {npz_path.name} - Error: {e}")
-
 # ============================ Small utilities ============================
 
 def to_uint8_gray(frame01: np.ndarray) -> np.ndarray:
@@ -273,10 +258,6 @@ def apply_smoothing(series: pd.Series | np.ndarray,
                           size=max(1, gaussian_size or int(win*0.6)))
 
     return {'mavg': mavg, 'savgol': sv, 'gaussian': gs, 'primary': sv}
-
-def contour_rect(contour) -> Tuple[int,int,int,int]:
-    x, y, w, h = cv2.boundingRect(contour)
-    return x, y, w, h
 
 def rects_overlap(a: Tuple[int,int,int,int], b: Tuple[int,int,int,int]) -> bool:
     ax, ay, aw, ah = a
@@ -333,7 +314,18 @@ def select_best_contour_core(contours, last_center=None, aoi=None, cfg_img=IMAGE
 def directional_momentum_merge(frame, search_radius=3, momentum_threshold=0.2,
                                momentum_decay=0.8, momentum_boost=1.5):
     if search_radius <= 2:
-        return fast_directional_enhance(frame, momentum_threshold, momentum_boost)
+        # Fast path for small radius
+        h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 1))
+        v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 5))
+        h_enhanced = cv2.morphologyEx(frame, cv2.MORPH_TOPHAT, h_kernel)
+        v_enhanced = cv2.morphologyEx(frame, cv2.MORPH_TOPHAT, v_kernel)
+        enhanced = np.maximum(h_enhanced, v_enhanced)
+        grad = cv2.Laplacian(frame, cv2.CV_32F)
+        grad_norm = np.abs(grad) / 255.0
+        boost_mask = grad_norm > momentum_threshold
+        result = frame.astype(np.float32)
+        result[boost_mask] += momentum_boost * enhanced[boost_mask]
+        return np.clip(result, 0, 255).astype(np.uint8)
 
     result = frame.astype(np.float32)
     grad_x = cv2.Sobel(frame, cv2.CV_32F, 1, 0, ksize=3)
@@ -363,31 +355,14 @@ def directional_momentum_merge(frame, search_radius=3, momentum_threshold=0.2,
     result = enhanced * boost_factor
     return np.clip(result, 0, 255).astype(np.uint8)
 
-def fast_directional_enhance(frame, threshold=0.2, boost=1.5):
-    h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 1))
-    v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 5))
-    h_enhanced = cv2.morphologyEx(frame, cv2.MORPH_TOPHAT, h_kernel)
-    v_enhanced = cv2.morphologyEx(frame, cv2.MORPH_TOPHAT, v_kernel)
-    enhanced = np.maximum(h_enhanced, v_enhanced)
-    grad = cv2.Laplacian(frame, cv2.CV_32F)
-    grad_norm = np.abs(grad) / 255.0
-    boost_mask = grad_norm > threshold
-    result = frame.astype(np.float32)
-    result[boost_mask] += boost * enhanced[boost_mask]
-    return np.clip(result, 0, 255).astype(np.uint8)
-
-def prepare_input_gray(frame_u8: np.ndarray, cfg=IMAGE_PROCESSING_CONFIG) -> np.ndarray:
-    """Prepare input using momentum merging for sharp, well-defined objects"""
-    return directional_momentum_merge(
+def preprocess_edges(frame_u8: np.ndarray, cfg=IMAGE_PROCESSING_CONFIG) -> Tuple[np.ndarray, np.ndarray]:
+    proc = directional_momentum_merge(
         frame_u8,
         search_radius=cfg.get('momentum_search_radius', 3),
         momentum_threshold=cfg.get('momentum_threshold', 0.2),
         momentum_decay=cfg.get('momentum_decay', 0.8),
         momentum_boost=cfg.get('momentum_boost', 1.5),
     )
-
-def preprocess_edges(frame_u8: np.ndarray, cfg=IMAGE_PROCESSING_CONFIG) -> Tuple[np.ndarray, np.ndarray]:
-    proc = prepare_input_gray(frame_u8, cfg)
     edges = cv2.Canny(proc, cfg.get('canny_low_threshold', 50), cfg.get('canny_high_threshold', 150))
     mks = int(cfg.get('morph_close_kernel', 0))
     dil = int(cfg.get('edge_dilation_iterations', 0))
@@ -404,7 +379,7 @@ def preprocess_edges(frame_u8: np.ndarray, cfg=IMAGE_PROCESSING_CONFIG) -> Tuple
 
 def compute_contour_features(contour) -> Dict[str, float]:
     area = float(cv2.contourArea(contour))
-    x, y, w, h = contour_rect(contour)
+    x, y, w, h = cv2.boundingRect(contour)
     ar = (max(w, h) / max(1, min(w, h))) if min(w, h) > 0 else 0.0
 
     hull = cv2.convexHull(contour)
@@ -806,22 +781,6 @@ class DistanceAnalysisEngine:
                 print(f"  - Max:  {valid_distances.max():.3f}")
                 print(f"  - Range: {(valid_distances.max()-valid_distances.min()):.3f}")
 
-# ============================ LEGACY FUNCTION ADAPTERS ============================
-
-def analyze_red_line_distance_over_time(npz_file_index: int = 0, frame_start: int = 0,
-                                       frame_count: Optional[int] = None, frame_step: int = 1,
-                                       save_error_frames: bool = False, error_frames_dir: str = None) -> pd.DataFrame:
-    """Legacy adapter for NPZ analysis."""
-    engine = DistanceAnalysisEngine()
-    return engine.analyze_npz_sequence(npz_file_index, frame_start, frame_count, frame_step)
-
-def analyze_red_line_distance_from_sonar_csv(TARGET_BAG: str, EXPORTS_FOLDER: Path,
-                                           frame_start: int = 0, frame_count: Optional[int] = None,
-                                           frame_step: int = 1, **kwargs) -> pd.DataFrame:
-    """Legacy adapter for sonar CSV analysis."""
-    engine = DistanceAnalysisEngine()
-    return engine.analyze_sonar_csv(TARGET_BAG, EXPORTS_FOLDER, frame_start, frame_count, frame_step, **kwargs)
-
 # ============================ UNIFIED VISUALIZATION & COMPARISON ============================
 
 class VisualizationEngine:
@@ -848,20 +807,21 @@ class VisualizationEngine:
             print("No valid distance data to plot")
             return None
             
-        # Try interactive plotting first if requested
+        # Try interactive plotting
         if use_plotly:
             try:
                 return VisualizationEngine._plot_interactive_distance(valid, dist_col, unit, title)
             except ImportError:
-                print("Plotly not available, falling back to matplotlib")
-        
-        return VisualizationEngine._plot_matplotlib_distance(valid, dist_col, unit, title)
+                print("Error: Plotly not available. Please install plotly: pip install plotly")
+                return None
+        else:
+            print("Error: Only Plotly visualization is supported. Set use_plotly=True")
+            return None
     
     @staticmethod
     def _plot_interactive_distance(valid: pd.DataFrame, dist_col: str, unit: str, title: str):
         """Create interactive plotly visualization."""
-        import plotly.graph_objects as go
-        from plotly.subplots import make_subplots
+        
         
         distances = valid[dist_col]
         
@@ -928,65 +888,6 @@ class VisualizationEngine:
         fig.update_yaxes(title_text='Frequency', row=2, col=1)
         fig.update_yaxes(title_text=f'Distance ({unit})', row=2, col=2)
         
-        fig.show()
-        return fig
-    
-    @staticmethod
-    def _plot_matplotlib_distance(valid: pd.DataFrame, dist_col: str, unit: str, title: str):
-        """Create matplotlib visualization."""
-        distances = valid[dist_col]
-        
-        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-        fig.suptitle(title, fontsize=16, fontweight='bold')
-        
-        # Frame index plot
-        axes[0,0].plot(valid['frame_index'], distances, 'b-', alpha=0.7)
-        axes[0,0].scatter(valid['frame_index'], distances, c='red', s=20, alpha=0.6)
-        axes[0,0].set_title('Distance vs Frame Index')
-        axes[0,0].set_xlabel('Frame')
-        axes[0,0].set_ylabel(f'Distance ({unit})')
-        axes[0,0].grid(True, alpha=0.3)
-        
-        # Time plot
-        x_time = valid.get('timestamp', valid['frame_index'])
-        axes[0,1].plot(x_time, distances, 'g-', alpha=0.7)
-        axes[0,1].scatter(x_time, distances, c='red', s=20, alpha=0.6)
-        axes[0,1].set_title('Distance vs Time')
-        axes[0,1].set_xlabel('Time')
-        axes[0,1].set_ylabel(f'Distance ({unit})')
-        axes[0,1].grid(True, alpha=0.3)
-        
-        # Histogram
-        axes[1,0].hist(distances, bins=30, alpha=0.7, color='lightcoral', edgecolor='black')
-        axes[1,0].axvline(distances.mean(), color='red', linestyle='--', linewidth=2,
-                         label=f'Mean: {distances.mean():.2f}{unit}')
-        axes[1,0].axvline(distances.median(), color='green', linestyle='--', linewidth=2,
-                         label=f'Median: {distances.median():.2f}{unit}')
-        axes[1,0].set_title('Distance Distribution')
-        axes[1,0].legend()
-        axes[1,0].grid(True, alpha=0.3)
-        
-        # Trends
-        window_size = max(5, len(distances) // 20)
-        smoothed = distances.rolling(window=window_size, center=True).mean()
-        std = distances.rolling(window=window_size, center=True).std()
-        
-        axes[1,1].plot(valid['frame_index'], distances, 'lightcoral', alpha=0.5, label='Raw data')
-        axes[1,1].plot(valid['frame_index'], smoothed, 'darkred', linewidth=2,
-                      label=f'Smoothed (n={window_size})')
-        axes[1,1].fill_between(valid['frame_index'], smoothed - std, smoothed + std,
-                              alpha=0.3, color='red', label='±1 Std Dev')
-        axes[1,1].set_title('Distance Trends')
-        axes[1,1].legend()
-        axes[1,1].grid(True, alpha=0.3)
-        
-        # Add statistics text
-        stats_text = f'Mean: {distances.mean():.2f}{unit}\nStd: {distances.std():.2f}{unit}\nRange: {distances.min():.2f}-{distances.max():.2f}{unit}'
-        axes[0,0].text(0.02, 0.98, stats_text, transform=axes[0,0].transAxes, fontsize=9,
-                      va='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
-        
-        plt.tight_layout()
-        plt.show()
         return fig
 
 class ComparisonEngine:
@@ -1034,15 +935,16 @@ class ComparisonEngine:
         for key, values in sonar_smooth.items():
             sonar[f'distance_meters_{key}'] = values
         
-        # Create visualization
+        # Create visualization - only Plotly supported
         if use_plotly:
             try:
                 fig = ComparisonEngine._create_interactive_comparison(sonar, nav)
             except ImportError:
-                print("Plotly not available, falling back to matplotlib")
-                fig = ComparisonEngine._create_matplotlib_comparison(sonar, nav, window_size)
+                print("Error: Plotly not available. Please install plotly: pip install plotly")
+                return None, {'error': 'plotly_not_available'}
         else:
-            fig = ComparisonEngine._create_matplotlib_comparison(sonar, nav, window_size)
+            print("Error: Only Plotly visualization is supported. Set use_plotly=True")
+            return None, {'error': 'only_plotly_supported'}
         
         # Calculate statistics
         sonar_mean = float(np.nanmean(sonar['distance_meters']))
@@ -1128,128 +1030,7 @@ class ComparisonEngine:
         if has_pitch:
             fig.update_yaxes(title_text="Pitch (degrees)", row=2, col=1, showgrid=True)
         
-        fig.show()
         return fig
-    
-    @staticmethod
-    def _create_matplotlib_comparison(sonar: pd.DataFrame, nav: pd.DataFrame, window_size: int):
-        """Create matplotlib comparison."""
-        fig, axes = plt.subplots(2, 3, figsize=(24, 12))
-        fig.suptitle('🔄 SONAR vs DVL DISTANCE COMPARISON', fontsize=16, fontweight='bold')
-        
-        # Distance over time
-        ax1 = axes[0, 0]
-        ax1.plot(sonar['synthetic_time'], sonar['distance_meters'], 'r-', linewidth=1, alpha=0.3, label='Sonar Raw')
-        ax1.plot(sonar['synthetic_time'], sonar['distance_meters_primary'], 'r-', linewidth=2, alpha=0.8, label='Sonar Smoothed')
-        ax1.plot(nav['relative_time'], nav['NetDistance'], 'b-', linewidth=2, alpha=0.8, label='DVL NetDistance')
-        ax1.set_xlabel('Time (s)')
-        ax1.set_ylabel('Distance (m)')
-        ax1.set_title('Distance Over Time')
-        ax1.legend()
-        ax1.grid(True, alpha=0.3)
-        
-        # Smoothing comparison detail
-        ax2 = axes[0, 1]
-        sl = slice(100, min(200, len(sonar)))
-        ax2.plot(sonar['synthetic_time'].iloc[sl], sonar['distance_meters'].iloc[sl], 'gray', linewidth=1, alpha=0.7, label='Raw')
-        ax2.plot(sonar['synthetic_time'].iloc[sl], sonar['distance_meters_mavg'].iloc[sl], 'orange', linewidth=1.5, alpha=0.8, label='Moving Avg')
-        ax2.plot(sonar['synthetic_time'].iloc[sl], sonar['distance_meters_savgol'].iloc[sl], 'red', linewidth=2, alpha=0.9, label='Savitzky-Golay')
-        ax2.plot(sonar['synthetic_time'].iloc[sl], sonar['distance_meters_gaussian'].iloc[sl], 'purple', linewidth=1.5, alpha=0.8, label='Gaussian')
-        ax2.set_xlabel('Time (s)')
-        ax2.set_ylabel('Distance (m)')
-        ax2.set_title('Smoothing Methods (Detail)')
-        ax2.legend()
-        ax2.grid(True, alpha=0.3)
-        
-        # Distribution comparison
-        ax3 = axes[0, 2]
-        ax3.hist(sonar['distance_meters'], bins=30, alpha=0.7, color='red', label=f'Sonar (n={len(sonar)})', density=True)
-        ax3.hist(nav['NetDistance'], bins=30, alpha=0.7, color='blue', label=f'DVL (n={len(nav)})', density=True)
-        ax3.set_xlabel('Distance (m)')
-        ax3.set_ylabel('Density')
-        ax3.set_title('Distribution Comparison')
-        ax3.legend()
-        ax3.grid(True, alpha=0.3)
-        
-        # Statistics table
-        ax4 = axes[1, 0]
-        stats_df = pd.DataFrame({
-            'Measurement': ['Sonar', 'DVL'],
-            'Count': [len(sonar), len(nav)],
-            'Mean (m)': [np.nanmean(sonar['distance_meters']), nav['NetDistance'].mean()],
-            'Std (m)': [np.nanstd(sonar['distance_meters']), nav['NetDistance'].std()],
-            'Min (m)': [np.nanmin(sonar['distance_meters']), nav['NetDistance'].min()],
-            'Max (m)': [np.nanmax(sonar['distance_meters']), nav['NetDistance'].max()],
-        })
-        ax4.axis('off')
-        ax4.text(0.05, 0.95, stats_df.round(3).to_string(index=False),
-                transform=ax4.transAxes, fontfamily='monospace', fontsize=10, va='top')
-        ax4.set_title('Statistical Comparison')
-        
-        # Bar comparison
-        ax5 = axes[1, 1]
-        x = np.arange(len(stats_df))
-        w = 0.35
-        ax5.bar(x - w/2, stats_df['Mean (m)'], w, label='Mean', alpha=0.8, color=['red','blue'])
-        ax5.bar(x + w/2, stats_df['Std (m)'], w, label='Std', alpha=0.8, color=['lightcoral','lightblue'])
-        ax5.set_xticks(x)
-        ax5.set_xticklabels(stats_df['Measurement'])
-        ax5.set_title('Mean ± Std')
-        ax5.legend()
-        ax5.grid(True, alpha=0.3)
-        
-        # Noise reduction comparison
-        ax6 = axes[1, 2]
-        noise_levels = [
-            np.nanstd(sonar['distance_meters']),
-            np.nanstd(sonar['distance_meters_mavg']),
-            np.nanstd(sonar['distance_meters_savgol']),
-            np.nanstd(sonar['distance_meters_gaussian']),
-        ]
-        bars = ax6.bar(['Raw', 'Moving Avg', 'Savitzky-Golay', 'Gaussian'], noise_levels, alpha=0.7)
-        ax6.set_ylabel('Std (m)')
-        ax6.set_title('Noise Reduction by Smoothing')
-        ax6.grid(True, alpha=0.3)
-        for b, v in zip(bars, noise_levels):
-            ax6.text(b.get_x()+b.get_width()/2, b.get_height()+0.001, f'{v:.3f}m', 
-                    ha='center', va='bottom', fontsize=9)
-        
-        plt.tight_layout()
-        plt.show()
-        return fig
-
-# ============================ LEGACY PLOTTING FUNCTION ADAPTERS ============================
-
-def plot_time_based_analysis(distance_results: pd.DataFrame, pixels_to_meters_avg: float = 0.01,
-                            estimated_fps: float = 15):
-    """Legacy adapter for time-based plotting."""
-    return VisualizationEngine.plot_distance_analysis(distance_results, "Time-Based Distance Analysis", use_plotly=False)
-
-def plot_real_world_distance_analysis(distance_results: pd.DataFrame, image_shape=(700, 900),
-                                     sonar_coverage_meters=5.0):
-    """Legacy adapter for real-world distance plotting."""
-    return VisualizationEngine.plot_distance_analysis(distance_results, "Real-World Distance Analysis")
-
-def compare_sonar_vs_dvl(distance_results: pd.DataFrame, raw_data: Dict[str, pd.DataFrame],
-                        distance_measurements: Dict[str, pd.DataFrame] = None,
-                        sonar_coverage_m: float = 5.0, sonar_image_size: int = 700,
-                        window_size: int = 15):
-    """Unified comparison function."""
-    return ComparisonEngine.compare_sonar_vs_dvl(distance_results, raw_data, sonar_coverage_m, 
-                                                sonar_image_size, window_size, use_plotly=False)
-
-def interactive_distance_comparison(distance_results: pd.DataFrame, raw_data: Dict[str, pd.DataFrame],
-                                  distance_measurements: Dict[str, pd.DataFrame] = None,
-                                  sonar_coverage_m: float = 5.0, sonar_image_size: int = 700):
-    """Interactive comparison using plotly."""
-    return ComparisonEngine.compare_sonar_vs_dvl(distance_results, raw_data, sonar_coverage_m, 
-                                                sonar_image_size, use_plotly=True)
-
-def detailed_sonar_dvl_comparison(distance_results, raw_data, sonar_coverage_m: float = 5.0,
-                                 sonar_image_size: int = 700, window_size: int = 15):
-    """Legacy API preserved."""
-    return ComparisonEngine.compare_sonar_vs_dvl(distance_results, raw_data, sonar_coverage_m, 
-                                                sonar_image_size, window_size, use_plotly=False)
 
 # ============================ UTILITY FUNCTIONS ============================
 
@@ -1383,9 +1164,6 @@ def process_frame_for_video(frame_u8: np.ndarray, prev_aoi: Optional[Tuple[int,i
                 cv2.FONT_HERSHEY_SIMPLEX, s, (255,255,255), 1)
 
     return out, next_aoi
-
-# ============================ DIAGNOSTIC & UTILITY FUNCTIONS ============================
-# (Diagnostic functions removed for code cleanup - preserved only essential functions)
 
 # ============================ Frame export & video ============================
 
