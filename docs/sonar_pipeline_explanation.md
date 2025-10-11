@@ -509,6 +509,7 @@ else:
 Underwater fishing nets in sonar imagery typically exhibit:
 - **Elongated shape:** High aspect ratio contours
 - **Consistent orientation:** Major axis approximately horisontal
+- **Elliptical AOI tracking:** Improved net tracking with smoothed center positioning
 - **Area of Interest (AOI):** Tracking previous detections improves robustness
 
 ### 5.2 Preprocessing Pipeline
@@ -673,11 +674,11 @@ ELONGATION_CONFIG = {
 
 #### AOI Boost
 
-If a previous Area of Interest (AOI) exists, contours overlapping the expanded AOI receive a score multiplier:
+If a previous Area of Interest (AOI) exists, contours overlapping the elliptical AOI receive a score multiplier:
 
 ```python
-if rects_overlap(contour_rect, expanded_aoi):
-    score *= aoi_boost_factor  # 1000.0 by default
+if point_in_aoi(contour_center_x, contour_center_y, elliptical_aoi):
+    score *= aoi_boost_factor  # 2.0 by default
 ```
 
 #### Selection
@@ -686,31 +687,69 @@ if rects_overlap(contour_rect, expanded_aoi):
 best_contour = max(scored_contours, key=lambda x: x['score'])
 ```
 
-### 5.4 Tracking with Area of Interest (AOI)
+### 5.4 Elliptical AOI Tracking with Smoothed Center
 
-To improve temporal consistency:
+**SOLAQUA now uses advanced elliptical Area of Interest (AOI) tracking** for improved net detection consistency:
 
-1. **Expand previous bounding box** by a margin (e.g., 10 pixels)
-2. **Boost scores** for contours within this AOI
-3. **Smooth ellipse parameters** using exponential moving average:
+#### 1. Elliptical AOI Generation
+Instead of rectangular bounding boxes, the system:
+1. **Fits an ellipse** to the detected contour using `cv2.fitEllipse()`
+2. **Expands the ellipse** by a configurable factor (e.g., 30% larger)
+3. **Creates a mask** defining the elliptical search region
 
 ```python
-# Smoothing factor α ∈ [0, 1]
-cx_smooth = α * cx_new + (1 - α) * cx_prev
-cy_smooth = α * cy_new + (1 - α) * cy_prev
+# Ellipse expansion
+expanded_width = ellipse_width * (1 + expansion_factor)  # default: 30% larger
+expanded_height = ellipse_height * (1 + expansion_factor)
+
+# Create elliptical mask for AOI
+mask = np.zeros((H, W), dtype=np.uint8)
+cv2.ellipse(mask, expanded_ellipse, 255, -1)
 ```
 
-4. **Limit movement** to prevent jumps:
+#### 2. Smoothed Center Tracking
+The system maintains **two tracking points**:
+- **Yellow dot:** Current detection center (raw ellipse center)
+- **Red dot:** Smoothed tracking center (gradual movement)
 
 ```python
-max_movement = 10.0  # pixels
-distance = np.sqrt((cx_new - cx_prev)² + (cy_new - cy_prev)²)
-if distance > max_movement:
-    cx_new = cx_prev + (cx_new - cx_prev) * max_movement / distance
-    cy_new = cy_prev + (cy_new - cy_prev) * max_movement / distance
+# Exponential moving average for smooth tracking
+smoothed_center = current_center + α * (new_center - current_center)
+# where α is the smoothing factor (0.0 = no movement, 1.0 = instant jump)
+```
+
+#### 3. Distance/Angle from Smoothed Center
+**Key improvement:** Distance and pitch measurements now use the **smoothed center** instead of jumping with each new detection:
+
+```python
+# Distance calculated from smoothed position
+distance_pixels = smoothed_center[1]  # Y-coordinate in image
+distance_meters = y_min + distance_pixels * pixels_per_meter_y
+
+# Angle calculated from smoothed position  
+angle_radians = math.atan2(smoothed_center[0] - W/2, H - smoothed_center[1])
+angle_degrees = math.degrees(angle_radians)
+```
+
+#### 4. AOI Boost for Contour Selection
+Contours inside the elliptical AOI receive scoring boost:
+
+```python
+# Check if contour center is inside elliptical mask
+if ellipse_mask[int(contour_center_y), int(contour_center_x)] > 0:
+    score *= aoi_boost_factor  # 2.0 by default
 ```
 
 **Configuration:** `utils/sonar_config.py::TRACKING_CONFIG`
+
+```python
+TRACKING_CONFIG = {
+    'use_elliptical_aoi': True,           # Enable elliptical AOI (vs rectangular)
+    'ellipse_expansion_factor': 0.2,      # 20% larger ellipse for AOI
+    'center_smoothing_alpha': 0.2,        # Smoothing factor for center tracking
+    'aoi_boost_factor': 2.0,              # Score multiplier for contours in AOI
+}
+```
 
 ---
 
@@ -1039,14 +1078,23 @@ IMAGE_PROCESSING_CONFIG = {
 }
 ```
 
-### 9.3 Tracking Config
+### 9.3 Elliptical AOI Tracking Config
 
 ```python
 TRACKING_CONFIG = {
-    'aoi_boost_factor': 1000.0,          # Score multiplier for AOI
-    'aoi_expansion_pixels': 10,          # AOI margin
-    'ellipse_smoothing_alpha': 0.2,      # EMA smoothing
-    'ellipse_max_movement_pixels': 10.0, # Movement constraint
+    # AOI Configuration
+    'use_elliptical_aoi': True,           # Enable elliptical AOI tracking
+    'aoi_boost_factor': 2.0,              # Score multiplier for contours in AOI
+    'aoi_expansion_pixels': 1,            # Legacy rectangular AOI expansion
+    'ellipse_expansion_factor': 0.2,      # Factor to expand ellipse for AOI (20% larger)
+    
+    # Center Tracking Smoothing
+    'center_smoothing_alpha': 0.2,        # Smoothing for tracking center (0.0=no change, 1.0=instant)
+    
+    # Advanced Ellipse Smoothing (legacy)
+    'ellipse_smoothing_alpha': 0.2,       # EMA smoothing for ellipse parameters
+    'ellipse_max_movement_pixels': 4.0,   # Maximum pixel movement per frame
+    'max_frames_outside_aoi': 5,          # Max frames to track outside AOI
 }
 ```
 

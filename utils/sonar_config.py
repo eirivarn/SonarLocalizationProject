@@ -102,38 +102,7 @@ IMAGE_PROCESSING_CONFIG: Dict = {
                                    # IMAGE_PROCESSING_CONFIG['use_pixel_ownership'] = True   # for accuracy
 }
 
-# Simple tracking configuration
-TRACKING_CONFIG: Dict = {
-    'aoi_expansion_pixels': 15,  # How much to expand AOI around detection
-}
-
-# Exclusion zone configuration - prevent merging with other objects
-EXCLUSION_CONFIG: Dict = {
-    'enable_exclusions': False,  # Master toggle for exclusion zones
-    'min_secondary_area': 100,     # Minimum area for secondary contours to track
-    'exclusion_radius': 5,        # Radius around secondary contours to exclude
-    'max_exclusion_zones': 5,      # Maximum number of exclusion zones to track
-    'zone_decay_frames': 3,       # How many frames to keep exclusion zones
-}
-
-# Video output configuration
-
-# Video output configuration  
-VIDEO_CONFIG: Dict = {
-    'fps': 15,
-    'show_all_contours': True,
-    'show_bounding_box': True,
-    'text_scale': 0.6,
-}
-
-ELONGATION_CONFIG: Dict = {
-    'aspect_ratio_weight': 0.1,
-    'ellipse_elongation_weight': 0.1,
-    'solidity_weight': 0.1,
-    'extent_weight': 0.0,
-    'perimeter_weight': 0.0,
-}
-
+# Tracking and AOI configuration
 TRACKING_CONFIG: Dict = {
     'aoi_boost_factor': 2.0,  # Reasonable boost for contours inside AOI
     'aoi_expansion_pixels': 1,
@@ -145,6 +114,7 @@ TRACKING_CONFIG: Dict = {
     'use_elliptical_aoi': True,  # Use elliptical AOI instead of rectangular
 }
 
+# Video output configuration
 VIDEO_CONFIG: Dict = {
     'fps': 15,
     'show_all_contours': True,
@@ -183,7 +153,7 @@ __all__ = [
     'FOV_DEG_DEFAULT', 'RANGE_MIN_M_DEFAULT', 'RANGE_MAX_M_DEFAULT', 'DISPLAY_RANGE_MAX_M_DEFAULT',
     'CONE_W_DEFAULT', 'CONE_H_DEFAULT', 'CONE_FLIP_VERTICAL_DEFAULT', 'CMAP_NAME_DEFAULT',
     'SONAR_VIS_DEFAULTS', 'ENHANCE_DEFAULTS', 'ConeGridSpec',
-    'IMAGE_PROCESSING_CONFIG', 'ELONGATION_CONFIG', 'TRACKING_CONFIG', 'VIDEO_CONFIG',
+    'IMAGE_PROCESSING_CONFIG', 'TRACKING_CONFIG', 'VIDEO_CONFIG',
     'NAVIGATION_ANALYSIS_CONFIG',
     'EXPORTS_DIR_DEFAULT', 'EXPORTS_SUBDIRS',
 ]
