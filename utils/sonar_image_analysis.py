@@ -313,47 +313,101 @@ def select_best_contour_core(contours, last_center=None, aoi=None, cfg_img=IMAGE
 
 def directional_momentum_merge(frame, search_radius=3, momentum_threshold=0.2,
                                momentum_decay=0.8, momentum_boost=1.5):
-    if search_radius <= 2:
-        # Fast path for small radius
-        h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 1))
-        v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 5))
-        h_enhanced = cv2.morphologyEx(frame, cv2.MORPH_TOPHAT, h_kernel)
-        v_enhanced = cv2.morphologyEx(frame, cv2.MORPH_TOPHAT, v_kernel)
-        enhanced = np.maximum(h_enhanced, v_enhanced)
-        grad = cv2.Laplacian(frame, cv2.CV_32F)
-        grad_norm = np.abs(grad) / 255.0
-        boost_mask = grad_norm > momentum_threshold
-        result = frame.astype(np.float32)
-        result[boost_mask] += momentum_boost * enhanced[boost_mask]
-        return np.clip(result, 0, 255).astype(np.uint8)
-
+    """
+    Enhanced directional momentum merge that ignores signal strength considerations.
+    Focuses purely on structural directional enhancement for better sonar processing.
+    
+    Key improvements:
+    - Signal strength agnostic processing
+    - Multiple scale enhancement  
+    - Adaptive kernel sizing
+    - Exponential boost curves to avoid saturation
+    - No thresholding based on energy levels
+    """
+    
+    # Convert to float32 for better precision during processing
     result = frame.astype(np.float32)
-    grad_x = cv2.Sobel(frame, cv2.CV_32F, 1, 0, ksize=3)
-    grad_y = cv2.Sobel(frame, cv2.CV_32F, 0, 1, ksize=3)
-    energy_map = np.sqrt(grad_x**2 + grad_y**2) / 255.0
-    if np.max(energy_map) < momentum_threshold:
-        return frame
-
-    kernel_size = 5
-    center = 2
-    h_kernel = np.zeros((kernel_size, kernel_size), dtype=np.float32); h_kernel[center, :] = [0.1, 0.2, 0.4, 0.2, 0.1]
-    v_kernel = np.zeros_like(h_kernel); v_kernel[:, center] = [0.1, 0.2, 0.4, 0.2, 0.1]
-    d1_kernel = np.zeros_like(h_kernel); d2_kernel = np.zeros_like(h_kernel)
-    for i in range(kernel_size):
-        d1_kernel[i, i] = 0.2
-        d2_kernel[i, kernel_size-1-i] = 0.2
-    d1_kernel[center, center] = 0.4; d2_kernel[center, center] = 0.4
-
-    responses = [
-        cv2.filter2D(result, -1, h_kernel),
-        cv2.filter2D(result, -1, v_kernel),
-        cv2.filter2D(result, -1, d1_kernel),
-        cv2.filter2D(result, -1, d2_kernel),
-    ]
-    enhanced = np.maximum.reduce(responses)
-    boost_factor = 1.0 + momentum_boost * np.clip(energy_map, 0, 1)
-    result = enhanced * boost_factor
-    return np.clip(result, 0, 255).astype(np.uint8)
+    
+    # Multi-scale kernel generation based on search_radius
+    kernel_scales = [1, 2, 3] if search_radius > 2 else [1, 2]
+    
+    all_responses = []
+    
+    for scale in kernel_scales:
+        kernel_size = max(3, scale * 2 + 1)
+        center = kernel_size // 2
+        
+        # Create stronger directional kernels
+        h_kernel = np.zeros((kernel_size, kernel_size), dtype=np.float32)
+        v_kernel = np.zeros((kernel_size, kernel_size), dtype=np.float32)
+        d1_kernel = np.zeros((kernel_size, kernel_size), dtype=np.float32)
+        d2_kernel = np.zeros((kernel_size, kernel_size), dtype=np.float32)
+        
+        # Enhanced horizontal kernel with stronger center weighting
+        for i in range(kernel_size):
+            weight = 1.0 / (1.0 + abs(i - center) * 0.5)
+            h_kernel[center, i] = weight
+        h_kernel = h_kernel / np.sum(h_kernel)  # Normalize
+        
+        # Enhanced vertical kernel
+        for i in range(kernel_size):
+            weight = 1.0 / (1.0 + abs(i - center) * 0.5)
+            v_kernel[i, center] = weight
+        v_kernel = v_kernel / np.sum(v_kernel)  # Normalize
+        
+        # Enhanced diagonal kernels
+        for i in range(kernel_size):
+            for j in range(kernel_size):
+                if i == j:  # Main diagonal
+                    weight = 1.0 / (1.0 + abs(i - center) * 0.5)
+                    d1_kernel[i, j] = weight
+                if i + j == kernel_size - 1:  # Anti-diagonal
+                    weight = 1.0 / (1.0 + abs(i - center) * 0.5)
+                    d2_kernel[i, j] = weight
+        
+        d1_kernel = d1_kernel / np.sum(d1_kernel) if np.sum(d1_kernel) > 0 else d1_kernel
+        d2_kernel = d2_kernel / np.sum(d2_kernel) if np.sum(d2_kernel) > 0 else d2_kernel
+        
+        # Apply directional filters
+        h_response = cv2.filter2D(result, -1, h_kernel)
+        v_response = cv2.filter2D(result, -1, v_kernel)
+        d1_response = cv2.filter2D(result, -1, d1_kernel)
+        d2_response = cv2.filter2D(result, -1, d2_kernel)
+        
+        # Take maximum response for this scale
+        scale_response = np.maximum.reduce([h_response, v_response, d1_response, d2_response])
+        all_responses.append(scale_response)
+    
+    # Combine multi-scale responses using weighted average
+    if len(all_responses) == 1:
+        enhanced = all_responses[0]
+    else:
+        # Weight larger scales more heavily for better long-range detection
+        weights = np.array([1.0, 1.5, 2.0][:len(all_responses)])
+        weights = weights / np.sum(weights)
+        enhanced = np.zeros_like(all_responses[0])
+        for i, response in enumerate(all_responses):
+            enhanced += weights[i] * response
+    
+    # Apply exponential boost curve to avoid saturation
+    # This replaces the old linear boost with signal strength considerations
+    normalized_enhanced = enhanced / 255.0
+    
+    # Exponential boost function: more aggressive for weaker signals, 
+    # but doesn't rely on signal strength thresholds
+    exp_boost = momentum_boost * (1.0 - np.exp(-2.0 * normalized_enhanced))
+    
+    # Combine original and enhanced with exponential weighting
+    final_result = result + exp_boost * enhanced
+    
+    # Soft clipping to allow stronger enhancement while avoiding hard saturation
+    max_val = 255.0 * (1.0 + momentum_boost * 0.5)  # Allow temporary overflow
+    soft_clipped = max_val * np.tanh(final_result / max_val)
+    
+    # Final normalization back to [0, 255]
+    final_normalized = 255.0 * (soft_clipped / np.max(soft_clipped)) if np.max(soft_clipped) > 0 else soft_clipped
+    
+    return np.clip(final_normalized, 0, 255).astype(np.uint8)
 
 def preprocess_edges(frame_u8: np.ndarray, cfg=IMAGE_PROCESSING_CONFIG) -> Tuple[np.ndarray, np.ndarray]:
     proc = directional_momentum_merge(
