@@ -64,10 +64,30 @@ ROS Bags → CSV/NPZ Export → Enhancement → Rasterization →
 SOLAQUA datasets typically contain two types of bags per collection session:
 
 - **`*_data.bag`**: Telemetry, sensors, navigation
-  - Topics: DVL sensors, sonar, navigation, guidance, USBL, etc.
+  - Topics: DVL sensors, Ping360 sonar, navigation, guidance, USBL, etc.
   
-- **`*_video.bag`**: Camera footage
-  - Topics: Compressed image streams, camera info
+- **`*_video.bag`**: Camera footage and imaging sonar
+  - Topics: Compressed image streams, camera info, SonoptixECHO sonar
+
+### 2.1.1 Sonar Data Distribution
+
+SOLAQUA datasets contain **two different sonar systems** with data stored in different bag types:
+
+**Ping360 Sonar** → `*_data.bag` files:
+- Topic: `/sensor/ping360` (sensors/msg/Ping360)
+- Topic: `/sensor/ping360_config` (sensors/msg/Ping360_config_2)
+- Purpose: Range-finding, obstacle detection
+- Exported to: `sensor_ping360__{bag_id}_data.csv`
+
+**SonoptixECHO Sonar** → `*_video.bag` files:
+- Topic: `/sensor/sonoptix_echo/image` (sensors/msg/SonoptixECHO)
+- Purpose: High-resolution imaging sonar for visualization and analysis
+- Exported to: `sensor_sonoptix_echo_image__{bag_id}_video.csv`
+
+> **📋 Note:** The main sonar analysis pipeline focuses on **SonoptixECHO** data from video bags, 
+> which explains why sonar CSV files have the `_video.csv` suffix throughout the codebase.
+
+**Verification:** Run `utils/verify_sonar_bag_source.py` to confirm sonar topic distribution across your bag files.
 
 ### 2.2 Export Process
 
@@ -76,46 +96,242 @@ SOLAQUA datasets typically contain two types of bags per collection session:
 The export process:
 
 1. **Enumerate topics** in each bag using `rosbags` library
-2. **Extract messages** topic by topic
+2. **Extract messages** topic by topic  
 3. **Normalize timestamps** to UTC with `ts_utc` field
 4. **Parse nested fields** (JSON, arrays) into flat columns
-5. **Write CSV/Parquet** files named: `{topic}__{bag_id}_data.{ext}`
+5. **Write CSV/Parquet** files named: `{topic}__{bag_stem}.{ext}`
+   - Data bags: `{topic}__{bag_id}_data.csv`
+   - Video bags: `{topic}__{bag_id}_video.csv`
 
 **Key Functions:**
 - `dataset_export_utils.export_all_topics()` - Main export orchestrator
 - `dataset_export_utils.flatten_message()` - Recursively flattens ROS messages
-- `sonar_utils.load_df()` - Loads CSV/Parquet with automatic format detection
+- `sonar_utils.load_df()` - Loads CSV/Parquet
 
 ### 2.3 Sonar Data Schema
 
-Sonoptix messages contain either:
+#### 2.3.1 Original ROS Bag Format
 
-**Option A:** `image` field (nested list)
+**SonoptixECHO** messages in `*_video.bag` files contain:
+
 ```python
+# ROS Message Structure
 {
-  "t": 1234567890.123,
-  "image": [[255, 254, ...], [250, 248, ...], ...]  # HxW array
+  "header": {
+    "stamp": {"sec": 1692705903, "nanosec": 123456789},
+    "frame_id": "sonar_link"
+  },
+  "array_data": {  # Float32MultiArray
+    "layout": {
+      "dim": [
+        {"label": "range", "size": 1024, "stride": 262144},
+        {"label": "beam",  "size": 256,  "stride": 256}
+      ],
+      "data_offset": 0
+    },
+    "data": [45.2, 46.1, 44.8, ...]  # 262,144 float32 values
+  }
 }
 ```
 
-**Option B:** `data` field with metadata
+#### 2.3.2 Exported CSV Format
+
+After processing through `solaqua_export.py`, the data becomes:
+
 ```python
+# CSV Row Structure  
 {
-  "t": 1234567890.123,
-  "data": [255, 254, 250, ...],  # Flat array
-  "dim_labels": ["range", "beam"],
-  "dim_sizes": [1024, 256]
+  "t": 1692705903.123,
+  "data": "[45.2, 46.1, 44.8, ...]",     # JSON string of flat array
+  "dim_labels": '["range", "beam"]',     # JSON string
+  "dim_sizes": "[1024, 256]",           # JSON string [H, W]
+  # ... other metadata columns
 }
 ```
+
+**Key Transformation:**
+- Float32MultiArray → Flat array stored as JSON string
+- Binary ROS format → Human-readable CSV format
+- Nested structure → Flattened columns with metadata
 
 **Extraction:** `utils/sonar_utils.py::get_sonoptix_frame(df, idx)`
 
 This function:
-1. Checks for `image` column first
-2. Falls back to `data` + `dim_*` reconstruction
+1. Loads the flat `data` array from the CSV (parsing JSON string)
+2. Uses `dim_sizes` to determine reshape dimensions `[H, W]`  
 3. Returns `np.ndarray` of shape `(H, W)` where:
    - `H` = range bins (distance samples)
    - `W` = beam angles
+
+**Exported Data Location:** SonoptixECHO data is exported to:
+```
+exports/by_bag/sensor_sonoptix_echo_image__{bag_id}_video.csv
+```
+The `_video.csv` suffix indicates this data originated from `*_video.bag` files.
+
+### 2.4 SonoptixECHO Data Flow: From ROS Bags to CSV
+
+This section explains the complete journey of SonoptixECHO sonar data from the original ROS bag files to the processed CSV files used by the analysis pipeline.
+
+#### Step 1: ROS Bag Storage
+
+**Original Format in `*_video.bag`:**
+```
+Topic: /sensor/sonoptix_echo/image
+Message Type: sensors/msg/SonoptixECHO
+```
+
+Each SonoptixECHO message contains:
+- **Header**: Timestamp and frame ID
+- **array_data**: A Float32MultiArray containing the sonar intensity data
+
+**Float32MultiArray Structure:**
+```python
+array_data = {
+    "layout": {
+        "dim": [
+            {"label": "range", "size": 1024, "stride": 262144},
+            {"label": "beam",  "size": 256,  "stride": 256}
+        ],
+        "data_offset": 0
+    },
+    "data": [float32_value_1, float32_value_2, ..., float32_value_262144]
+}
+```
+
+#### Step 2: Export Processing
+
+**Implementation:** `utils/dataset_export_utils.py::bag_topic_to_dataframe()`
+
+When processing a `*_video.bag` file:
+
+1. **Message Deserialization**: 
+   ```python
+   msg = reader.deserialize(raw, con.msgtype)  # Get SonoptixECHO message
+   array_data = msg.array_data                 # Extract Float32MultiArray
+   ```
+
+2. **Float32MultiArray Decoding**:
+   ```python
+   labels, sizes, strides, payload, shape, meta = decode_float32_multiarray(array_data)
+   
+   # Example result:
+   # labels = ["range", "beam"]
+   # sizes = [1024, 256] 
+   # payload = [float1, float2, ..., float262144]  # 1024×256 = 262,144 values
+   # shape = (1024, 256)  # Inferred 2D dimensions
+   ```
+
+3. **CSV Record Creation**:
+   ```python
+   rec = {
+       "t": timestamp,
+       "dim_labels": '["range", "beam"]',     # JSON string
+       "dim_sizes": '[1024, 256]',           # JSON string  
+       "data": '[float1, float2, ...]',      # JSON string (flat array)
+       "len": 262144,                        # Length verification
+       # ... other metadata fields
+   }
+   ```
+
+**2D Conceptual View:**
+```python
+# How we think about it (2D sonar image)
+sonar_2d = [
+    [r0_b0, r0_b1, r0_b2, ..., r0_b255],    # Range bin 0, all beams
+    [r1_b0, r1_b1, r1_b2, ..., r1_b255],    # Range bin 1, all beams
+    [r2_b0, r2_b1, r2_b2, ..., r2_b255],    # Range bin 2, all beams
+    ...
+    [r1023_b0, r1023_b1, ..., r1023_b255]   # Range bin 1023, all beams
+]
+```
+
+**1D Flat Storage:**
+```python
+# How it's actually stored (flat array)
+data_flat = [
+    r0_b0, r0_b1, r0_b2, ..., r0_b255,      # Row 0 flattened
+    r1_b0, r1_b1, r1_b2, ..., r1_b255,      # Row 1 flattened  
+    r2_b0, r2_b1, r2_b2, ..., r2_b255,      # Row 2 flattened
+    ...
+    r1023_b0, r1023_b1, ..., r1023_b255     # Row 1023 flattened
+]
+# Total length: 1024 × 256 = 262,144 values
+```
+
+
+#### Step 3: CSV File Structure
+
+**Resulting CSV Columns:**
+```python
+columns = [
+    # Timing
+    't', 't_header', 't_bag', 't_src', 'ts_utc', 'ts_oslo',
+    
+    # Metadata  
+    'bag', 'bag_file', 'topic',
+    
+    # Array Structure (JSON strings)
+    'dim_labels',    # '["range", "beam"]'
+    'dim_sizes',     # '[1024, 256]'
+    'dim_strides',   # '[262144, 256]'
+    
+    # Sonar Data (JSON string)
+    'data',          # '[val1, val2, ..., val262144]'
+    'len',           # 262144
+    
+    # Quality Metadata
+    'data_offset', 'dtype', 'payload_sha256', 'used_shape', 'policy', 'warnings'
+]
+```
+
+**Example CSV Row:**
+```csv
+t,dim_labels,dim_sizes,data,len
+1692705903.123,"[""range"", ""beam""]","[1024, 256]","[45.2, 46.1, 44.8, ...]",262144
+```
+
+#### Step 4: Data Reconstruction for Processing
+
+**Loading and Reshaping:**
+```python
+def get_sonoptix_frame(df: pd.DataFrame, idx: int) -> np.ndarray:
+    """Convert flat CSV data back to 2D sonar image"""
+    
+    # 1. Load flat data from CSV
+    data_flat = json.loads(df.loc[idx, "data"])          # List of 262,144 floats
+    dim_sizes = json.loads(df.loc[idx, "dim_sizes"])     # [1024, 256]
+    
+    # 2. Reconstruct 2D array
+    H, W = dim_sizes  # 1024, 256
+    sonar_2d = np.array(data_flat).reshape(H, W)
+    
+    # 3. Result: 2D array ready for processing
+    # Shape: (1024, 256) = (range_bins, beam_angles)
+    return sonar_2d
+```
+
+**Coordinate System:**
+```python
+# sonar_2d[row, col] = intensity_value
+# 
+# row index    → range bins (0 = closest, 1023 = farthest)
+# col index    → beam angles (0 = leftmost beam, 255 = rightmost beam)
+#
+# Example access:
+sonar_2d[0, 128]     # Closest range, center beam
+sonar_2d[512, 0]     # Mid range, leftmost beam  
+sonar_2d[1023, 255]  # Farthest range, rightmost beam
+```
+
+#### Step 5: Processing Pipeline Integration
+
+Once reconstructed to 2D, the data flows through:
+
+1. **Flipping** (`apply_flips()`) - Correct orientation
+2. **Enhancement** (`enhance_intensity()`) - TVG compensation, normalization
+3. **Rasterization** (`cone_raster_like_display_cell()`) - Polar to Cartesian conversion
+4. **Analysis** - Contour detection, distance measurement
 
 ---
 
@@ -129,7 +345,7 @@ Raw sonar data suffers from:
 - **Dynamic range issues:** Near-field saturates, far-field is weak
 - **Variable gain:** Time-varying gain (TVG) applied in hardware
 
-**Goal:** Normalize intensity for consistent visualization and analysis.
+**Goal:** Normalize intensity for visualization.
 
 ### 3.2 Enhancement Pipeline
 
