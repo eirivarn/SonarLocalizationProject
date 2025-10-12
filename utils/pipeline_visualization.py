@@ -1,765 +1,671 @@
 """
-Pipeline Visualization Utilities for SOLAQUA
+SOLAQUA Video Generation Pipeline Analysis
 
-This module provides step-by-step visualization of the sonar image processing pipeline,
-specifically breaking down the create_enhanced_contour_detection_video_with_processor function.
-Uses actual functions from sonar_image_analysis.py for authentic pipeline behavior.
+This module provides visualization functions for each step of the video generation pipeline
+used in create_enhanced_contour_detection_video_with_processor().
+
+Each function produces clean, saveable figures showing the exact processing that occurs
+in video generation.
 """
 
-import cv2
 import numpy as np
+import cv2
 import matplotlib.pyplot as plt
-from matplotlib.patches import Circle
-from typing import Dict, List, Tuple, Any, Optional
+from pathlib import Path
+from typing import Tuple, Optional, Dict, Any, List
 
-# Import the actual sonar processing functions
-from utils.sonar_image_analysis import (
-    SonarDataProcessor, 
-    preprocess_edges, 
+# Import the actual video generation functions
+from .sonar_image_analysis import (
+    # Data loading functions
+    get_available_npz_files, 
+    load_cone_run_npz, 
+    to_uint8_gray,
+    
+    # Core processor (same as used in video generation)
+    SonarDataProcessor,
+    
+    # Processing functions
+    preprocess_edges,
     select_best_contour_core,
-    compute_contour_features,
-    _distance_angle_from_contour,
-    IMAGE_PROCESSING_CONFIG
+    
+    # Configuration used in videos
+    IMAGE_PROCESSING_CONFIG,
+    VIDEO_CONFIG
 )
 
 
-class PipelineStepVisualizer:
-    """Visualizes each step in the sonar image processing pipeline"""
+class PipelineVisualizer:
+    """
+    Visualizes each step of the SOLAQUA video generation pipeline.
     
-    def __init__(self, figsize=(20, 12)):
-        self.figsize = figsize
-        self.step_counter = 0
-        
-    def reset_counter(self):
-        """Reset the step counter"""
-        self.step_counter = 0
-        
-    def increment_step(self):
-        """Increment and return the step counter"""
-        self.step_counter += 1
-        return self.step_counter
-        
-    def step_1_load_original_frame(self, frame: np.ndarray, frame_number: int) -> Dict[str, Any]:
+    This class provides methods to create clean, saveable visualizations
+    of the exact processing steps used in video generation.
+    """
+    
+    def __init__(self, figure_size: Tuple[int, int] = (15, 10), font_size: int = 12):
         """
-        Step 1: Load and display the original sonar frame
+        Initialize the pipeline visualizer.
         
         Args:
-            frame: Original sonar frame
-            frame_number: Current frame number
-            
-        Returns:
-            Dictionary with step results and metadata
+            figure_size: Default figure size for visualizations
+            font_size: Default font size for plots
         """
-        step_num = self.increment_step()
+        self.figure_size = figure_size
+        self.font_size = font_size
         
-        fig, ax = plt.subplots(1, 1, figsize=self.figsize)
+        # Configure matplotlib
+        plt.rcParams['figure.figsize'] = figure_size
+        plt.rcParams['font.size'] = font_size
         
-        # Display original frame
-        ax.imshow(frame, cmap='gray')
-        ax.set_title(f'Step {step_num}: Original Sonar Frame #{frame_number}', fontsize=16, fontweight='bold')
-        ax.set_xlabel('X Coordinate (pixels)', fontsize=12)
-        ax.set_ylabel('Y Coordinate (pixels)', fontsize=12)
+        # Initialize processor
+        self.processor = None
+        self.current_frame = None
+        self.current_extent = None
+        self.frame_idx = 0
+        self.data_available = False
         
-        # Add frame info
-        height, width = frame.shape[:2]
-        ax.text(10, height-10, f'Frame: {frame_number}\nSize: {width}x{height}\nType: {frame.dtype}', 
-               bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8),
-               fontsize=10, verticalalignment='top')
-        
-        plt.tight_layout()
-        plt.show()
-        
-        return {
-            'step': step_num,
-            'description': 'Original sonar frame loaded',
-            'frame_number': frame_number,
-            'frame_shape': frame.shape,
-            'frame_dtype': str(frame.dtype),
-            'frame_stats': {
-                'min': float(np.min(frame)),
-                'max': float(np.max(frame)),
-                'mean': float(np.mean(frame))
-            }
-        }
-    
-    def step_2_processor_initialization(self, processor_config: Dict) -> Dict[str, Any]:
+    def load_data(self, npz_data_path: str, npz_file_index: int = 0, 
+                  frame_start: int = 0, frame_count: int = 100, 
+                  frame_step: int = 5) -> bool:
         """
-        Step 2: Show processor configuration and initialization
+        Load data exactly as done in video generation function.
         
         Args:
-            processor_config: Configuration dictionary for the processor
+            npz_data_path: Path to NPZ data files
+            npz_file_index: Index of file to select (default: 0)
+            frame_start: Starting frame index
+            frame_count: Number of frames to process
+            frame_step: Step size between frames
             
         Returns:
-            Dictionary with step results and metadata
+            bool: True if real data loaded successfully, False if using synthetic
         """
-        step_num = self.increment_step()
+        print("STEP 1: Data Loading (create_enhanced_contour_detection_video_with_processor)")
+        print("=" * 80)
         
-        fig, ax = plt.subplots(1, 1, figsize=(12, 8))
-        ax.axis('off')
+        try:
+            # Get available files (same function call)
+            files = get_available_npz_files(npz_data_path)
+            if not files:
+                print("⚠️  No NPZ files found, using synthetic data")
+                raise FileNotFoundError("No real data")
+            
+            # Select file (same as video function parameter)
+            selected_file = files[npz_file_index]
+            print(f"📁 Selected NPZ file: {selected_file.name}")
+            
+            # Load data (exact same function call)
+            cones, timestamps, extent, meta = load_cone_run_npz(selected_file)
+            T = len(cones)
+            print(f"✅ Loaded {T} frames")
+            print(f"📐 Spatial extent: {extent}")
+            
+            # Video generation parameters (same defaults as function)
+            frame_count = min(frame_count, T)  # Same logic as video function
+            actual_frames = int(min(frame_count, max(0, (T - frame_start)) // max(1, frame_step)))
+            
+            print(f"🎬 Video parameters:")
+            print(f"   - Frame start: {frame_start}")
+            print(f"   - Frame count: {frame_count}")
+            print(f"   - Frame step: {frame_step}")
+            print(f"   - Actual frames to process: {actual_frames}")
+            
+            # Select a representative frame for analysis
+            self.frame_idx = frame_start + (actual_frames // 2) * frame_step
+            self.current_frame = to_uint8_gray(cones[self.frame_idx])  # Exact same conversion
+            self.current_extent = extent
+            
+            print(f"\n🔍 Analyzing frame {self.frame_idx} (middle of sequence)")
+            print(f"📊 Frame shape: {self.current_frame.shape}")
+            print(f"📊 Pixel range: {self.current_frame.min()} - {self.current_frame.max()}")
+            
+            self.data_available = True
+            
+        except Exception as e:
+            print(f"⚠️  Could not load real data: {e}")
+            print("📝 Using synthetic frame for demonstration")
+            
+            # Create synthetic frame matching typical sonar dimensions
+            self.current_frame = np.random.randint(0, 255, (400, 600), dtype=np.uint8)
+            self.current_extent = (0, 100, 0, 50)
+            self.frame_idx = 0
+            self.data_available = False
         
-        # Display configuration as text
-        config_text = "SonarDataProcessor Configuration:\n\n"
-        for key, value in processor_config.items():
+        print(f"\n✅ Data loading complete - ready for video generation pipeline analysis")
+        return self.data_available
+    
+    def initialize_processor(self) -> SonarDataProcessor:
+        """
+        Initialize processor exactly as done in video generation function.
+        
+        Returns:
+            SonarDataProcessor: The initialized processor
+        """
+        print("STEP 2: Processor Initialization")
+        print("=" * 50)
+        
+        # Create processor exactly as done in video generation function
+        print("Creating SonarDataProcessor (same as video generation)...")
+        self.processor = SonarDataProcessor()
+        
+        # Reset tracking (exact same call as in video function)
+        self.processor.reset_tracking()
+        print("✅ Processor tracking reset")
+        
+        print(f"\n🔧 Processor Configuration:")
+        print(f"Image processing config: {type(self.processor.img_config).__name__}")
+        print(f"Tracking initialized: {self.processor.last_center is None}")
+        print(f"Current AOI: {self.processor.current_aoi}")
+        
+        print(f"\n📋 VIDEO_CONFIG settings (used for annotations):")
+        for key, value in VIDEO_CONFIG.items():
+            print(f"   - {key}: {value}")
+        
+        print(f"\n📋 IMAGE_PROCESSING_CONFIG settings:")
+        for key, value in IMAGE_PROCESSING_CONFIG.items():
             if isinstance(value, dict):
-                config_text += f"{key}:\n"
-                for sub_key, sub_value in value.items():
-                    config_text += f"  {sub_key}: {sub_value}\n"
+                print(f"   - {key}:")
+                for subkey, subvalue in value.items():
+                    print(f"     • {subkey}: {subvalue}")
             else:
-                config_text += f"{key}: {value}\n"
+                print(f"   - {key}: {value}")
         
-        ax.text(0.05, 0.95, config_text, transform=ax.transAxes, fontsize=12,
-               verticalalignment='top', fontfamily='monospace',
-               bbox=dict(boxstyle="round,pad=0.5", facecolor="lightblue", alpha=0.8))
-        
-        ax.set_title(f'Step {step_num}: Processor Configuration', fontsize=16, fontweight='bold')
-        
-        plt.tight_layout()
-        plt.show()
-        
-        return {
-            'step': step_num,
-            'description': 'Processor configuration loaded',
-            'config': processor_config
-        }
+        print(f"\n✅ Processor ready - same configuration as video generation system")
+        return self.processor
     
-    def step_3_roi_extraction(self, original_frame: np.ndarray, roi_frame: np.ndarray, 
-                             roi_params: Dict) -> Dict[str, Any]:
+    def visualize_data_loading(self, save_path: Optional[str] = None) -> None:
         """
-        Step 3: Region of Interest (ROI) extraction
+        Visualize the data loading step.
         
         Args:
-            original_frame: Original frame
-            roi_frame: Extracted ROI frame
-            roi_params: ROI parameters (center, radius, etc.)
-            
-        Returns:
-            Dictionary with step results and metadata
+            save_path: Optional path to save the figure
         """
-        step_num = self.increment_step()
+        if self.current_frame is None:
+            raise ValueError("No data loaded. Call load_data() first.")
         
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=self.figsize)
+        fig = plt.figure(figsize=(12, 8))
         
-        # Original frame with ROI overlay
-        ax1.imshow(original_frame, cmap='gray')
-        if 'center' in roi_params and 'radius' in roi_params:
-            circle = Circle(roi_params['center'], roi_params['radius'], 
-                          fill=False, color='red', linewidth=2)
-            ax1.add_patch(circle)
-            ax1.plot(roi_params['center'][0], roi_params['center'][1], 'r+', markersize=10)
+        plt.subplot(2, 2, 1)
+        plt.imshow(self.current_frame, cmap='viridis', aspect='auto')
+        plt.title(f'Input Frame (Frame {self.frame_idx})', fontsize=14, fontweight='bold')
+        plt.xlabel('Lateral Position (pixels)')
+        plt.ylabel('Range (pixels)')
+        plt.colorbar(label='Intensity')
         
-        ax1.set_title('Original Frame with ROI', fontsize=14)
-        ax1.set_xlabel('X Coordinate (pixels)')
-        ax1.set_ylabel('Y Coordinate (pixels)')
+        if self.data_available and self.current_extent is not None:
+            plt.subplot(2, 2, 2)
+            plt.imshow(self.current_frame, cmap='viridis', aspect='auto', extent=self.current_extent)
+            plt.title('Real-World Coordinates', fontsize=14, fontweight='bold')
+            plt.xlabel('Lateral Position (m)')
+            plt.ylabel('Range (m)')
+            plt.colorbar(label='Intensity')
         
-        # Extracted ROI
-        ax2.imshow(roi_frame, cmap='gray')
-        ax2.set_title('Extracted ROI', fontsize=14)
-        ax2.set_xlabel('X Coordinate (pixels)')
-        ax2.set_ylabel('Y Coordinate (pixels)')
-        
-        fig.suptitle(f'Step {step_num}: ROI Extraction', fontsize=16, fontweight='bold')
         plt.tight_layout()
-        plt.show()
         
-        return {
-            'step': step_num,
-            'description': 'Region of Interest extracted',
-            'roi_params': roi_params,
-            'roi_shape': roi_frame.shape,
-            'roi_stats': {
-                'min': float(np.min(roi_frame)),
-                'max': float(np.max(roi_frame)),
-                'mean': float(np.mean(roi_frame))
-            }
-        }
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            print(f"✅ Data loading visualization saved: {save_path}")
+        
+        plt.show()
     
-    def step_4_preprocessing(self, roi_frame: np.ndarray, preprocessed_frame: np.ndarray,
-                           preprocessing_params: Dict) -> Dict[str, Any]:
+    def visualize_edge_detection(self, save_path: Optional[str] = None) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Step 4: Image preprocessing (denoising, enhancement)
+        Visualize the edge detection pipeline step.
         
         Args:
-            roi_frame: Original ROI frame
-            preprocessed_frame: Preprocessed frame
-            preprocessing_params: Parameters used for preprocessing
+            save_path: Optional path to save the figure
             
         Returns:
-            Dictionary with step results and metadata
+            Tuple of (raw_edges, processed_edges)
         """
-        step_num = self.increment_step()
+        if self.current_frame is None:
+            raise ValueError("No data loaded. Call load_data() first.")
         
-        fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=self.figsize)
+        print("Creating Figure 1: Edge Detection Pipeline")
         
-        # Original ROI
-        ax1.imshow(roi_frame, cmap='gray')
-        ax1.set_title('Original ROI', fontsize=14)
-        ax1.set_xlabel('X Coordinate (pixels)')
-        ax1.set_ylabel('Y Coordinate (pixels)')
+        # Run the exact preprocessing used in analyze_frame()
+        edges_raw, edges_proc = preprocess_edges(self.current_frame, IMAGE_PROCESSING_CONFIG)
         
-        # Preprocessed frame
-        ax2.imshow(preprocessed_frame, cmap='gray')
-        ax2.set_title('Preprocessed Frame', fontsize=14)
-        ax2.set_xlabel('X Coordinate (pixels)')
-        ax2.set_ylabel('Y Coordinate (pixels)')
-        
-        # Difference
-        diff = cv2.absdiff(roi_frame, preprocessed_frame)
-        im3 = ax3.imshow(diff, cmap='hot')
-        ax3.set_title('Preprocessing Difference', fontsize=14)
-        ax3.set_xlabel('X Coordinate (pixels)')
-        ax3.set_ylabel('Y Coordinate (pixels)')
-        plt.colorbar(im3, ax=ax3)
-        
-        fig.suptitle(f'Step {step_num}: Image Preprocessing', fontsize=16, fontweight='bold')
-        plt.tight_layout()
-        plt.show()
-        
-        return {
-            'step': step_num,
-            'description': 'Image preprocessing applied',
-            'preprocessing_params': preprocessing_params,
-            'noise_reduction': float(np.mean(diff))
-        }
-    
-    def step_5_contour_detection_and_analysis(self, processed_frame: np.ndarray, 
-                                            contours: List, best_contour: Optional[np.ndarray],
-                                            analysis_params: Dict) -> Dict[str, Any]:
-        """
-        Step 5: Contour detection and best contour analysis
-        
-        Args:
-            processed_frame: Processed frame for contour detection
-            contours: All detected contours
-            best_contour: Selected best contour
-            analysis_params: Analysis parameters
-            
-        Returns:
-            Dictionary with step results and metadata
-        """
-        step_num = self.increment_step()
-        
-        fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=self.figsize)
-        
-        # Original processed frame
-        ax1.imshow(processed_frame, cmap='gray')
-        ax1.set_title('Processed Frame for Contour Detection', fontsize=14)
-        ax1.set_xlabel('X Coordinate (pixels)')
-        ax1.set_ylabel('Y Coordinate (pixels)')
-        
-        # All contours
-        all_contours_frame = cv2.cvtColor(processed_frame, cv2.COLOR_GRAY2RGB)
-        if contours:
-            cv2.drawContours(all_contours_frame, contours, -1, (255, 255, 0), 2)  # Yellow
-        ax2.imshow(all_contours_frame)
-        ax2.set_title(f'All Contours ({len(contours)})', fontsize=14)
-        ax2.set_xlabel('X Coordinate (pixels)')
-        ax2.set_ylabel('Y Coordinate (pixels)')
-        
-        # Best contour selected
-        best_contour_frame = cv2.cvtColor(processed_frame, cv2.COLOR_GRAY2RGB)
-        if contours:
-            cv2.drawContours(best_contour_frame, contours, -1, (100, 100, 100), 1)  # Gray all
-        if best_contour is not None:
-            cv2.drawContours(best_contour_frame, [best_contour], -1, (0, 255, 0), 3)  # Green best
-        ax3.imshow(best_contour_frame)
-        ax3.set_title('Best Contour Selected', fontsize=14)
-        ax3.set_xlabel('X Coordinate (pixels)')
-        ax3.set_ylabel('Y Coordinate (pixels)')
-        
-        fig.suptitle(f'Step {step_num}: Contour Detection and Analysis', fontsize=16, fontweight='bold')
-        plt.tight_layout()
-        plt.show()
-        
-        return {
-            'step': step_num,
-            'description': 'Contours detected and best contour selected',
-            'analysis_params': analysis_params,
-            'total_contours': len(contours),
-            'has_best_contour': best_contour is not None
-        }
-    
-    def step_6_geometric_analysis(self, frame: np.ndarray, contour: np.ndarray, 
-                                ellipse_data: Dict, distance_data: Dict) -> Dict[str, Any]:
-        """
-        Step 6: Geometric analysis - ellipse fitting and distance calculation
-        
-        Args:
-            frame: Input frame
-            contour: Contour for analysis
-            ellipse_data: Ellipse fitting results
-            distance_data: Distance calculation results
-            
-        Returns:
-            Dictionary with step results and metadata
-        """
-        step_num = self.increment_step()
-        
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=self.figsize)
-        
-        # Frame with contour and ellipse
-        geometric_frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2RGB) if len(frame.shape) == 2 else frame.copy()
-        
-        # Draw contour only if it's not empty
-        if contour is not None and len(contour) > 0:
-            try:
-                cv2.drawContours(geometric_frame, [contour], -1, (0, 255, 0), 2)
-            except Exception as e:
-                print(f"Warning: Could not draw contour: {e}")
-        
-        # Draw ellipse if available
-        if 'ellipse' in ellipse_data:
-            ellipse = ellipse_data['ellipse']
-            cv2.ellipse(geometric_frame, ellipse, (255, 0, 255), 2)  # Magenta
-            
-            # Draw major axis line
-            if 'major_axis_line' in ellipse_data:
-                p1, p2 = ellipse_data['major_axis_line']
-                cv2.line(geometric_frame, p1, p2, (0, 0, 255), 3)  # Red
-        
-        ax1.imshow(geometric_frame)
-        ax1.set_title('Ellipse Fitting and Major Axis', fontsize=14)
-        ax1.set_xlabel('X Coordinate (pixels)')
-        ax1.set_ylabel('Y Coordinate (pixels)')
-        
-        # Distance measurement visualization
-        distance_frame = geometric_frame.copy()
-        if 'distance_point' in distance_data:
-            point = distance_data['distance_point']
-            cv2.circle(distance_frame, point, 8, (255, 0, 0), -1)  # Blue dot
-            
-            # Add distance text
-            if 'distance_pixels' in distance_data:
-                dist_text = f"Distance: {distance_data['distance_pixels']:.1f}px"
-                cv2.putText(distance_frame, dist_text, (point[0] + 15, point[1] - 10),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
-        
-        ax2.imshow(distance_frame)
-        ax2.set_title('Distance Measurement', fontsize=14)
-        ax2.set_xlabel('X Coordinate (pixels)')
-        ax2.set_ylabel('Y Coordinate (pixels)')
-        
-        fig.suptitle(f'Step {step_num}: Geometric Analysis', fontsize=16, fontweight='bold')
-        plt.tight_layout()
-        plt.show()
-        
-        return {
-            'step': step_num,
-            'description': 'Geometric analysis with ellipse fitting and distance measurement',
-            'ellipse_data': ellipse_data,
-            'distance_data': distance_data
-        }
-    
-    def step_7_final_output_generation(self, original_frame: np.ndarray, final_frame: np.ndarray,
-                                     analysis_results: Dict) -> Dict[str, Any]:
-        """
-        Step 7: Final output frame generation with all annotations
-        
-        Args:
-            original_frame: Original input frame
-            final_frame: Final annotated output frame
-            analysis_results: Complete analysis results
-            
-        Returns:
-            Dictionary with step results and metadata
-        """
-        step_num = self.increment_step()
-        
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=self.figsize)
+        # Create clean edge detection visualization
+        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+        fig.suptitle('Step 1: Edge Detection Pipeline', fontsize=16, fontweight='bold')
         
         # Original frame
-        ax1.imshow(original_frame, cmap='gray' if len(original_frame.shape) == 2 else None)
-        ax1.set_title('Original Frame', fontsize=14)
-        ax1.set_xlabel('X Coordinate (pixels)')
-        ax1.set_ylabel('Y Coordinate (pixels)')
+        axes[0].imshow(self.current_frame, cmap='viridis', aspect='auto')
+        axes[0].set_title('Original Sonar Frame', fontweight='bold')
+        axes[0].set_xlabel('Lateral (pixels)')
+        axes[0].set_ylabel('Range (pixels)')
         
-        # Final annotated frame
-        ax2.imshow(final_frame, cmap='gray' if len(final_frame.shape) == 2 else None)
-        ax2.set_title('Final Annotated Frame', fontsize=14)
-        ax2.set_xlabel('X Coordinate (pixels)')
-        ax2.set_ylabel('Y Coordinate (pixels)')
+        # Raw Canny edges
+        axes[1].imshow(edges_raw, cmap='gray', aspect='auto')
+        axes[1].set_title('Raw Canny Edges', fontweight='bold')
+        axes[1].set_xlabel('Lateral (pixels)')
+        axes[1].set_ylabel('Range (pixels)')
         
-        # Add summary statistics
-        summary_text = "Processing Summary:\n"
-        if 'detection_found' in analysis_results:
-            summary_text += f"Detection: {'Yes' if analysis_results['detection_found'] else 'No'}\n"
-        if 'distance_pixels' in analysis_results:
-            summary_text += f"Distance: {analysis_results['distance_pixels']:.1f}px\n"
-        if 'processing_time' in analysis_results:
-            summary_text += f"Time: {analysis_results['processing_time']:.3f}s\n"
+        # Enhanced edges with momentum merging
+        axes[2].imshow(edges_proc, cmap='gray', aspect='auto')
+        axes[2].set_title('Enhanced Edges\\n(with Momentum Merge)', fontweight='bold')
+        axes[2].set_xlabel('Lateral (pixels)')
+        axes[2].set_ylabel('Range (pixels)')
         
-        ax2.text(0.02, 0.98, summary_text, transform=ax2.transAxes, 
-                bbox=dict(boxstyle="round,pad=0.3", facecolor="yellow", alpha=0.8),
-                fontsize=10, verticalalignment='top')
-        
-        fig.suptitle(f'Step {step_num}: Final Output Generation', fontsize=16, fontweight='bold')
         plt.tight_layout()
-        plt.show()
         
-        return {
-            'step': step_num,
-            'description': 'Final annotated frame generated',
-            'analysis_results': analysis_results,
-            'pipeline_complete': True
-        }
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            print(f"✅ Figure 1 saved: {save_path}")
+        
+        plt.show()
+        return edges_raw, edges_proc
     
-    def generate_pipeline_summary(self, all_step_results: List[Dict]) -> Dict[str, Any]:
+    def visualize_contour_detection(self, edges_proc: np.ndarray, 
+                                  save_path: Optional[str] = None) -> Tuple[List, Any, Dict, Dict]:
         """
-        Generate a comprehensive summary of the entire pipeline
+        Visualize the contour detection and selection step.
         
         Args:
-            all_step_results: List of results from all pipeline steps
+            edges_proc: Processed edge image from edge detection step
+            save_path: Optional path to save the figure
             
         Returns:
-            Pipeline summary dictionary
+            Tuple of (contours, best_contour, features, stats)
         """
-        fig, ax = plt.subplots(1, 1, figsize=(14, 10))
-        ax.axis('off')
+        if self.current_frame is None:
+            raise ValueError("No data loaded. Call load_data() first.")
         
-        summary_text = "SONAR IMAGE PROCESSING PIPELINE SUMMARY\n"
-        summary_text += "=" * 50 + "\n\n"
+        if self.processor is None:
+            raise ValueError("Processor not initialized. Call initialize_processor() first.")
         
-        for result in all_step_results:
-            step_num = result.get('step', 'Unknown')
-            description = result.get('description', 'No description')
-            summary_text += f"Step {step_num}: {description}\n"
-            
-            # Add key metrics for each step
-            if 'frame_shape' in result:
-                summary_text += f"  Frame size: {result['frame_shape']}\n"
-            if 'total_contours' in result:
-                summary_text += f"  Contours found: {result['total_contours']}\n"
-            if 'detection_found' in result.get('analysis_results', {}):
-                summary_text += f"  Detection: {'Yes' if result['analysis_results']['detection_found'] else 'No'}\n"
-            
-            summary_text += "\n"
+        print("Creating Figure 2: Contour Detection")
         
-        # Add overall statistics
-        summary_text += "\nOVERALL STATISTICS:\n"
-        summary_text += "-" * 20 + "\n"
-        total_steps = len(all_step_results)
-        summary_text += f"Total processing steps: {total_steps}\n"
+        # Find contours using exact same method as video generation
+        contours, hierarchy = cv2.findContours(edges_proc, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
         
-        ax.text(0.05, 0.95, summary_text, transform=ax.transAxes, fontsize=11,
-               verticalalignment='top', fontfamily='monospace',
-               bbox=dict(boxstyle="round,pad=0.5", facecolor="lightgreen", alpha=0.8))
+        # Filter contours by area
+        min_area = IMAGE_PROCESSING_CONFIG.get('min_contour_area', 200)
+        large_contours = [c for c in contours if cv2.contourArea(c) >= min_area]
         
-        plt.title('Pipeline Processing Summary', fontsize=16, fontweight='bold', pad=20)
+        # Run the actual contour selection
+        best_contour, features, stats = select_best_contour_core(
+            contours, self.processor.last_center, self.processor.current_aoi, IMAGE_PROCESSING_CONFIG
+        )
+        
+        # Create clean contour visualization
+        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+        fig.suptitle('Step 2: Contour Detection & Selection', fontsize=16, fontweight='bold')
+        
+        # All contours
+        vis_all = cv2.cvtColor(self.current_frame, cv2.COLOR_GRAY2BGR)
+        cv2.drawContours(vis_all, contours, -1, (0, 255, 255), 1)
+        axes[0].imshow(cv2.cvtColor(vis_all, cv2.COLOR_BGR2RGB))
+        axes[0].set_title(f'All Contours\\n({len(contours)} found)', fontweight='bold')
+        axes[0].set_xlabel('Lateral (pixels)')
+        axes[0].set_ylabel('Range (pixels)')
+        
+        # Filtered contours
+        vis_filtered = cv2.cvtColor(self.current_frame, cv2.COLOR_GRAY2BGR)
+        cv2.drawContours(vis_filtered, large_contours, -1, (255, 165, 0), 2)
+        axes[1].imshow(cv2.cvtColor(vis_filtered, cv2.COLOR_BGR2RGB))
+        axes[1].set_title(f'Area Filtered\\n({len(large_contours)} above {min_area}px²)', fontweight='bold')
+        axes[1].set_xlabel('Lateral (pixels)')
+        axes[1].set_ylabel('Range (pixels)')
+        
+        # Best contour selection
+        vis_best = cv2.cvtColor(self.current_frame, cv2.COLOR_GRAY2BGR)
+        if best_contour is not None:
+            cv2.drawContours(vis_best, [best_contour], -1, (0, 255, 0), 3)
+            if features:
+                cx, cy = int(features['centroid_x']), int(features['centroid_y'])
+                cv2.circle(vis_best, (cx, cy), 5, (0, 0, 255), -1)
+        axes[2].imshow(cv2.cvtColor(vis_best, cv2.COLOR_BGR2RGB))
+        axes[2].set_title('Best Contour Selected\\n(Green=contour, Red=center)', fontweight='bold')
+        axes[2].set_xlabel('Lateral (pixels)')
+        axes[2].set_ylabel('Range (pixels)')
+        
         plt.tight_layout()
+        
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            print(f"✅ Figure 2 saved: {save_path}")
+        
         plt.show()
+        return contours, best_contour, features, stats
+    
+    def visualize_elliptical_aoi(self, best_contour: Any, features: Dict,
+                               save_path: Optional[str] = None) -> Any:
+        """
+        Visualize the elliptical AOI and tracking step.
         
-        return {
-            'total_steps': total_steps,
-            'step_results': all_step_results
-        }
-
-
-def simulate_enhanced_contour_detection_frame_processing(frame: np.ndarray, extent: Tuple[float,float,float,float] = None) -> Tuple[np.ndarray, Dict]:
-    """
-    Simulate the enhanced contour detection frame processing using REAL sonar analysis functions
-    
-    Args:
-        frame: Input sonar frame  
-        extent: Optional spatial extent for real-world coordinate conversion
+        Args:
+            best_contour: Best contour from contour detection step
+            features: Features dictionary from contour detection
+            save_path: Optional path to save the figure
+            
+        Returns:
+            Analysis result from processor
+        """
+        if self.current_frame is None:
+            raise ValueError("No data loaded. Call load_data() first.")
         
-    Returns:
-        Tuple of (processed_frame, analysis_results) using actual SOLAQUA algorithms
-    """
-    print("🔧 Using REAL SonarDataProcessor for frame processing...")
-    
-    # Convert to grayscale if needed
-    if len(frame.shape) == 3:
-        gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    else:
-        gray_frame = frame.copy()
-    
-    # Use actual SonarDataProcessor
-    processor = SonarDataProcessor(IMAGE_PROCESSING_CONFIG)
-    result = processor.analyze_frame(gray_frame, extent)
-    
-    # Create visualization frame
-    vis_frame = cv2.cvtColor(gray_frame, cv2.COLOR_GRAY2BGR)
-    
-    # Get preprocessing results for visualization
-    _, edges_proc = processor.preprocess_frame(gray_frame)
-    contours, _ = cv2.findContours(edges_proc, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-    
-    # Draw all contours in light blue
-    if contours:
-        cv2.drawContours(vis_frame, contours, -1, (255, 200, 100), 1)
-    
-    # Draw AOI if available
-    if processor.current_aoi is not None:
-        ax, ay, aw, ah = processor.current_aoi
-        cv2.rectangle(vis_frame, (ax, ay), (ax+aw, ay+ah), (0, 255, 255), 2)
-        cv2.putText(vis_frame, 'AOI', (ax + 5, ay + 20),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,255), 1)
-    
-    # Draw best contour and analysis results
-    if result.detection_success and result.best_contour is not None:
-        best_contour = result.best_contour
+        if self.processor is None:
+            raise ValueError("Processor not initialized. Call initialize_processor() first.")
         
-        # Draw best contour (green)
-        cv2.drawContours(vis_frame, [best_contour], -1, (0, 255, 0), 2)
+        print("Creating Figure 3: Elliptical AOI and Tracking")
         
-        # Draw bounding box
-        if result.contour_features and 'rect' in result.contour_features:
-            x, y, w, h = result.contour_features['rect']
-            cv2.rectangle(vis_frame, (x,y), (x+w, y+h), (0,0,255), 1)
+        # Run analyze_frame to get the elliptical AOI
+        result = self.processor.analyze_frame(
+            self.current_frame, 
+            self.current_extent if self.data_available else None
+        )
         
-        # Draw ellipse and red line if possible
-        if len(best_contour) >= 5:
+        # Create elliptical AOI visualization
+        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+        fig.suptitle('Step 3: Elliptical AOI & Smoothed Center Tracking', fontsize=16, fontweight='bold')
+        
+        # Show original frame
+        axes[0].imshow(self.current_frame, cmap='viridis', aspect='auto')
+        axes[0].set_title('Original Frame', fontweight='bold')
+        axes[0].set_xlabel('Lateral (pixels)')
+        axes[0].set_ylabel('Range (pixels)')
+        
+        # Show detection with rectangular AOI (legacy comparison)
+        vis_rect = cv2.cvtColor(self.current_frame, cv2.COLOR_GRAY2BGR)
+        if best_contour is not None:
+            cv2.drawContours(vis_rect, [best_contour], -1, (0, 255, 0), 2)
+            if features:
+                x, y, w, h = features['rect']
+                expansion = 25
+                cv2.rectangle(vis_rect, (x-expansion, y-expansion), 
+                             (x+w+expansion, y+h+expansion), (255, 255, 0), 2)
+                cv2.putText(vis_rect, 'Rectangular AOI', (x-expansion, y-expansion-10),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+        
+        axes[1].imshow(cv2.cvtColor(vis_rect, cv2.COLOR_BGR2RGB))
+        axes[1].set_title('Legacy Rectangular AOI\\n(Old method)', fontweight='bold')
+        axes[1].set_xlabel('Lateral (pixels)')
+        axes[1].set_ylabel('Range (pixels)')
+        
+        # Show detection with elliptical AOI
+        vis_ellipse = cv2.cvtColor(self.current_frame, cv2.COLOR_GRAY2BGR)
+        if result.detection_success and result.best_contour is not None:
+            cv2.drawContours(vis_ellipse, [result.best_contour], -1, (0, 255, 0), 2)
+        
+        # Draw elliptical AOI if available
+        if self.processor.current_aoi is not None and isinstance(self.processor.current_aoi, dict):
+            aoi_type = self.processor.current_aoi.get('type', 'rectangular')
+            
+            if aoi_type == 'elliptical':
+                # Draw elliptical AOI mask outline
+                aoi_mask = self.processor.current_aoi['mask']
+                aoi_contours, _ = cv2.findContours(aoi_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                if aoi_contours:
+                    cv2.drawContours(vis_ellipse, aoi_contours, -1, (0, 255, 255), 3)
+                
+                # Draw ellipse center (current detection) - yellow dot
+                ellipse_center = self.processor.current_aoi['center']
+                cv2.circle(vis_ellipse, (int(ellipse_center[0]), int(ellipse_center[1])), 
+                          6, (0, 255, 255), -1)
+                cv2.putText(vis_ellipse, 'Detection Center', 
+                           (int(ellipse_center[0]) + 10, int(ellipse_center[1]) - 10),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+                
+                # Draw smoothed center (tracking center) - red dot
+                if 'smoothed_center' in self.processor.current_aoi and self.processor.current_aoi['smoothed_center']:
+                    smoothed = self.processor.current_aoi['smoothed_center']
+                    cv2.circle(vis_ellipse, (int(smoothed[0]), int(smoothed[1])), 
+                              8, (0, 0, 255), -1)
+                    cv2.putText(vis_ellipse, 'Smoothed Center', 
+                               (int(smoothed[0]) + 10, int(smoothed[1]) + 15),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                
+                cv2.putText(vis_ellipse, 'Elliptical AOI', (10, 30),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+        
+        axes[2].imshow(cv2.cvtColor(vis_ellipse, cv2.COLOR_BGR2RGB))
+        axes[2].set_title('New Elliptical AOI\\n(Yellow=AOI, Yellow dot=detection, Red dot=smoothed)', fontweight='bold')
+        axes[2].set_xlabel('Lateral (pixels)')
+        axes[2].set_ylabel('Range (pixels)')
+        
+        plt.tight_layout()
+        
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            print(f"✅ Figure 3 saved: {save_path}")
+        
+        plt.show()
+        return result
+    
+    def visualize_distance_angle_measurement(self, result: Any, 
+                                           save_path: Optional[str] = None) -> None:
+        """
+        Visualize the distance and angle measurement step.
+        
+        Args:
+            result: Analysis result from processor
+            save_path: Optional path to save the figure
+        """
+        if self.current_frame is None:
+            raise ValueError("No data loaded. Call load_data() first.")
+        
+        if self.processor is None:
+            raise ValueError("Processor not initialized. Call initialize_processor() first.")
+        
+        print("Creating Figure 4: Distance and Angle Measurement")
+        
+        # Create clean distance/angle visualization
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+        fig.suptitle('Step 4: Distance & Angle Measurement (SOLAQUA Coordinate System)', 
+                    fontsize=16, fontweight='bold')
+        
+        H, W = self.current_frame.shape
+        
+        # UNIFIED CENTER POINT - use the same center for both visualizations
+        center_x, center_y = W//2, result.distance_pixels  # Default fallback
+        
+        # Get center point (prioritize smoothed center if available)
+        if (isinstance(self.processor.current_aoi, dict) and 
+            'smoothed_center' in self.processor.current_aoi and 
+            self.processor.current_aoi['smoothed_center']):
+            center_x, center_y = self.processor.current_aoi['smoothed_center']
+            center_source = "Smoothed Center"
+        elif result.best_contour is not None and len(result.best_contour) >= 5:
+            # Use ellipse center as backup
             try:
-                ellipse = cv2.fitEllipse(best_contour)
-                (cx, cy), (minor, major), ang = ellipse
-                
-                # Draw the ellipse (magenta)
-                cv2.ellipse(vis_frame, ellipse, (255, 0, 255), 1)
-                
-                # 90°-rotated major-axis line (red)
-                ang_r = np.radians(ang + 90.0)
-                half = major * 0.5
-                p1 = (int(cx + half*np.cos(ang_r)), int(cy + half*np.sin(ang_r)))
-                p2 = (int(cx - half*np.cos(ang_r)), int(cy - half*np.sin(ang_r)))
-                cv2.line(vis_frame, p1, p2, (0,0,255), 2)
-                
-                # Blue dot at intersection with center beam
-                if result.distance_pixels is not None:
-                    H, W = gray_frame.shape
-                    center_x = W // 2
-                    dot_y = int(result.distance_pixels)
-                    cv2.circle(vis_frame, (center_x, dot_y), 4, (255, 0, 0), -1)
+                (cx, cy), _, _ = cv2.fitEllipse(result.best_contour)
+                center_x, center_y = cx, cy
+                center_source = "Ellipse Center"
+            except:
+                center_source = "Default Center"
+        else:
+            center_source = "Default Center"
+        
+        print(f"Using {center_source}: ({center_x:.1f}, {center_y:.1f})")
+        
+        # Distance measurement visualization
+        vis_distance = cv2.cvtColor(self.current_frame, cv2.COLOR_GRAY2BGR)
+        if result.detection_success and result.distance_pixels is not None:
+            # Draw the detection contour
+            cv2.drawContours(vis_distance, [result.best_contour], -1, (0, 255, 0), 2)
+            
+            # SOLAQUA coordinate system: sonar is at TOP (y=0), distance measured forward (downward in pixels)
+            sonar_x, sonar_y = W//2, 0  # Sonar at top center
+            target_pixel_y = int(result.distance_pixels)  # Direct pixel distance from sonar
+            
+            # Draw UNIFIED net center
+            cv2.circle(vis_distance, (int(center_x), int(center_y)), 8, (0, 0, 255), -1)
+            cv2.circle(vis_distance, (int(center_x), int(center_y)), 8, (255, 255, 255), 1)  # White outline
+            
+            # Draw distance measurement - from sonar position to target y-coordinate
+            cv2.line(vis_distance, (sonar_x, sonar_y), (sonar_x, target_pixel_y), 
+                    (0, 0, 255), 3)  # Vertical distance line from sonar
+            
+            # Add distance annotations
+            cv2.putText(vis_distance, f'Distance: {result.distance_pixels:.0f} px', 
+                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            
+            if result.distance_meters is not None:
+                cv2.putText(vis_distance, f'Distance: {result.distance_meters:.2f} m', 
+                           (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            
+            # Mark sonar position at TOP
+            cv2.circle(vis_distance, (sonar_x, sonar_y), 6, (255, 255, 0), -1)
+            cv2.putText(vis_distance, 'Sonar (Vehicle)', (sonar_x + 10, sonar_y + 20), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+            
+            # Add center label
+            cv2.putText(vis_distance, 'Net Center', (int(center_x) + 10, int(center_y) - 10), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+            
+            # Add coordinate system info
+            cv2.putText(vis_distance, 'Forward →', (10, H - 20), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        
+        axes[0].imshow(cv2.cvtColor(vis_distance, cv2.COLOR_BGR2RGB))
+        axes[0].set_title('Distance Measurement\\n(Forward range from vehicle)', fontweight='bold')
+        axes[0].set_xlabel('Lateral (pixels)')
+        axes[0].set_ylabel('Forward Range (pixels)')
+        
+        # Angle measurement visualization (net orientation, not bearing)
+        vis_angle = cv2.cvtColor(self.current_frame, cv2.COLOR_GRAY2BGR)
+        if result.detection_success and result.angle_degrees is not None:
+            # Draw the detection contour
+            cv2.drawContours(vis_angle, [result.best_contour], -1, (0, 255, 0), 2)
+            
+            # Draw SAME UNIFIED net center as left panel
+            cv2.circle(vis_angle, (int(center_x), int(center_y)), 8, (0, 0, 255), -1)
+            cv2.circle(vis_angle, (int(center_x), int(center_y)), 8, (255, 255, 255), 1)  # White outline
+            
+            # Get ellipse information for angle visualization
+            if result.best_contour is not None and len(result.best_contour) >= 5:
+                try:
+                    # Get ellipse parameters (same as used in angle calculation)
+                    (cx, cy), (minor_axis, major_axis), angle = cv2.fitEllipse(result.best_contour)
                     
-                    # Distance text
-                    if result.distance_meters is not None:
-                        text = f"D: {result.distance_meters:.2f}m"
-                        cv2.putText(vis_frame, text, (center_x + 10, dot_y),
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-                        
-            except cv2.error:
-                pass  # Skip ellipse drawing if it fails
+                    # Draw ellipse major axis to show orientation (using ellipse center for axis calculation)
+                    angle_rad = np.radians(angle + 90.0)  # Major axis direction (same as in calculation)
+                    axis_length = 60  # Length for visualization
+                    dx = axis_length * np.cos(angle_rad)
+                    dy = axis_length * np.sin(angle_rad)
+                    
+                    # Draw major axis line through the ellipse center (not necessarily same as tracking center)
+                    p1 = (int(cx - dx), int(cy - dy))
+                    p2 = (int(cx + dx), int(cy + dy))
+                    cv2.line(vis_angle, p1, p2, (255, 0, 255), 3)
+                    
+                    # Draw reference horizontal line through unified center
+                    ref_length = 40
+                    cv2.line(vis_angle, (int(center_x - ref_length), int(center_y)), 
+                            (int(center_x + ref_length), int(center_y)), (255, 255, 255), 2)
+                    
+                    # Angle annotation
+                    angle_text = f'Net Orientation: {result.angle_degrees:.1f}'
+                    cv2.putText(vis_angle, angle_text, (10, 30), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
+                    
+                    # Labels
+                    cv2.putText(vis_angle, 'Net Center', (int(center_x) + 10, int(center_y) - 10), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                    cv2.putText(vis_angle, 'Major Axis', (p2[0] + 5, p2[1]), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1)
+                    cv2.putText(vis_angle, 'Reference', (int(center_x + ref_length) + 5, int(center_y)), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                    
+                except Exception as e:
+                    cv2.putText(vis_angle, f'Angle calc error: {e}', (10, 30), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+        
+        axes[1].imshow(cv2.cvtColor(vis_angle, cv2.COLOR_BGR2RGB))
+        axes[1].set_title('Angle Measurement\\n(Net orientation from major axis)', fontweight='bold')
+        axes[1].set_xlabel('Lateral (pixels)')
+        axes[1].set_ylabel('Forward Range (pixels)')
+        
+        plt.tight_layout()
+        
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            print(f"✅ Figure 4 saved: {save_path}")
+        
+        plt.show()
     
-    # Create analysis results dictionary
-    analysis_results = {
-        'detection_found': result.detection_success,
-        'distance_pixels': result.distance_pixels,
-        'angle_degrees': result.angle_degrees,
-        'distance_meters': result.distance_meters,
-        'contour_features': result.contour_features or {},
-        'tracking_status': result.tracking_status,
-        'total_contours': len(contours),
-        'processing_method': 'SonarDataProcessor.analyze_frame',
-        'processor_config': IMAGE_PROCESSING_CONFIG,
-        'processing_time': 0.0,  # Would need actual timing measurement
-        'frame_result': result  # Include the full FrameAnalysisResult
-    }
-    
-    return vis_frame, analysis_results
+    def run_complete_pipeline_analysis(self, npz_data_path: str, 
+                                     output_dir: str = "/tmp",
+                                     npz_file_index: int = 0) -> Dict[str, Any]:
+        """
+        Run the complete pipeline analysis with all visualization steps.
+        
+        Args:
+            npz_data_path: Path to NPZ data files
+            output_dir: Directory to save visualization figures
+            npz_file_index: Index of NPZ file to analyze
+            
+        Returns:
+            Dictionary containing all analysis results
+        """
+        print("SOLAQUA Video Generation Pipeline Analysis")
+        print("=" * 60)
+        print("✅ Video generation functions loaded!")
+        print("✅ Using EXACT same code as create_enhanced_contour_detection_video_with_processor()")
+        
+        results = {}
+        
+        # Step 1: Load data
+        data_loaded = self.load_data(npz_data_path, npz_file_index)
+        self.visualize_data_loading(f"{output_dir}/solaqua_step0_data_loading.png")
+        results['data_loaded'] = data_loaded
+        
+        # Step 2: Initialize processor
+        processor = self.initialize_processor()
+        results['processor'] = processor
+        
+        # Step 3: Edge detection
+        edges_raw, edges_proc = self.visualize_edge_detection(f"{output_dir}/solaqua_step1_edge_detection.png")
+        results['edges_raw'] = edges_raw
+        results['edges_processed'] = edges_proc
+        
+        # Step 4: Contour detection
+        contours, best_contour, features, stats = self.visualize_contour_detection(
+            edges_proc, f"{output_dir}/solaqua_step2_contour_detection.png"
+        )
+        results['contours'] = contours
+        results['best_contour'] = best_contour
+        results['features'] = features
+        results['stats'] = stats
+        
+        # Step 5: Elliptical AOI
+        analysis_result = self.visualize_elliptical_aoi(
+            best_contour, features, f"{output_dir}/solaqua_step3_elliptical_aoi.png"
+        )
+        results['analysis_result'] = analysis_result
+        
+        # Step 6: Distance and angle measurement
+        self.visualize_distance_angle_measurement(
+            analysis_result, f"{output_dir}/solaqua_step4_distance_angle.png"
+        )
+        
+        print("\\n" + "=" * 60)
+        print("✅ Complete pipeline analysis finished!")
+        print("✅ All visualization figures saved to:", output_dir)
+        
+        return results
 
 
-def demonstrate_full_pipeline(frame: np.ndarray, frame_number: int = 0, extent: Tuple[float,float,float,float] = None) -> Dict[str, Any]:
+def run_pipeline_analysis(npz_data_path: str = "/Volumes/LaCie/SOLAQUA/exports/outputs",
+                         output_dir: str = "/tmp",
+                         npz_file_index: int = 0) -> Dict[str, Any]:
     """
-    Demonstrate the complete pipeline with step-by-step visualization using REAL sonar processing functions
+    Convenience function to run complete pipeline analysis.
     
     Args:
-        frame: Input sonar frame
-        frame_number: Frame number for tracking
-        extent: Spatial extent (x_min, x_max, y_min, y_max) for real-world coordinate conversion
+        npz_data_path: Path to NPZ data files
+        output_dir: Directory to save visualization figures  
+        npz_file_index: Index of NPZ file to analyze
         
     Returns:
-        Complete pipeline results using actual SOLAQUA processing functions
+        Dictionary containing all analysis results
     """
-    visualizer = PipelineStepVisualizer()
-    all_results = []
-    
-    print("Starting SOLAQUA Pipeline Visualization (Using Real Functions)...")
-    print("=" * 60)
-    
-    # Step 1: Load original frame
-    result1 = visualizer.step_1_load_original_frame(frame, frame_number)
-    all_results.append(result1)
-    
-    # Step 2: Initialize actual SonarDataProcessor 
-    processor = SonarDataProcessor(IMAGE_PROCESSING_CONFIG)
-    processor_config = {
-        'processor_type': 'SonarDataProcessor',
-        'config': IMAGE_PROCESSING_CONFIG,
-        'tracking_enabled': True
-    }
-    result2 = visualizer.step_2_processor_initialization(processor_config)
-    all_results.append(result2)
-    
-    # Convert to grayscale if needed
-    if len(frame.shape) == 3:
-        gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    else:
-        gray_frame = frame.copy()
-    
-    # Step 3: Use actual preprocessing from sonar_image_analysis
-    print("🔧 Using actual preprocess_edges() function...")
-    blurred, edges_proc = preprocess_edges(gray_frame, IMAGE_PROCESSING_CONFIG)
-    
-    preprocessing_params = {
-        'function_used': 'preprocess_edges',
-        'config': IMAGE_PROCESSING_CONFIG,
-        'blur_applied': True,
-        'edge_detection': 'Canny'
-    }
-    result3 = visualizer.step_3_roi_extraction(gray_frame, blurred, preprocessing_params)
-    all_results.append(result3)
-    
-    # Step 4: Edge detection result 
-    result4 = visualizer.step_4_preprocessing(blurred, edges_proc, preprocessing_params)
-    all_results.append(result4)
-    
-    # Step 5: Use actual contour detection and selection
-    print("🔧 Using actual select_best_contour_core() function...")
-    contours, _ = cv2.findContours(edges_proc, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-    
-    # Use the real contour selection function
-    best_contour, contour_features, selection_stats = select_best_contour_core(
-        contours, 
-        last_center=None, 
-        aoi=None, 
-        cfg_img=IMAGE_PROCESSING_CONFIG
-    )
-    
-    analysis_params = {
-        'function_used': 'select_best_contour_core',
-        'total_contours_found': len(contours),
-        'selection_method': 'real_algorithm',
-        'config': IMAGE_PROCESSING_CONFIG
-    }
-    result5 = visualizer.step_5_contour_detection_and_analysis(edges_proc, contours, best_contour, analysis_params)
-    all_results.append(result5)
-    
-    # Step 6: Use actual geometric analysis functions
-    ellipse_data = {}
-    distance_data = {}
-    
-    if best_contour is not None:
-        print("🔧 Using actual compute_contour_features() and _distance_angle_from_contour() functions...")
-        
-        # Use real feature computation
-        if contour_features is None:
-            contour_features = compute_contour_features(best_contour)
-        
-        # Use real distance/angle calculation
-        H, W = gray_frame.shape
-        distance_pixels, angle_degrees = _distance_angle_from_contour(best_contour, W, H)
-        
-        # Convert to real-world coordinates if extent provided
-        distance_meters = None
-        if distance_pixels is not None and extent is not None:
-            x_min, x_max, y_min, y_max = extent
-            height_m = y_max - y_min
-            px2m_y = height_m / H
-            distance_meters = y_min + distance_pixels * px2m_y
-        
-        # Ellipse fitting (if possible)
-        if len(best_contour) >= 5:
-            try:
-                ellipse = cv2.fitEllipse(best_contour)
-                (cx, cy), (minor, major), angle = ellipse
-                
-                # Calculate major axis line (rotated 90 degrees)
-                angle_rad = np.radians(angle + 90)
-                half_major = major * 0.5
-                p1 = (int(cx + half_major * np.cos(angle_rad)), int(cy + half_major * np.sin(angle_rad)))
-                p2 = (int(cx - half_major * np.cos(angle_rad)), int(cy - half_major * np.sin(angle_rad)))
-                
-                ellipse_data = {
-                    'ellipse': ellipse,
-                    'center': (cx, cy),
-                    'major_axis_line': (p1, p2),
-                    'angle': angle,
-                    'aspect_ratio': minor/major if major > 0 else 0
-                }
-            except cv2.error as e:
-                print(f"Ellipse fitting failed: {e}")
-                ellipse_data = {'error': str(e)}
-        
-        distance_data = {
-            'distance_pixels': distance_pixels,
-            'angle_degrees': angle_degrees,
-            'distance_meters': distance_meters,
-            'function_used': '_distance_angle_from_contour'
-        }
-        if distance_pixels is not None:
-            distance_data['distance_point'] = (W // 2, int(distance_pixels))
-    
-    # Handle best_contour safely - avoid numpy array truth value ambiguity
-    contour_for_analysis = best_contour if best_contour is not None else np.array([])
-    result6 = visualizer.step_6_geometric_analysis(gray_frame, contour_for_analysis, 
-                                                  ellipse_data, distance_data)
-    all_results.append(result6)
-    
-    # Step 7: Final output - use actual processor analyze_frame method
-    print("🔧 Using actual SonarDataProcessor.analyze_frame() method...")
-    final_analysis = processor.analyze_frame(gray_frame, extent)
-    
-    # Convert FrameAnalysisResult to dictionary for compatibility
-    analysis_results = {
-        'detection_found': final_analysis.detection_success,
-        'distance_pixels': final_analysis.distance_pixels,
-        'angle_degrees': final_analysis.angle_degrees, 
-        'distance_meters': final_analysis.distance_meters,
-        'contour_features': final_analysis.contour_features,
-        'tracking_status': final_analysis.tracking_status,
-        'processing_time': 0.0,  # Would need timing if required
-        'processor_used': 'SonarDataProcessor.analyze_frame'
-    }
-    
-    result7 = visualizer.step_7_final_output_generation(frame, gray_frame, analysis_results)
-    all_results.append(result7)
-    
-    # Generate summary
-    print("\nGenerating Pipeline Summary...")
-    summary = visualizer.generate_pipeline_summary(all_results)
-    
-    return {
-        'all_step_results': all_results,
-        'summary': summary,
-        'final_frame': gray_frame,
-        'analysis_results': analysis_results,
-        'processor_result': final_analysis,  # Include the actual FrameAnalysisResult
-        'real_functions_used': [
-            'preprocess_edges',
-            'select_best_contour_core', 
-            'compute_contour_features',
-            '_distance_angle_from_contour',
-            'SonarDataProcessor.analyze_frame'
-        ]
-    }
+    visualizer = PipelineVisualizer()
+    return visualizer.run_complete_pipeline_analysis(npz_data_path, output_dir, npz_file_index)
 
 
-# Example usage functions
-def load_sample_frame(frame_path: str = None) -> np.ndarray:
-    """
-    Load a sample sonar frame for demonstration
-    
-    Args:
-        frame_path: Path to frame image, if None creates a synthetic frame
-        
-    Returns:
-        Sample frame array
-    """
-    if frame_path and cv2.imread(frame_path) is not None:
-        return cv2.imread(frame_path, cv2.IMREAD_GRAYSCALE)
-    else:
-        # Create synthetic sonar frame for demonstration
-        frame = np.zeros((400, 600), dtype=np.uint8)
-        
-        # Add some noise
-        noise = np.random.normal(20, 10, frame.shape).astype(np.uint8)
-        frame = cv2.add(frame, noise)
-        
-        # Add some objects (ellipses to simulate fish/nets)
-        cv2.ellipse(frame, (150, 250), (30, 15), 45, 0, 360, 180, -1)
-        cv2.ellipse(frame, (450, 180), (25, 10), -30, 0, 360, 200, -1)
-        cv2.ellipse(frame, (300, 320), (40, 20), 0, 0, 360, 160, -1)
-        
-        # Add some linear features (ropes/nets)
-        cv2.line(frame, (100, 100), (500, 150), 120, 3)
-        cv2.line(frame, (200, 350), (400, 300), 140, 2)
-        
-        return frame
+if __name__ == "__main__":
+    # Example usage
+    results = run_pipeline_analysis()
