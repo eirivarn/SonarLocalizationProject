@@ -244,7 +244,7 @@ class PipelineVisualizer:
         
         # Enhanced edges with momentum merging
         axes[2].imshow(edges_proc, cmap='gray', aspect='auto')
-        axes[2].set_title('Enhanced Edges\\n(with Momentum Merge)', fontweight='bold')
+        axes[2].set_title('Enhanced Edges (with Momentum Merge)', fontweight='bold')
         axes[2].set_xlabel('Lateral (pixels)')
         axes[2].set_ylabel('Range (pixels)')
         
@@ -666,6 +666,115 @@ def run_pipeline_analysis(npz_data_path: str = "/Volumes/LaCie/SOLAQUA/exports/o
     return visualizer.run_complete_pipeline_analysis(npz_data_path, output_dir, npz_file_index)
 
 
+def test_adaptive_merging_parameters(npz_data_path: str = "/Volumes/LaCie/SOLAQUA/exports/outputs",
+                                    npz_file_index: int = 0,
+                                    save_dir: str = "/tmp") -> None:
+    """
+    Test different parameter combinations for adaptive linear merging.
+    
+    This function loads a frame and shows comparison of different parameter settings:
+    1. Original frame
+    2. Conservative settings (low elongation)
+    3. Balanced settings (default)
+    4. Aggressive settings (high elongation)
+    
+    Args:
+        npz_data_path: Path to NPZ data files
+        npz_file_index: Index of file to test
+        save_dir: Directory to save comparison images
+    """
+    from .sonar_image_analysis import adaptive_linear_momentum_merge_fast, preprocess_edges
+    import matplotlib.pyplot as plt
+    
+    print("🧪 Testing Adaptive Linear Merging Parameter Combinations")
+    print("=" * 60)
+    
+    # Load test data
+    visualizer = PipelineVisualizer()
+    data_loaded = visualizer.load_data(npz_data_path, npz_file_index)
+    
+    if not data_loaded or visualizer.current_frame is None:
+        print("❌ Could not load test data")
+        return
+    
+    frame = visualizer.current_frame
+    print(f"📊 Test frame shape: {frame.shape}")
+    
+    # Test different parameter combinations
+    test_configs = [
+        {"base_radius": 1, "max_elongation": 2, "linearity_threshold": 0.4, "name": "Conservative"},
+        {"base_radius": 2, "max_elongation": 4, "linearity_threshold": 0.3, "name": "Balanced (Default)"},
+        {"base_radius": 3, "max_elongation": 6, "linearity_threshold": 0.2, "name": "Aggressive"},
+    ]
+    
+    for i, config in enumerate(test_configs):
+        print(f"\n🔬 Testing configuration: {config['name']}")
+        
+        # Apply adaptive linear merging with these parameters
+        print("   Running adaptive linear merging...")
+        enhanced = adaptive_linear_momentum_merge_fast(
+            frame,
+            base_radius=config["base_radius"],
+            max_elongation=config["max_elongation"], 
+            linearity_threshold=config["linearity_threshold"],
+            momentum_boost=10.0,
+            angle_steps=9
+        )
+        
+        # Create comparison figure
+        fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+        fig.suptitle(f'Adaptive Linear Merging: {config["name"]} Configuration', 
+                    fontsize=16, fontweight='bold')
+        
+        # Original frame
+        axes[0, 0].imshow(frame, cmap='viridis', aspect='auto')
+        axes[0, 0].set_title('Original Frame', fontweight='bold')
+        axes[0, 0].set_xlabel('Lateral (pixels)')
+        axes[0, 0].set_ylabel('Range (pixels)')
+        
+        # Enhanced frame
+        axes[0, 1].imshow(enhanced, cmap='viridis', aspect='auto')
+        axes[0, 1].set_title(f'Enhanced Frame\\n'
+                           f'radius={config["base_radius"]}, elongation={config["max_elongation"]}, '
+                           f'threshold={config["linearity_threshold"]}', fontweight='bold')
+        axes[0, 1].set_xlabel('Lateral (pixels)')
+        axes[0, 1].set_ylabel('Range (pixels)')
+        
+        # Edge detection comparison
+        import cv2
+        original_edges = cv2.Canny(frame, 60, 180)
+        enhanced_edges = cv2.Canny(enhanced, 60, 180)
+        
+        axes[1, 0].imshow(original_edges, cmap='gray', aspect='auto')
+        axes[1, 0].set_title('Original Edges', fontweight='bold')
+        axes[1, 0].set_xlabel('Lateral (pixels)')
+        axes[1, 0].set_ylabel('Range (pixels)')
+        
+        axes[1, 1].imshow(enhanced_edges, cmap='gray', aspect='auto')
+        axes[1, 1].set_title('Enhanced Edges', fontweight='bold')
+        axes[1, 1].set_xlabel('Lateral (pixels)')
+        axes[1, 1].set_ylabel('Range (pixels)')
+        
+        plt.tight_layout()
+        
+        # Save comparison
+        save_path = f"{save_dir}/adaptive_merging_test_{config['name'].lower().replace(' ', '_')}.png"
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"   ✅ Saved comparison: {save_path}")
+        
+        plt.show()
+    
+    print(f"\n🎯 Testing complete! Check {save_dir} for comparison images.")
+    print("\n💡 Parameter tuning guide:")
+    print("   - adaptive_base_radius: Controls base merging distance (1-5)")
+    print("   - adaptive_max_elongation: Max ellipse elongation (2-8)")  
+    print("   - adaptive_linearity_threshold: Sensitivity to linear patterns (0.1-0.5)")
+    print("   - momentum_boost: Enhancement strength (1-20)")
+
+
 if __name__ == "__main__":
     # Example usage
-    results = run_pipeline_analysis()
+    # results = run_pipeline_analysis()
+    
+    # Test the adaptive merging parameters
+    test_adaptive_merging_parameters()

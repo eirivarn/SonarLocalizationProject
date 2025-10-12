@@ -74,35 +74,58 @@ class ConeGridSpec:
     img_h: int = CONE_H_DEFAULT
 
 # --- Image-analysis / contour-detection defaults (moved from sonar_image_analysis) ---
-# Core image processing configuration - NO BLURRING, sharp objects
+# Core image processing configuration using adaptive linear merging
 IMAGE_PROCESSING_CONFIG: Dict = {
-    # Momentum merging (core feature) - connects net parts
-    'use_momentum_merging': True,
-    'momentum_search_radius': 1,
-    'momentum_threshold': 0.1,
-    'momentum_decay': 0.9,
-    'momentum_boost': 10.0,
     
-    # Sharp edge detection - NO BLUR
-    'canny_low_threshold': 60,
-    'canny_high_threshold': 180,
-    'min_contour_area': 200,
-    'morph_close_kernel': 3,       # Minimal closing to connect very close edges
-    'edge_dilation_iterations': 1,
+    # === ADAPTIVE LINEAR MERGING ===
+    # Revolutionary approach: adapts merging kernel from circular to elliptical based on detected linearity
+    # This is the core enhancement system for detecting nets, ropes, and other linear structures
     
-    # === PIXEL OWNERSHIP TRACKING TOGGLE ===
-    'use_pixel_ownership': False,   # MASTER SWITCH: Enable/disable pixel ownership tracking system
-                                   # Set to False to disable object separation and speed up processing
-                                   # 
-                                   # TRUE  = Prevents fish/debris from merging with net (slower, more accurate)
-                                   # FALSE = Faster processing but objects may merge together
-                                   #
-                                   # You can change this setting dynamically:
-                                   # IMAGE_PROCESSING_CONFIG['use_pixel_ownership'] = False  # for speed
-                                   # IMAGE_PROCESSING_CONFIG['use_pixel_ownership'] = True   # for accuracy
-}
-
-# Tracking and AOI configuration
+    'adaptive_base_radius': 2,           # ✅ Base circular merging radius (1-5 pixels typical)
+                                        # Starting radius for circular kernel before elongation
+                                        # Larger values = more aggressive base merging
+    
+    'adaptive_max_elongation': 4,        # ✅ Maximum elongation factor (1.0-8.0 typical)
+                                        # 1.0 = always circular, 4.0 = ellipse can be 4x longer than wide
+                                        # Higher values = stronger linear feature enhancement
+    
+    'adaptive_linearity_threshold': 0.3, # ✅ Minimum linearity to trigger elongation (0.0-1.0)
+                                        # Lower values = more pixels get elliptical kernels (more sensitive)
+                                        # Higher values = only very linear patterns get elongated (selective)
+    
+    'adaptive_angle_steps': 9,           # ✅ Number of angles tested for linearity (6-18 typical)
+                                        # Uses 20° increments for optimal speed/quality balance
+                                        # More steps = better angle resolution but slower processing
+    
+    'momentum_boost': 10.0,             # ✅ Enhancement strength multiplier (1.0-20.0 typical)
+                                        # Higher values = stronger directional feature enhancement
+                                        # Lower values = more subtle enhancement, preserves original intensities
+    
+    # === CANNY EDGE DETECTION ===
+    # Sharp edge detection parameters - NO GAUSSIAN BLUR applied before Canny
+    'canny_low_threshold': 60,          # Lower threshold for Canny edge detection (0-255)
+                                        # Lower values = more edges detected (including noise)
+                                        # Higher values = only strong edges detected
+    
+    'canny_high_threshold': 180,        # Upper threshold for Canny edge detection (0-255)  
+                                        # Ratio with low_threshold should be 2:1 to 3:1
+                                        # Edges above high_threshold = definitely edges
+                                        # Edges between low/high = edges if connected to strong edges
+    
+    # === CONTOUR FILTERING ===
+    'min_contour_area': 200,            # Minimum contour area in pixels to be considered valid
+                                        # Filters out small noise artifacts and debris
+                                        # Typical net sections are >>200 pixels
+    
+    # === MORPHOLOGICAL POST-PROCESSING ===
+    'morph_close_kernel': 3,            # Kernel size for morphological closing (connects nearby edges)
+                                        # 0 = no closing, 3-5 = light closing, >5 = aggressive closing
+                                        # Helps connect broken parts of net structures
+    
+    'edge_dilation_iterations': 1,      # Number of dilation iterations on final edges (0-3 typical)
+                                        # Makes detected edges slightly thicker for better contour detection
+                                        # 0 = no dilation, 1 = thin edges, 2+ = thick edges
+}# Tracking and AOI configuration
 TRACKING_CONFIG: Dict = {
     'aoi_boost_factor': 2.0,  # Reasonable boost for contours inside AOI
     'aoi_expansion_pixels': 1,

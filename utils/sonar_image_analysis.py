@@ -446,122 +446,411 @@ def select_best_contour_core(contours, last_center=None, aoi=None, cfg_img=IMAGE
 
 # ============================ Momentum vs Blur (shared) ============================
 
-def directional_momentum_merge(frame, search_radius=3, momentum_threshold=0.2,
-                               momentum_decay=0.8, momentum_boost=1.5):
+def create_oriented_gradient_kernel(angle_degrees, size):
     """
-    Enhanced directional momentum merge that ignores signal strength considerations.
-    Focuses purely on structural directional enhancement for better sonar processing.
+    Create gradient kernel oriented at specific angle for linearity detection.
     
-    Key improvements:
-    - Signal strength agnostic processing
-    - Multiple scale enhancement  
-    - Adaptive kernel sizing
-    - Exponential boost curves to avoid saturation
-    - No thresholding based on energy levels
+    Args:
+        angle_degrees: Orientation angle in degrees (0-180)
+        size: Kernel size (should be odd)
+    
+    Returns:
+        2D numpy array representing the oriented gradient kernel
+    """
+    if size % 2 == 0:
+        size += 1  # Ensure odd size
+    
+    center = size // 2
+    kernel = np.zeros((size, size), dtype=np.float32)
+    
+    # Convert angle to radians
+    angle_rad = np.radians(angle_degrees)
+    
+    # Create oriented gradient using direction vector
+    dx = np.cos(angle_rad)
+    dy = np.sin(angle_rad)
+    
+    for i in range(size):
+        for j in range(size):
+            # Distance from center
+            y_offset = i - center
+            x_offset = j - center
+            
+            # Project offset onto the gradient direction
+            projection = x_offset * dx + y_offset * dy
+            
+            # Create gradient weights (positive on one side, negative on other)
+            if abs(projection) < 0.5:  # Center line
+                kernel[i, j] = 0
+            elif projection > 0:
+                kernel[i, j] = 1.0 / (1.0 + abs(projection) * 0.5)
+            else:
+                kernel[i, j] = -1.0 / (1.0 + abs(projection) * 0.5)
+    
+    # Normalize to have zero sum (gradient property)
+    kernel = kernel - np.mean(kernel)
+    
+    return kernel
+
+def create_elliptical_kernel(base_radius, elongation_factor, angle_degrees):
+    """
+    Create elliptical merging kernel with given elongation and orientation.
+    
+    Args:
+        base_radius: Base radius for the circular component
+        elongation_factor: How much to elongate (1.0 = circle, >1.0 = ellipse)
+        angle_degrees: Orientation angle in degrees
+    
+    Returns:
+        2D numpy array representing the elliptical kernel
+    """
+    # Kernel size based on elongated radius
+    elongated_radius = int(base_radius * elongation_factor)
+    size = 2 * elongated_radius + 1
+    center = size // 2
+    
+    kernel = np.zeros((size, size), dtype=np.float32)
+    
+    # Convert angle to radians
+    angle_rad = np.radians(angle_degrees)
+    cos_a = np.cos(angle_rad)
+    sin_a = np.sin(angle_rad)
+    
+    # Semi-axes of ellipse
+    a = elongated_radius  # Major axis (elongated direction)
+    b = base_radius       # Minor axis (original radius)
+    
+    for i in range(size):
+        for j in range(size):
+            # Offset from center
+            y_offset = i - center
+            x_offset = j - center
+            
+            # Rotate coordinates to align with ellipse
+            x_rot = x_offset * cos_a + y_offset * sin_a
+            y_rot = -x_offset * sin_a + y_offset * cos_a
+            
+            # Ellipse equation: (x/a)^2 + (y/b)^2 <= 1
+            ellipse_dist = (x_rot / a) ** 2 + (y_rot / b) ** 2
+            
+            if ellipse_dist <= 1.0:
+                # Weight decreases with distance from center
+                weight = 1.0 / (1.0 + ellipse_dist * 2.0)
+                kernel[i, j] = weight
+    
+    # Normalize kernel
+    if np.sum(kernel) > 0:
+        kernel = kernel / np.sum(kernel)
+    
+    return kernel
+
+def create_circular_kernel(radius):
+    """
+    Create circular merging kernel.
+    
+    Args:
+        radius: Radius of the circular kernel
+    
+    Returns:
+        2D numpy array representing the circular kernel
+    """
+    size = 2 * radius + 1
+    center = radius
+    kernel = np.zeros((size, size), dtype=np.float32)
+    
+    for i in range(size):
+        for j in range(size):
+            # Distance from center
+            dist = np.sqrt((i - center) ** 2 + (j - center) ** 2)
+            
+            if dist <= radius:
+                # Weight decreases with distance from center
+                weight = 1.0 / (1.0 + dist * 0.5)
+                kernel[i, j] = weight
+    
+    # Normalize kernel
+    if np.sum(kernel) > 0:
+        kernel = kernel / np.sum(kernel)
+    
+    return kernel
+
+def extract_patch(image, center_x, center_y, patch_shape):
+    """
+    Extract a patch from image centered at given coordinates.
+    Handles boundary conditions by padding with zeros.
+    
+    Args:
+        image: Source image
+        center_x, center_y: Center coordinates
+        patch_shape: (height, width) of desired patch
+    
+    Returns:
+        Extracted patch, zero-padded if necessary
+    """
+    h, w = image.shape
+    patch_h, patch_w = patch_shape
+    
+    # Calculate patch boundaries
+    half_h = patch_h // 2
+    half_w = patch_w // 2
+    
+    # Source boundaries
+    src_y1 = max(0, center_y - half_h)
+    src_y2 = min(h, center_y + half_h + 1)
+    src_x1 = max(0, center_x - half_w)
+    src_x2 = min(w, center_x + half_w + 1)
+    
+    # Destination boundaries in patch
+    dst_y1 = max(0, half_h - center_y)
+    dst_y2 = dst_y1 + (src_y2 - src_y1)
+    dst_x1 = max(0, half_w - center_x)
+    dst_x2 = dst_x1 + (src_x2 - src_x1)
+    
+    # Create patch and copy data
+    patch = np.zeros(patch_shape, dtype=image.dtype)
+    patch[dst_y1:dst_y2, dst_x1:dst_x2] = image[src_y1:src_y2, src_x1:src_x2]
+    
+    return patch
+
+def adaptive_linear_momentum_merge_fast(frame, base_radius=2, max_elongation=4, 
+                                       linearity_threshold=0.3, momentum_boost=1.5,
+                                       angle_steps=9):
+    """
+    FAST version of adaptive linear merging with major optimizations:
+    
+    Speed optimizations:
+    - Reduced angle steps (9 instead of 18 = 20° increments)
+    - Vectorized operations instead of pixel-by-pixel loops
+    - Pre-computed kernels with caching
+    - Downsampled linearity detection with upsampling
+    - Simplified ellipse generation
+    
+    Maintains core functionality:
+    - Detects linear patterns in multiple directions
+    - Adapts circular → elliptical merging based on linearity
+    - Preserves enhancement quality for net detection
+    
+    Args:
+        frame: Input sonar frame (uint8)
+        base_radius: Base circular merging radius (pixels)
+        max_elongation: Maximum elongation factor for ellipse
+        linearity_threshold: Minimum linearity to trigger elongation
+        momentum_boost: Enhancement strength multiplier
+        angle_steps: Number of angles (reduced for speed)
+    
+    Returns:
+        Enhanced frame with adaptive linear merging applied
     """
     
-    # Convert to float32 for better precision during processing
     result = frame.astype(np.float32)
+    h, w = frame.shape
     
-    # Multi-scale kernel generation based on search_radius
-    kernel_scales = [1, 2, 3] if search_radius > 2 else [1, 2]
+    # OPTIMIZATION 1: Reduced angle resolution for speed
+    angles = np.linspace(0, 180, angle_steps, endpoint=False)  # 20° increments instead of 10°
     
-    all_responses = []
+    # OPTIMIZATION 2: Downsampled linearity detection (2x downscale)
+    scale_factor = 2
+    h_small = h // scale_factor
+    w_small = w // scale_factor
     
-    for scale in kernel_scales:
-        kernel_size = max(3, scale * 2 + 1)
-        center = kernel_size // 2
-        
-        # Create stronger directional kernels
-        h_kernel = np.zeros((kernel_size, kernel_size), dtype=np.float32)
-        v_kernel = np.zeros((kernel_size, kernel_size), dtype=np.float32)
-        d1_kernel = np.zeros((kernel_size, kernel_size), dtype=np.float32)
-        d2_kernel = np.zeros((kernel_size, kernel_size), dtype=np.float32)
-        
-        # Enhanced horizontal kernel with stronger center weighting
-        for i in range(kernel_size):
-            weight = 1.0 / (1.0 + abs(i - center) * 0.5)
-            h_kernel[center, i] = weight
-        h_kernel = h_kernel / np.sum(h_kernel)  # Normalize
-        
-        # Enhanced vertical kernel
-        for i in range(kernel_size):
-            weight = 1.0 / (1.0 + abs(i - center) * 0.5)
-            v_kernel[i, center] = weight
-        v_kernel = v_kernel / np.sum(v_kernel)  # Normalize
-        
-        # Enhanced diagonal kernels
-        for i in range(kernel_size):
-            for j in range(kernel_size):
-                if i == j:  # Main diagonal
-                    weight = 1.0 / (1.0 + abs(i - center) * 0.5)
-                    d1_kernel[i, j] = weight
-                if i + j == kernel_size - 1:  # Anti-diagonal
-                    weight = 1.0 / (1.0 + abs(i - center) * 0.5)
-                    d2_kernel[i, j] = weight
-        
-        d1_kernel = d1_kernel / np.sum(d1_kernel) if np.sum(d1_kernel) > 0 else d1_kernel
-        d2_kernel = d2_kernel / np.sum(d2_kernel) if np.sum(d2_kernel) > 0 else d2_kernel
-        
-        # Apply directional filters
-        h_response = cv2.filter2D(result, -1, h_kernel)
-        v_response = cv2.filter2D(result, -1, v_kernel)
-        d1_response = cv2.filter2D(result, -1, d1_kernel)
-        d2_response = cv2.filter2D(result, -1, d2_kernel)
-        
-        # Take maximum response for this scale
-        scale_response = np.maximum.reduce([h_response, v_response, d1_response, d2_response])
-        all_responses.append(scale_response)
+    if h_small < base_radius * 2 or w_small < base_radius * 2:
+        # Frame too small for downsampling, use simple circular convolution
+        circular_kernel = create_circular_kernel_fast(base_radius)
+        enhanced = cv2.filter2D(result, -1, circular_kernel)
+        final_result = result + momentum_boost * enhanced
+        return np.clip(final_result, 0, 255).astype(np.uint8)
     
-    # Combine multi-scale responses using weighted average
-    if len(all_responses) == 1:
-        enhanced = all_responses[0]
+    # Downsample frame for linearity detection
+    frame_small = cv2.resize(result, (w_small, h_small), interpolation=cv2.INTER_AREA)
+    
+    # OPTIMIZATION 3: Pre-compute and cache gradient kernels
+    kernel_size = max(3, base_radius + 1)
+    gradient_kernels = []
+    for angle in angles:
+        kernel = create_oriented_gradient_kernel_fast(angle, kernel_size)
+        gradient_kernels.append(kernel)
+    
+    # OPTIMIZATION 4: Vectorized linearity detection on downsampled image
+    linearity_responses = []
+    for kernel in gradient_kernels:
+        response = np.abs(cv2.filter2D(frame_small, -1, kernel))
+        linearity_responses.append(response)
+    
+    # Find best direction and linearity strength for each pixel (vectorized)
+    linearity_stack = np.stack(linearity_responses, axis=0)  # Shape: (angles, h_small, w_small)
+    best_angle_indices = np.argmax(linearity_stack, axis=0)
+    linearity_map_small = np.max(linearity_stack, axis=0)
+    
+    # Normalize linearity map
+    max_linearity = np.max(linearity_map_small)
+    if max_linearity > 0:
+        linearity_map_small = linearity_map_small / max_linearity
+    
+    # OPTIMIZATION 5: Upsample linearity map back to full resolution
+    linearity_map = cv2.resize(linearity_map_small, (w, h), interpolation=cv2.INTER_LINEAR)
+    direction_map = cv2.resize(best_angle_indices.astype(np.float32), (w, h), interpolation=cv2.INTER_NEAREST)
+    
+    # Convert direction indices back to angles
+    direction_map = angles[direction_map.astype(int)]
+    
+    # OPTIMIZATION 6: Simplified kernel-based enhancement
+    # Pre-compute common kernels
+    circular_kernel = create_circular_kernel_fast(base_radius)
+    
+    # Create binary mask for linear regions (vectorized)
+    linear_mask = linearity_map > linearity_threshold
+    
+    if np.sum(linear_mask) == 0:
+        # No linear patterns detected, use simple circular convolution
+        enhanced = cv2.filter2D(result, -1, circular_kernel)
     else:
-        # Weight larger scales more heavily for better long-range detection
-        weights = np.array([1.0, 1.5, 2.0][:len(all_responses)])
-        weights = weights / np.sum(weights)
-        enhanced = np.zeros_like(all_responses[0])
-        for i, response in enumerate(all_responses):
-            enhanced += weights[i] * response
+        # OPTIMIZATION 7: Process only a representative set of elliptical orientations
+        unique_angles = np.unique(direction_map[linear_mask])
+        ellipse_kernels = {}
+        
+        # Pre-compute elliptical kernels for detected angles
+        for angle in unique_angles:
+            if not np.isnan(angle):
+                # Use simplified ellipse with average elongation
+                avg_elongation = 1 + (max_elongation - 1) * np.mean(linearity_map[linear_mask])
+                kernel = create_elliptical_kernel_fast(base_radius, avg_elongation, angle)
+                ellipse_kernels[angle] = kernel
+        
+        # OPTIMIZATION 8: Region-based processing instead of pixel-by-pixel
+        enhanced = cv2.filter2D(result, -1, circular_kernel)  # Base enhancement
+        
+        # Apply elliptical enhancement only to linear regions
+        for angle, ellipse_kernel in ellipse_kernels.items():
+            # Create mask for this specific angle
+            angle_mask = (np.abs(direction_map - angle) < 1e-3) & linear_mask
+            
+            if np.sum(angle_mask) > 0:
+                # Apply elliptical convolution
+                ellipse_enhanced = cv2.filter2D(result, -1, ellipse_kernel)
+                
+                # Blend based on linearity strength
+                blend_weights = linearity_map * angle_mask.astype(np.float32)
+                enhanced = enhanced * (1 - blend_weights) + ellipse_enhanced * blend_weights
     
-    # Apply exponential boost curve to avoid saturation
-    # This replaces the old linear boost with signal strength considerations
-    normalized_enhanced = enhanced / 255.0
+    # Final enhancement combination
+    final_result = result + momentum_boost * enhanced
     
-    # Exponential boost function: more aggressive for weaker signals, 
-    # but doesn't rely on signal strength thresholds
-    exp_boost = momentum_boost * (1.0 - np.exp(-2.0 * normalized_enhanced))
+    # Fast soft clipping
+    final_result = np.clip(final_result, 0, 255 * (1 + momentum_boost * 0.3))
+    final_result = 255 * np.tanh(final_result / 255)
     
-    # Combine original and enhanced with exponential weighting
-    final_result = result + exp_boost * enhanced
+    return np.clip(final_result, 0, 255).astype(np.uint8)
+
+def create_oriented_gradient_kernel_fast(angle_degrees, size):
+    """Fast simplified gradient kernel creation."""
+    if size % 2 == 0:
+        size += 1
     
-    # Soft clipping to allow stronger enhancement while avoiding hard saturation
-    max_val = 255.0 * (1.0 + momentum_boost * 0.5)  # Allow temporary overflow
-    soft_clipped = max_val * np.tanh(final_result / max_val)
+    center = size // 2
+    kernel = np.zeros((size, size), dtype=np.float32)
     
-    # Final normalization back to [0, 255]
-    final_normalized = 255.0 * (soft_clipped / np.max(soft_clipped)) if np.max(soft_clipped) > 0 else soft_clipped
+    # Simplified gradient using Sobel-like pattern
+    angle_rad = np.radians(angle_degrees)
+    cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
     
-    return np.clip(final_normalized, 0, 255).astype(np.uint8)
+    # Create simple 3-point gradient along the direction
+    if size >= 3:
+        # Use only center line for speed
+        for i in range(size):
+            offset = i - center
+            if abs(offset) <= 1:
+                kernel[center, i] = offset * cos_a
+        
+        for i in range(size):
+            offset = i - center  
+            if abs(offset) <= 1:
+                kernel[i, center] += offset * sin_a
+    
+    # Ensure zero sum
+    kernel = kernel - np.mean(kernel)
+    return kernel
+
+def create_circular_kernel_fast(radius):
+    """Fast circular kernel with simplified weights."""
+    size = 2 * radius + 1
+    center = radius
+    y, x = np.ogrid[:size, :size]
+    
+    # Distance from center
+    dist = np.sqrt((x - center)**2 + (y - center)**2)
+    
+    # Simple step function instead of smooth falloff
+    kernel = (dist <= radius).astype(np.float32)
+    
+    # Normalize
+    return kernel / np.sum(kernel) if np.sum(kernel) > 0 else kernel
+
+def create_elliptical_kernel_fast(base_radius, elongation_factor, angle_degrees):
+    """Fast elliptical kernel with simplified computation."""
+    # Simplified ellipse - just stretch circular kernel
+    elongated_radius = int(base_radius * elongation_factor)
+    size = 2 * elongated_radius + 1
+    center = size // 2
+    
+    # Create basic ellipse
+    y, x = np.ogrid[:size, :size]
+    y_c, x_c = y - center, x - center
+    
+    # Rotate coordinates
+    angle_rad = np.radians(angle_degrees)
+    cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
+    
+    x_rot = x_c * cos_a + y_c * sin_a
+    y_rot = -x_c * sin_a + y_c * cos_a
+    
+    # Ellipse equation (simplified)
+    ellipse_dist = (x_rot / elongated_radius) ** 2 + (y_rot / base_radius) ** 2
+    kernel = (ellipse_dist <= 1.0).astype(np.float32)
+    
+    # Normalize
+    return kernel / np.sum(kernel) if np.sum(kernel) > 0 else kernel
 
 def preprocess_edges(frame_u8: np.ndarray, cfg=IMAGE_PROCESSING_CONFIG) -> Tuple[np.ndarray, np.ndarray]:
-    proc = directional_momentum_merge(
+    """
+    Preprocess sonar frame for edge detection using adaptive linear merging.
+    
+    Applies fast adaptive linear merging to enhance directional features (nets, ropes)
+    by adapting kernel shape from circular to elliptical based on local linearity.
+    
+    Args:
+        frame_u8: Input sonar frame (uint8)
+        cfg: Configuration dictionary with processing parameters
+        
+    Returns:
+        Tuple of (raw_edges, processed_edges) from Canny edge detection
+    """
+    # Apply fast adaptive linear merging for directional enhancement
+    proc = adaptive_linear_momentum_merge_fast(
         frame_u8,
-        search_radius=cfg.get('momentum_search_radius', 3),
-        momentum_threshold=cfg.get('momentum_threshold', 0.2),
-        momentum_decay=cfg.get('momentum_decay', 0.8),
+        base_radius=cfg.get('adaptive_base_radius', 2),
+        max_elongation=cfg.get('adaptive_max_elongation', 4),
+        linearity_threshold=cfg.get('adaptive_linearity_threshold', 0.3),
         momentum_boost=cfg.get('momentum_boost', 1.5),
+        angle_steps=cfg.get('adaptive_angle_steps', 9)
     )
+    
+    # Apply Canny edge detection to enhanced frame
     edges = cv2.Canny(proc, cfg.get('canny_low_threshold', 50), cfg.get('canny_high_threshold', 150))
+    
+    # Post-process edges with morphological operations
     mks = int(cfg.get('morph_close_kernel', 0))
     dil = int(cfg.get('edge_dilation_iterations', 0))
     out = edges
+    
     if mks > 0:
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (mks, mks))
         out = cv2.morphologyEx(out, cv2.MORPH_CLOSE, kernel)
+    
     if dil > 0:
         kernel2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
         out = cv2.dilate(out, kernel2, iterations=dil)
+    
+    return edges, out
     return edges, out
 
 # ============================ Contour features & scoring ============================
