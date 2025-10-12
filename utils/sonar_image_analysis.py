@@ -614,21 +614,14 @@ def extract_patch(image, center_x, center_y, patch_shape):
 
 def adaptive_linear_momentum_merge_fast(frame, base_radius=2, max_elongation=4, 
                                        linearity_threshold=0.3, momentum_boost=1.5,
-                                       angle_steps=9):
+                                       angle_steps=9, use_cv2_enhancement=False, 
+                                       cv2_method='morphological', cv2_kernel_size=5):
     """
-    FAST version of adaptive linear merging with major optimizations:
+    FAST version of adaptive linear merging with optional OpenCV enhancement methods.
     
-    Speed optimizations:
-    - Reduced angle steps (9 instead of 18 = 20° increments)
-    - Vectorized operations instead of pixel-by-pixel loops
-    - Pre-computed kernels with caching
-    - Downsampled linearity detection with upsampling
-    - Simplified ellipse generation
-    
-    Maintains core functionality:
-    - Detects linear patterns in multiple directions
-    - Adapts circular → elliptical merging based on linearity
-    - Preserves enhancement quality for net detection
+    Two enhancement paths:
+    1. Custom Adaptive: Detects linearity and adapts circular → elliptical merging
+    2. OpenCV Specialized: Uses optimized CV2 methods for specific enhancement types
     
     Args:
         frame: Input sonar frame (uint8)
@@ -637,11 +630,19 @@ def adaptive_linear_momentum_merge_fast(frame, base_radius=2, max_elongation=4,
         linearity_threshold: Minimum linearity to trigger elongation
         momentum_boost: Enhancement strength multiplier
         angle_steps: Number of angles (reduced for speed)
+        use_cv2_enhancement: If True, use OpenCV methods instead
+        cv2_method: OpenCV method ('morphological', 'bilateral', 'gabor')
+        cv2_kernel_size: Size parameter for OpenCV methods
     
     Returns:
-        Enhanced frame with adaptive linear merging applied
+        Enhanced frame with adaptive linear merging or OpenCV enhancement applied
     """
     
+    # If using OpenCV enhancement, apply specialized method and return
+    if use_cv2_enhancement:
+        return apply_cv2_enhancement_method(frame, cv2_method, cv2_kernel_size)
+    
+    # Continue with original adaptive linear merging
     result = frame.astype(np.float32)
     h, w = frame.shape
     
@@ -770,6 +771,323 @@ def create_oriented_gradient_kernel_fast(angle_degrees, size):
     kernel = kernel - np.mean(kernel)
     return kernel
 
+def create_cv2_directional_kernel(angle_degrees, kernel_type='sobel', kernel_size=3):
+    """Create OpenCV-based directional kernels for fast gradient computation.
+    
+    Args:
+        angle_degrees: Direction angle in degrees (0-180)
+        kernel_type: Type of OpenCV kernel ('sobel', 'scharr', 'laplacian', 'roberts')
+        kernel_size: Size of kernel (3, 5, 7 for Sobel/Scharr, ignored for others)
+    
+    Returns:
+        tuple: (kernel_x, kernel_y) for directional gradient computation
+    """
+    
+    if kernel_type == 'sobel':
+        # Sobel kernels for X and Y gradients
+        if kernel_size == 3:
+            kx = np.array([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=np.float32)
+            ky = np.array([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=np.float32)
+        elif kernel_size == 5:
+            kx = np.array([[-1, -2, 0, 2, 1], 
+                          [-4, -8, 0, 8, 4],
+                          [-6, -12, 0, 12, 6],
+                          [-4, -8, 0, 8, 4],
+                          [-1, -2, 0, 2, 1]], dtype=np.float32) / 48.0
+            ky = kx.T
+        else:  # Default to 3x3
+            kx = np.array([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=np.float32)
+            ky = np.array([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=np.float32)
+            
+    elif kernel_type == 'scharr':
+        # Scharr kernels (more accurate than Sobel)
+        kx = np.array([[-3, 0, 3], [-10, 0, 10], [-3, 0, 3]], dtype=np.float32)
+        ky = np.array([[-3, -10, -3], [0, 0, 0], [3, 10, 3]], dtype=np.float32)
+        
+    elif kernel_type == 'roberts':
+        # Roberts cross-gradient kernels
+        kx = np.array([[1, 0], [0, -1]], dtype=np.float32)
+        ky = np.array([[0, 1], [-1, 0]], dtype=np.float32)
+        
+    elif kernel_type == 'laplacian':
+        # Laplacian kernel (second derivative, good for blobs)
+        kernel = np.array([[0, -1, 0], [-1, 4, -1], [0, -1, 0]], dtype=np.float32)
+        return kernel, kernel  # Same for both directions
+        
+    else:
+        raise ValueError(f"Unknown kernel_type: {kernel_type}")
+    
+    # Rotate kernels to desired angle
+    angle_rad = np.radians(angle_degrees)
+    cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
+    
+    # Combine X and Y gradients with rotation
+    kernel_rotated = cos_a * kx + sin_a * ky
+    kernel_orthogonal = -sin_a * kx + cos_a * ky
+    
+    return kernel_rotated, kernel_orthogonal
+
+def get_cv2_gradient_response(image, angle_degrees, kernel_type='sobel', kernel_size=3):
+    """Fast gradient response using OpenCV built-in kernels.
+    
+    Args:
+        image: Input image (grayscale)
+        angle_degrees: Direction to test (0-180)
+        kernel_type: OpenCV kernel type
+        kernel_size: Kernel size for applicable kernels
+        
+    Returns:
+        Gradient magnitude response in the specified direction
+    """
+    
+    if kernel_type == 'laplacian':
+        # Laplacian is rotation-invariant, just return magnitude
+        return cv2.Laplacian(image, cv2.CV_64F, ksize=kernel_size)
+    
+    # Get directional kernels
+    kx, ky = create_cv2_directional_kernel(angle_degrees, kernel_type, kernel_size)
+    
+    # Apply kernels
+    grad_x = cv2.filter2D(image, cv2.CV_64F, kx)
+    grad_y = cv2.filter2D(image, cv2.CV_64F, ky)
+    
+    # Return magnitude
+    return np.sqrt(grad_x**2 + grad_y**2)
+
+def apply_cv2_morphological_enhancement(image, operation='opening', kernel_shape='ellipse', kernel_size=(5, 5)):
+    """Apply OpenCV morphological operations for structure enhancement.
+    
+    Args:
+        image: Input image (uint8)
+        operation: Morphological operation ('opening', 'closing', 'tophat', 'blackhat')
+        kernel_shape: Kernel shape ('rect', 'ellipse', 'cross')
+        kernel_size: Kernel size (width, height)
+        
+    Returns:
+        Enhanced image with morphological processing applied
+    """
+    
+    # Create morphological kernel
+    if kernel_shape == 'ellipse':
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, kernel_size)
+    elif kernel_shape == 'rect':
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, kernel_size)
+    elif kernel_shape == 'cross':
+        kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, kernel_size)
+    else:
+        raise ValueError(f"Unknown kernel_shape: {kernel_shape}")
+    
+    # Apply morphological operation
+    if operation == 'opening':
+        # Remove noise, separate connected objects (good for cleaning up lines)
+        result = cv2.morphologyEx(image, cv2.MORPH_OPEN, kernel)
+    elif operation == 'closing':
+        # Fill gaps, connect nearby objects (good for broken nets)
+        result = cv2.morphologyEx(image, cv2.MORPH_CLOSE, kernel)
+    elif operation == 'tophat':
+        # Enhance bright features on dark background
+        result = cv2.morphologyEx(image, cv2.MORPH_TOPHAT, kernel)
+    elif operation == 'blackhat':
+        # Enhance dark features on bright background
+        result = cv2.morphologyEx(image, cv2.MORPH_BLACKHAT, kernel)
+    else:
+        raise ValueError(f"Unknown operation: {operation}")
+    
+    return result
+
+def apply_cv2_bilateral_enhancement(image, d=9, sigma_color=75, sigma_space=75):
+    """Apply bilateral filtering for edge-preserving noise reduction.
+    
+    Bilateral filter preserves edges while smoothing regions, making it excellent
+    for enhancing net structures while reducing sonar noise.
+    
+    Args:
+        image: Input image (uint8)
+        d: Diameter of pixel neighborhood
+        sigma_color: Filter sigma in color space
+        sigma_space: Filter sigma in coordinate space
+        
+    Returns:
+        Enhanced image with bilateral filtering applied
+    """
+    
+    return cv2.bilateralFilter(image, d, sigma_color, sigma_space)
+
+def apply_cv2_anisotropic_diffusion(image, iterations=15, kappa=30, gamma=0.1):
+    """Apply anisotropic diffusion for directional structure enhancement.
+    
+    Anisotropic diffusion smooths within structures while preserving boundaries,
+    making it excellent for enhancing linear features like nets and ropes.
+    
+    Args:
+        image: Input image (uint8)
+        iterations: Number of diffusion iterations
+        kappa: Conduction coefficient (edge threshold)
+        gamma: Rate of diffusion (step size)
+        
+    Returns:
+        Enhanced image with anisotropic diffusion applied
+    """
+    
+    # Convert to float for processing
+    img_float = image.astype(np.float32) / 255.0
+    
+    # Anisotropic diffusion implementation
+    for i in range(iterations):
+        # Compute gradients in 4 directions
+        grad_n = np.roll(img_float, -1, axis=0) - img_float  # North
+        grad_s = np.roll(img_float, 1, axis=0) - img_float   # South
+        grad_e = np.roll(img_float, -1, axis=1) - img_float  # East
+        grad_w = np.roll(img_float, 1, axis=1) - img_float   # West
+        
+        # Compute conduction coefficients (Perona-Malik)
+        c_n = np.exp(-(grad_n / kappa) ** 2)
+        c_s = np.exp(-(grad_s / kappa) ** 2)
+        c_e = np.exp(-(grad_e / kappa) ** 2)
+        c_w = np.exp(-(grad_w / kappa) ** 2)
+        
+        # Update image
+        img_float += gamma * (c_n * grad_n + c_s * grad_s + c_e * grad_e + c_w * grad_w)
+        
+        # Clamp values
+        img_float = np.clip(img_float, 0, 1)
+    
+    # Convert back to uint8
+    return (img_float * 255).astype(np.uint8)
+
+def apply_cv2_gabor_enhancement(image, orientations=8, frequency=0.1, sigma_x=2.0, sigma_y=2.0):
+    """Apply Gabor filter bank for oriented texture and line detection.
+    
+    Gabor filters are excellent for detecting linear structures at specific
+    orientations, making them ideal for net and rope detection.
+    
+    Args:
+        image: Input image (uint8)
+        orientations: Number of orientations in filter bank
+        frequency: Spatial frequency of filters
+        sigma_x: Standard deviation in X direction
+        sigma_y: Standard deviation in Y direction
+        
+    Returns:
+        Enhanced image with maximum Gabor response across orientations
+    """
+    
+    # Convert to float
+    img_float = image.astype(np.float32)
+    
+    # Initialize response array
+    max_response = np.zeros_like(img_float)
+    
+    # Apply Gabor filters at different orientations
+    for i in range(orientations):
+        theta = i * np.pi / orientations
+        
+        # Create Gabor kernel
+        kernel_real, kernel_imag = cv2.getGaborKernel(
+            ksize=(21, 21),  # Kernel size
+            sigma=sigma_x,   # Standard deviation
+            theta=theta,     # Orientation
+            lambd=1.0/frequency,  # Wavelength
+            gamma=sigma_y/sigma_x,  # Aspect ratio
+            psi=0,          # Phase offset
+            ktype=cv2.CV_32F
+        ), cv2.getGaborKernel(
+            ksize=(21, 21),
+            sigma=sigma_x,
+            theta=theta,
+            lambd=1.0/frequency,
+            gamma=sigma_y/sigma_x,
+            psi=np.pi/2,    # 90 degree phase shift for imaginary part
+            ktype=cv2.CV_32F
+        )
+        
+        # Apply filters
+        response_real = cv2.filter2D(img_float, cv2.CV_32F, kernel_real)
+        response_imag = cv2.filter2D(img_float, cv2.CV_32F, kernel_imag)
+        
+        # Compute magnitude
+        magnitude = np.sqrt(response_real**2 + response_imag**2)
+        
+        # Take maximum response across orientations
+        max_response = np.maximum(max_response, magnitude)
+    
+    # Normalize and convert back to uint8
+    max_response = cv2.normalize(max_response, None, 0, 255, cv2.NORM_MINMAX)
+    return max_response.astype(np.uint8)
+
+def apply_cv2_guided_filter(image, radius=8, eps=0.01):
+    """Apply guided filter for edge-aware smoothing.
+    
+    Guided filter provides edge-preserving smoothing that's faster than
+    bilateral filtering and excellent for structure preservation.
+    
+    Args:
+        image: Input image (uint8)
+        radius: Radius of the filter
+        eps: Regularization parameter
+        
+    Returns:
+        Enhanced image with guided filtering applied
+    """
+    
+    # Convert to float [0, 1]
+    I = image.astype(np.float32) / 255.0
+    
+    # Use image as its own guide
+    p = I.copy()
+    
+    # Compute local statistics
+    mean_I = cv2.boxFilter(I, cv2.CV_32F, (radius, radius))
+    mean_p = cv2.boxFilter(p, cv2.CV_32F, (radius, radius))
+    mean_Ip = cv2.boxFilter(I * p, cv2.CV_32F, (radius, radius))
+    cov_Ip = mean_Ip - mean_I * mean_p
+    
+    mean_II = cv2.boxFilter(I * I, cv2.CV_32F, (radius, radius))
+    var_I = mean_II - mean_I * mean_I
+    
+    # Compute coefficients
+    a = cov_Ip / (var_I + eps)
+    b = mean_p - a * mean_I
+    
+    # Smooth coefficients
+    mean_a = cv2.boxFilter(a, cv2.CV_32F, (radius, radius))
+    mean_b = cv2.boxFilter(b, cv2.CV_32F, (radius, radius))
+    
+    # Apply filter
+    q = mean_a * I + mean_b
+    
+    # Convert back to uint8
+    return (np.clip(q, 0, 1) * 255).astype(np.uint8)
+
+def apply_cv2_enhancement_method(frame, method='morphological', kernel_size=5):
+    """Simplified OpenCV enhancement dispatcher.
+    
+    Args:
+        frame: Input image (uint8)
+        method: Enhancement method ('morphological', 'bilateral', 'gabor')
+        kernel_size: Size parameter for the method
+        
+    Returns:
+        Enhanced image using the specified OpenCV method
+    """
+    
+    if method == 'morphological':
+        # Opening operation with elliptical kernel
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+        return cv2.morphologyEx(frame, cv2.MORPH_OPEN, kernel)
+        
+    elif method == 'bilateral':
+        # Edge-preserving bilateral filter
+        return cv2.bilateralFilter(frame, kernel_size*2-1, 75, 75)
+        
+    elif method == 'gabor':
+        # Gabor filter bank for line detection
+        return apply_cv2_gabor_enhancement(frame, orientations=8, frequency=0.1, 
+                                         sigma_x=kernel_size/2, sigma_y=kernel_size/2)
+        
+    else:
+        raise ValueError(f"Unknown method: {method}. Use 'morphological', 'bilateral', or 'gabor'")
+
 def create_circular_kernel_fast(radius):
     """Fast circular kernel with simplified weights."""
     size = 2 * radius + 1
@@ -812,10 +1130,10 @@ def create_elliptical_kernel_fast(base_radius, elongation_factor, angle_degrees)
 
 def preprocess_edges(frame_u8: np.ndarray, cfg=IMAGE_PROCESSING_CONFIG) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Preprocess sonar frame for edge detection using adaptive linear merging.
+    Preprocess sonar frame for edge detection using adaptive linear merging or OpenCV methods.
     
-    Applies fast adaptive linear merging to enhance directional features (nets, ropes)
-    by adapting kernel shape from circular to elliptical based on local linearity.
+    Applies either custom adaptive linear merging or fast OpenCV enhancement methods
+    to enhance directional features (nets, ropes) before edge detection.
     
     Args:
         frame_u8: Input sonar frame (uint8)
@@ -824,15 +1142,25 @@ def preprocess_edges(frame_u8: np.ndarray, cfg=IMAGE_PROCESSING_CONFIG) -> Tuple
     Returns:
         Tuple of (raw_edges, processed_edges) from Canny edge detection
     """
-    # Apply fast adaptive linear merging for directional enhancement
-    proc = adaptive_linear_momentum_merge_fast(
-        frame_u8,
-        base_radius=cfg.get('adaptive_base_radius', 2),
-        max_elongation=cfg.get('adaptive_max_elongation', 4),
-        linearity_threshold=cfg.get('adaptive_linearity_threshold', 0.3),
-        momentum_boost=cfg.get('momentum_boost', 1.5),
-        angle_steps=cfg.get('adaptive_angle_steps', 9)
-    )
+    # Apply enhancement based on configuration
+    if cfg.get('use_cv2_enhancement', False):
+        # Use fast OpenCV methods
+        proc = adaptive_linear_momentum_merge_fast(
+            frame_u8,
+            use_cv2_enhancement=True,
+            cv2_method=cfg.get('cv2_method', 'morphological'),
+            cv2_kernel_size=cfg.get('cv2_kernel_size', 5)
+        )
+    else:
+        # Use custom adaptive linear merging
+        proc = adaptive_linear_momentum_merge_fast(
+            frame_u8,
+            base_radius=cfg.get('adaptive_base_radius', 2),
+            max_elongation=cfg.get('adaptive_max_elongation', 4),
+            linearity_threshold=cfg.get('adaptive_linearity_threshold', 0.3),
+            momentum_boost=cfg.get('momentum_boost', 1.5),
+            angle_steps=cfg.get('adaptive_angle_steps', 9)
+        )
     
     # Apply Canny edge detection to enhanced frame
     edges = cv2.Canny(proc, cfg.get('canny_low_threshold', 50), cfg.get('canny_high_threshold', 150))
@@ -850,7 +1178,6 @@ def preprocess_edges(frame_u8: np.ndarray, cfg=IMAGE_PROCESSING_CONFIG) -> Tuple
         kernel2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
         out = cv2.dilate(out, kernel2, iterations=dil)
     
-    return edges, out
     return edges, out
 
 # ============================ Contour features & scoring ============================

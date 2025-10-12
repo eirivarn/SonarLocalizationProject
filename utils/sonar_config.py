@@ -77,27 +77,33 @@ class ConeGridSpec:
 # Core image processing configuration using adaptive linear merging
 IMAGE_PROCESSING_CONFIG: Dict = {
     
+    # === CV2 ENHANCEMENT ===
+    # Fast OpenCV enhancement methods as alternative to custom adaptive kernels
+    'use_cv2_enhancement': False,       # Toggle: False=custom adaptive, True=OpenCV methods
+    'cv2_method': 'morphological',      # Method: 'morphological', 'bilateral', 'gabor'
+    'cv2_kernel_size': 3,               # Kernel/filter size (3, 5, 7)
+
     # === ADAPTIVE LINEAR MERGING ===
     # Revolutionary approach: adapts merging kernel from circular to elliptical based on detected linearity
     # This is the core enhancement system for detecting nets, ropes, and other linear structures
-    
-    'adaptive_base_radius': 2,           # ✅ Base circular merging radius (1-5 pixels typical)
+
+    'adaptive_base_radius': 2,          # Base circular merging radius 
                                         # Starting radius for circular kernel before elongation
                                         # Larger values = more aggressive base merging
-    
-    'adaptive_max_elongation': 4,        # ✅ Maximum elongation factor (1.0-8.0 typical)
+
+    'adaptive_max_elongation': 4,        # Maximum elongation factor
                                         # 1.0 = always circular, 4.0 = ellipse can be 4x longer than wide
                                         # Higher values = stronger linear feature enhancement
-    
-    'adaptive_linearity_threshold': 0.3, # ✅ Minimum linearity to trigger elongation (0.0-1.0)
+
+    'adaptive_linearity_threshold': 0.3, # Minimum linearity to trigger elongation 
                                         # Lower values = more pixels get elliptical kernels (more sensitive)
                                         # Higher values = only very linear patterns get elongated (selective)
-    
-    'adaptive_angle_steps': 9,           # ✅ Number of angles tested for linearity (6-18 typical)
+
+    'adaptive_angle_steps': 10,           # Number of angles tested for linearity 
                                         # Uses 20° increments for optimal speed/quality balance
                                         # More steps = better angle resolution but slower processing
-    
-    'momentum_boost': 10.0,             # ✅ Enhancement strength multiplier (1.0-20.0 typical)
+
+    'momentum_boost': 10.0,             # Enhancement strength multiplier 
                                         # Higher values = stronger directional feature enhancement
                                         # Lower values = more subtle enhancement, preserves original intensities
     
