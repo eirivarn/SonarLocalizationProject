@@ -2165,10 +2165,10 @@ def create_enhanced_contour_detection_video_with_processor(npz_file_index=0, fra
         fallback_path = outp.with_suffix('.avi')
         vw = cv2.VideoWriter(str(fallback_path), cv2.VideoWriter_fourcc(*'XVID'), VIDEO_CONFIG['fps'], (W, H))
         if vw.isOpened():
-            print(f"⚠️ Fallback: Using {fallback_path} (AVI format)")
+            print(f"Fallback: Using {fallback_path} (AVI format)")
             outp = fallback_path
         else:
-            print("❌ Error: Could not initialize video writer")
+            print("Error: Could not initialize video writer")
             return None
 
     # Reset processor tracking
@@ -2177,7 +2177,7 @@ def create_enhanced_contour_detection_video_with_processor(npz_file_index=0, fra
     # Tracking statistics
     tracked, new, lost, ellipse_tracked = 0, 0, 0, 0
     
-    print(f"✅ Processing {actual} frames with elliptical AOI...")
+    print(f"Processing {actual} frames with elliptical AOI...")
     
     for i in range(actual):
         idx = frame_start + i * frame_step
@@ -2336,7 +2336,7 @@ def create_enhanced_contour_detection_video_with_processor(npz_file_index=0, fra
     print(f"\n=== ENHANCED VIDEO CREATION COMPLETE ===")
     print(f"Video saved to: {output_path}")
     print(f"Video specs: {W}x{H}, {VIDEO_CONFIG['fps']} fps, {actual} frames")
-    print(f"🟢 ELLIPTICAL AOI TRACKING STATS:")
+    print(f"ELLIPTICAL AOI TRACKING STATS:")
     total_det = tracked + new
     print(f"  - Total detected frames: {total_det}")
     print(f"  - Ellipse-guided frames: {ellipse_tracked}")

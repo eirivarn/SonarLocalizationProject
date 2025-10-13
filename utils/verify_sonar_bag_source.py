@@ -49,7 +49,7 @@ def find_sonar_topics_in_bag(bag_path: Path) -> List[Tuple[str, str]]:
         
         return sonar_topics
     except Exception as e:
-        print(f"   ❌ Error reading {bag_path.name}: {e}")
+        print(f"Error reading {bag_path.name}: {e}")
         return []
 
 
@@ -80,17 +80,17 @@ def analyze_sonar_distribution(data_dir: Path, max_bags: int = 5) -> Dict:
     Returns:
         Dictionary with analysis results
     """
-    print(f"🔍 Analyzing sonar data distribution in: {data_dir}")
+    print(f"Analyzing sonar data distribution in: {data_dir}")
     print("=" * 60)
     
     # Find bag files
     data_bags = find_data_bags(data_dir, recursive=True)
     video_bags = find_video_bags(data_dir, recursive=True)
     
-    print(f"📁 Found {len(data_bags)} data bags and {len(video_bags)} video bags")
+    print(f"Found {len(data_bags)} data bags and {len(video_bags)} video bags")
     
     if not data_bags and not video_bags:
-        print("❌ No bag files found!")
+        print("No bag files found!")
         return {}
     
     # Limit analysis for performance
@@ -105,14 +105,14 @@ def analyze_sonar_distribution(data_dir: Path, max_bags: int = 5) -> Dict:
     }
     
     # Check data bags
-    print(f"\n🔍 Checking data bags (analyzing {len(data_bags_to_check)} of {len(data_bags)}):")
+    print(f"\nChecking data bags (analyzing {len(data_bags_to_check)} of {len(data_bags)}):")
     for bag in data_bags_to_check:
-        print(f"   📦 {bag.name}")
+        print(f"{bag.name}")
         sonar_topics = find_sonar_topics_in_bag(bag)
         
         if sonar_topics:
             results['data_bags_with_sonar'].append(bag)
-            print(f"      ✅ Found {len(sonar_topics)} sonar topics:")
+            print(f"Found {len(sonar_topics)} sonar topics:")
             for topic, msgtype in sonar_topics:
                 print(f"         - {topic} ({msgtype})")
                 results['all_sonar_topics'].add(topic)
@@ -120,19 +120,19 @@ def analyze_sonar_distribution(data_dir: Path, max_bags: int = 5) -> Dict:
                 # Get message count for this topic
                 count = get_topic_message_count(bag, topic)
                 if count > 0:
-                    print(f"           📊 {count} messages")
+                    print(f"{count} messages")
         else:
-            print(f"      ❌ No sonar topics found")
+            print(f"No sonar topics found")
     
     # Check video bags  
-    print(f"\n🔍 Checking video bags (analyzing {len(video_bags_to_check)} of {len(video_bags)}):")
+    print(f"\nChecking video bags (analyzing {len(video_bags_to_check)} of {len(video_bags)}):")
     for bag in video_bags_to_check:
-        print(f"   📦 {bag.name}")
+        print(f"{bag.name}")
         sonar_topics = find_sonar_topics_in_bag(bag)
         
         if sonar_topics:
             results['video_bags_with_sonar'].append(bag)
-            print(f"      ✅ Found {len(sonar_topics)} sonar topics:")
+            print(f"Found {len(sonar_topics)} sonar topics:")
             for topic, msgtype in sonar_topics:
                 print(f"         - {topic} ({msgtype})")
                 results['all_sonar_topics'].add(topic)
@@ -140,36 +140,36 @@ def analyze_sonar_distribution(data_dir: Path, max_bags: int = 5) -> Dict:
                 # Get message count for this topic
                 count = get_topic_message_count(bag, topic)
                 if count > 0:
-                    print(f"           📊 {count} messages")
+                    print(f"{count} messages")
         else:
-            print(f"      ❌ No sonar topics found")
+            print(f"No sonar topics found")
     
     # Generate summary
     data_sonar_count = len(results['data_bags_with_sonar'])
     video_sonar_count = len(results['video_bags_with_sonar'])
     
-    print(f"\n📊 SUMMARY:")
+    print(f"\nSUMMARY:")
     print("=" * 30)
-    print(f"   📦 Data bags with sonar: {data_sonar_count}/{len(data_bags_to_check)}")
-    print(f"   📦 Video bags with sonar: {video_sonar_count}/{len(video_bags_to_check)}")
-    print(f"   🎯 Unique sonar topics found: {len(results['all_sonar_topics'])}")
+    print(f"Data bags with sonar: {data_sonar_count}/{len(data_bags_to_check)}")
+    print(f"Video bags with sonar: {video_sonar_count}/{len(video_bags_to_check)}")
+    print(f"Unique sonar topics found: {len(results['all_sonar_topics'])}")
     
     if results['all_sonar_topics']:
-        print(f"   📋 All sonar topics:")
+        print(f"All sonar topics:")
         for topic in sorted(results['all_sonar_topics']):
             print(f"      - {topic}")
     
     # Determine conclusion
     if video_sonar_count > 0 and data_sonar_count == 0:
-        conclusion = "✅ CONFIRMED: Sonar data is in VIDEO bags only"
+        conclusion = "CONFIRMED: Sonar data is in VIDEO bags only"
     elif data_sonar_count > 0 and video_sonar_count == 0:
-        conclusion = "⚠️  UNEXPECTED: Sonar data is in DATA bags only"
+        conclusion = "UNEXPECTED: Sonar data is in DATA bags only"
     elif data_sonar_count > 0 and video_sonar_count > 0:
-        conclusion = "🤔 MIXED: Sonar data found in BOTH data and video bags"
+        conclusion = "MIXED: Sonar data found in BOTH data and video bags"
     else:
-        conclusion = "❌ NO SONAR DATA FOUND in analyzed bags"
+        conclusion = "NO SONAR DATA FOUND in analyzed bags"
     
-    print(f"\n🎯 CONCLUSION: {conclusion}")
+    print(f"\nCONCLUSION: {conclusion}")
     
     results['summary'] = {
         'data_bags_analyzed': len(data_bags_to_check),
@@ -206,17 +206,17 @@ def main():
                     data_dir = possible_dir
                     break
             else:
-                print("❌ No bag data directory found. Please specify path as argument:")
-                print("   python verify_sonar_bag_source.py /path/to/bag/files")
+                print("No bag data directory found. Please specify path as argument:")
+                print("python verify_sonar_bag_source.py /path/to/bag/files")
                 return
     
     if not data_dir.exists():
-        print(f"❌ Directory does not exist: {data_dir}")
+        print(f"Directory does not exist: {data_dir}")
         print("Usage: python verify_sonar_bag_source.py [/path/to/bag/files]")
         return
     
-    print(f"🚀 SOLAQUA Sonar Data Source Verification")
-    print(f"📁 Analyzing bags in: {data_dir}")
+    print(f"SOLAQUA Sonar Data Source Verification")
+    print(f"Analyzing bags in: {data_dir}")
     
     # Run the analysis
     results = analyze_sonar_distribution(data_dir, max_bags=10)
@@ -235,7 +235,7 @@ def main():
         with open(results_file, 'w') as f:
             json.dump(json_results, f, indent=2)
         
-        print(f"\n💾 Results saved to: {results_file}")
+        print(f"\nResults saved to: {results_file}")
 
 
 if __name__ == "__main__":

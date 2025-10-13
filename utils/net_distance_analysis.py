@@ -20,7 +20,7 @@ def load_all_distance_data_for_bag(target_bag: str, exports_folder: str | None =
         Tuple of (raw_data_dict, distance_measurements_dict)
     """
     
-    print(f"🎯 LOADING ALL DISTANCE DATA FOR BAG: {target_bag}")
+    print(f" LOADING ALL DISTANCE DATA FOR BAG: {target_bag}")
     print("=" * 60)
     
     from utils.sonar_config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
@@ -48,12 +48,12 @@ def load_all_distance_data_for_bag(target_bag: str, exports_folder: str | None =
             nav_data['timestamp'] = pd.to_datetime(nav_data['ts_oslo']).dt.tz_convert('UTC')
             nav_data['net_distance_m_raw'] = nav_data['NetDistance']
             raw_data['navigation'] = nav_data[['timestamp', 'net_distance_m_raw', 'NetDistance', 'Altitude']].copy()
-            print(f"   ✅ Loaded {len(nav_data)} navigation records")
+            print(f"    Loaded {len(nav_data)} navigation records")
         else:
-            print(f"   ❌ Navigation file not found")
+            print(f"    Navigation file not found")
             raw_data['navigation'] = None
     except Exception as e:
-        print(f"   ❌ Error loading navigation: {e}")
+        print(f"    Error loading navigation: {e}")
         raw_data['navigation'] = None
 
     # 2. Load Guidance Data  
@@ -66,15 +66,15 @@ def load_all_distance_data_for_bag(target_bag: str, exports_folder: str | None =
             distance_cols = [col for col in guidance_data.columns if 'distance' in col.lower()]
             if distance_cols:
                 raw_data['guidance'] = guidance_data[['timestamp'] + distance_cols].copy()
-                print(f"   ✅ Loaded {len(guidance_data)} guidance records with {distance_cols}")
+                print(f"    Loaded {len(guidance_data)} guidance records with {distance_cols}")
             else:
                 raw_data['guidance'] = None
-                print(f"   ⚠️  No distance columns in guidance data")
+                print(f"     No distance columns in guidance data")
         else:
-            print(f"   ❌ Guidance file not found")
+            print(f"    Guidance file not found")
             raw_data['guidance'] = None
     except Exception as e:
-        print(f"   ❌ Error loading guidance: {e}")
+        print(f"    Error loading guidance: {e}")
         raw_data['guidance'] = None
 
     # 3. Load DVL Altimeter
@@ -91,16 +91,16 @@ def load_all_distance_data_for_bag(target_bag: str, exports_folder: str | None =
                     'description': 'Distance to seafloor',
                     'color': 'orange'
                 }
-                print(f"   ✅ Loaded {len(dvl_alt)} DVL altimeter records")
+                print(f"    Loaded {len(dvl_alt)} DVL altimeter records")
             else:
-                print(f"   ⚠️  No altimeter_distance column")
+                print(f"     No altimeter_distance column")
         else:
-            print(f"   ❌ DVL altimeter file not found")
+            print(f"    DVL altimeter file not found")
     except Exception as e:
-        print(f"   ❌ Error loading DVL altimeter: {e}")
+        print(f"    Error loading DVL altimeter: {e}")
 
     # 4. Load USBL
-    print("📡 4. Loading USBL...")
+    print(" 4. Loading USBL...")
     try:
         usbl_file = data_folder / f"sensor_usbl__{target_bag}_data.csv"
         if usbl_file.exists():
@@ -120,13 +120,13 @@ def load_all_distance_data_for_bag(target_bag: str, exports_folder: str | None =
                     'description': 'USBL depth measurement',
                     'color': 'magenta'
                 }
-                print(f"   ✅ Loaded {len(usbl)} USBL records")
+                print(f"    Loaded {len(usbl)} USBL records")
             else:
-                print(f"   ⚠️  Missing USBL position columns")
+                print(f"     Missing USBL position columns")
         else:
-            print(f"   ❌ USBL file not found")
+            print(f"    USBL file not found")
     except Exception as e:
-        print(f"   ❌ Error loading USBL: {e}")
+        print(f"    Error loading USBL: {e}")
 
     # 5. Load DVL Position
     print("📡 5. Loading DVL Position...")
@@ -143,16 +143,16 @@ def load_all_distance_data_for_bag(target_bag: str, exports_folder: str | None =
                     'description': '3D DVL position',
                     'color': 'cyan'
                 }
-                print(f"   ✅ Loaded {len(dvl_pos)} DVL position records")
+                print(f"    Loaded {len(dvl_pos)} DVL position records")
             else:
-                print(f"   ⚠️  Missing DVL position columns")
+                print(f"     Missing DVL position columns")
         else:
-            print(f"   ❌ DVL position file not found")
+            print(f"    DVL position file not found")
     except Exception as e:
-        print(f"   ❌ Error loading DVL position: {e}")
+        print(f"    Error loading DVL position: {e}")
     
     # 6. Load Navigation Position
-    print("📡 6. Loading Navigation Position...")
+    print(" 6. Loading Navigation Position...")
     try:
         nav_pos_file = data_folder / f"navigation_plane_approximation_position__{target_bag}_data.csv"
         if nav_pos_file.exists():
@@ -166,13 +166,13 @@ def load_all_distance_data_for_bag(target_bag: str, exports_folder: str | None =
                     'description': '2D navigation position',
                     'color': 'brown'
                 }
-                print(f"   ✅ Loaded {len(nav_pos)} navigation position records")
+                print(f"    Loaded {len(nav_pos)} navigation position records")
             else:
-                print(f"   ⚠️  Missing navigation position columns")
+                print(f"     Missing navigation position columns")
         else:
-            print(f"   ❌ Navigation position file not found")
+            print(f"    Navigation position file not found")
     except Exception as e:
-        print(f"   ❌ Error loading navigation position: {e}")
+        print(f"    Error loading navigation position: {e}")
 
     # 7. Load INS Z Position
     print("📡 7. Loading INS Z Position...")
@@ -204,21 +204,21 @@ def load_all_distance_data_for_bag(target_bag: str, exports_folder: str | None =
                         'description': f'INS {z_position_col} (vertical position)',
                         'color': 'darkblue'
                     }
-                    print(f"   ✅ Loaded {len(ins_data)} INS records with {z_position_col}")
+                    print(f"    Loaded {len(ins_data)} INS records with {z_position_col}")
                 else:
-                    print(f"   ⚠️  No valid {z_position_col} values")
+                    print(f"     No valid {z_position_col} values")
             else:
-                print(f"   ⚠️  No Z position columns found")
+                print(f"     No Z position columns found")
         else:
-            print(f"   ❌ INS file not found")
+            print(f"    INS file not found")
     except Exception as e:
-        print(f"   ❌ Error loading INS: {e}")
+        print(f"    Error loading INS: {e}")
     
     # Summary
-    print(f"\n📊 LOADING SUMMARY:")
-    print(f"   🎯 Target bag: {target_bag}")
-    print(f"   📁 Raw data loaded: {len([k for k, v in raw_data.items() if v is not None])}/{len(raw_data)}")
-    print(f"   📏 Distance measurements: {len(distance_measurements)}")
+    print(f"\n LOADING SUMMARY:")
+    print(f"    Target bag: {target_bag}")
+    print(f"    Raw data loaded: {len([k for k, v in raw_data.items() if v is not None])}/{len(raw_data)}")
+    print(f"    Distance measurements: {len(distance_measurements)}")
     
     return raw_data, distance_measurements
 
@@ -393,19 +393,19 @@ def extract_raw_sonar_data_with_configurable_rmax(
     
     import utils.sonar_utils as sonar_utils
     
-    print(f"🔬 EXTRACTING RAW SONAR DATA WITH CONFIGURABLE RMAX")
-    print(f"   📁 Bag: {target_bag}")
-    print(f"   🖼️  Frame: {frame_idx}")
-    print(f"   📏 rmax: {rmax if rmax else 'default (20.0m)'}")
+    print(f" EXTRACTING RAW SONAR DATA WITH CONFIGURABLE RMAX")
+    print(f"    Bag: {target_bag}")
+    print(f"    Frame: {frame_idx}")
+    print(f"    rmax: {rmax if rmax else 'default (20.0m)'}")
     print("=" * 50)
     
     # 1. Get configurable sonar parameters
     sonar_params = get_configurable_sonar_parameters(target_bag, rmax)
     
-    print(f"📊 SONAR PARAMETERS:")
-    print(f"   🏷️  Run Type: {sonar_params['run_type']}")
-    print(f"   📏 Range Max: {sonar_params['rmax']}m ({sonar_params['range_source']})")
-    print(f"   📝 Description: {sonar_params['description']}")
+    print(f" SONAR PARAMETERS:")
+    print(f"    Run Type: {sonar_params['run_type']}")
+    print(f"    Range Max: {sonar_params['rmax']}m ({sonar_params['range_source']})")
+    print(f"    Description: {sonar_params['description']}")
     
     # 2. Load raw sonar data
     from utils.sonar_config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
@@ -413,22 +413,22 @@ def extract_raw_sonar_data_with_configurable_rmax(
     sonar_csv_file = exports_root / EXPORTS_SUBDIRS.get('by_bag', 'by_bag') / f"sensor_sonoptix_echo_image__{target_bag}_video.csv"
     
     if not sonar_csv_file.exists():
-        print(f"❌ Sonar data file not found: {sonar_csv_file}")
+        print(f" Sonar data file not found: {sonar_csv_file}")
         return None, None, {}, sonar_params
     
     try:
         print(f"📡 Loading sonar data from: {sonar_csv_file.name}")
         sonar_df = pd.read_csv(sonar_csv_file)
-        print(f"   ✅ Loaded {len(sonar_df)} sonar frames")
+        print(f"    Loaded {len(sonar_df)} sonar frames")
     except Exception as e:
-        print(f"❌ Error loading sonar data: {e}")
+        print(f" Error loading sonar data: {e}")
         return None, None, {}, sonar_params
     
     # 3. Validate frame index
     if frame_idx >= len(sonar_df):
-        print(f"❌ Frame {frame_idx} not available (only {len(sonar_df)} frames)")
+        print(f" Frame {frame_idx} not available (only {len(sonar_df)} frames)")
         frame_idx = min(frame_idx, len(sonar_df) - 1)
-        print(f"   🔄 Adjusted to frame: {frame_idx}")
+        print(f"    Adjusted to frame: {frame_idx}")
     
     # 4. Extract raw sonar frame matrix
     try:
@@ -436,14 +436,14 @@ def extract_raw_sonar_data_with_configurable_rmax(
         raw_matrix = sonar_utils.get_sonoptix_frame(sonar_df, frame_idx)
         
         if raw_matrix is None:
-            print(f"❌ Could not extract sonar frame {frame_idx}")
+            print(f" Could not extract sonar frame {frame_idx}")
             return None, None, {}, sonar_params
             
-        print(f"   ✅ Raw matrix shape: {raw_matrix.shape}")
-        print(f"   📊 Value range: {raw_matrix.min():.3f} to {raw_matrix.max():.3f}")
+        print(f"    Raw matrix shape: {raw_matrix.shape}")
+        print(f"    Value range: {raw_matrix.min():.3f} to {raw_matrix.max():.3f}")
         
     except Exception as e:
-        print(f"❌ Error extracting raw sonar frame: {e}")
+        print(f" Error extracting raw sonar frame: {e}")
         return None, None, {}, sonar_params
     
     # 5. Process with specified rmax setting
@@ -467,17 +467,17 @@ def extract_raw_sonar_data_with_configurable_rmax(
             grid=sonar_params['grid']
         )
         
-        print(f"   ✅ Processed cone shape: {cone.shape}")
-        print(f"   📐 Extent: {extent}")
+        print(f"    Processed cone shape: {cone.shape}")
+        print(f"    Extent: {extent}")
         
         # Get timestamp
         sonar_timestamp = pd.to_datetime(sonar_df.loc[frame_idx, 'ts_utc'])
-        print(f"   🕐 Timestamp: {sonar_timestamp.strftime('%H:%M:%S')}")
+        print(f"    Timestamp: {sonar_timestamp.strftime('%H:%M:%S')}")
         
         return raw_matrix, cone, extent, sonar_params
         
     except Exception as e:
-        print(f"❌ Error processing sonar data: {e}")
+        print(f" Error processing sonar data: {e}")
         return raw_matrix, None, {}, sonar_params
 
 # Function to process sonar data and create enhanced visualization
@@ -486,7 +486,7 @@ def process_sonar_data_and_visualize(
     exports_folder, nav_data, guidance_data, distance_measurements
 ):
     if processed_cone is None:
-        print(f"❌ Failed to extract raw sonar data for {target_bag}, frame {frame_index}")
+        print(f" Failed to extract raw sonar data for {target_bag}, frame {frame_index}")
         return
 
     # Resolve exports folder from config if needed and get synchronized distance measurements
@@ -494,12 +494,12 @@ def process_sonar_data_and_visualize(
     exports_root = Path(exports_folder) if exports_folder is not None else Path(EXPORTS_DIR_DEFAULT)
     sonar_csv_file = exports_root / EXPORTS_SUBDIRS.get('by_bag', 'by_bag') / f"sensor_sonoptix_echo_image__{target_bag}_video.csv"
     if not sonar_csv_file.exists():
-        print(f"❌ Sonar CSV file not found: {sonar_csv_file}")
+        print(f" Sonar CSV file not found: {sonar_csv_file}")
         return
 
     sonar_df = pd.read_csv(sonar_csv_file)
     if frame_index >= len(sonar_df):
-        print(f"❌ Frame index {frame_index} out of range for sonar data")
+        print(f" Frame index {frame_index} out of range for sonar data")
         return
 
     sonar_timestamp = pd.to_datetime(sonar_df.loc[frame_index, 'ts_utc'])
@@ -580,7 +580,7 @@ def process_sonar_data_and_visualize(
             # Draw ONLY the rotated net line (thinner orange line)
             ax.plot([rotated_x1, rotated_x2], [rotated_y1, rotated_y2],
                    color='orange', linewidth=4, alpha=0.95,
-                   label=f"🥅 Net Position: {distance:.2f}m @ {net_angle_deg:.1f}° (pitch)", zorder=5)
+                   label=f" Net Position: {distance:.2f}m @ {net_angle_deg:.1f}° (pitch)", zorder=5)
 
             # Add smaller endpoints
             ax.plot([rotated_x1, rotated_x2], [rotated_y1, rotated_y2], 'o',
@@ -610,7 +610,7 @@ def process_sonar_data_and_visualize(
     ax.set_ylabel('Forward Distance (m)', fontsize=16, fontweight='bold')
 
     # ENHANCED TITLE
-    title = f"🎯 SONAR WITH NET POSITION (PITCH-BASED) - {target_bag}\n"
+    title = f" SONAR WITH NET POSITION (PITCH-BASED) - {target_bag}\n"
     title += f"Frame {frame_index} | rmax={sonar_params['rmax']}m"
     if distance_data and 'Navigation NetDistance' in distance_data:
         title += f" | Net: {distance_data['Navigation NetDistance']['value']:.2f}m @ {net_angle_deg:.1f}° (pitch)"

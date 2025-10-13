@@ -87,24 +87,24 @@ class PipelineVisualizer:
             # Get available files (same function call)
             files = get_available_npz_files(npz_data_path)
             if not files:
-                print("⚠️  No NPZ files found, using synthetic data")
+                print(" No NPZ files found, using synthetic data")
                 raise FileNotFoundError("No real data")
             
             # Select file (same as video function parameter)
             selected_file = files[npz_file_index]
-            print(f"📁 Selected NPZ file: {selected_file.name}")
+            print(f"Selected NPZ file: {selected_file.name}")
             
             # Load data (exact same function call)
             cones, timestamps, extent, meta = load_cone_run_npz(selected_file)
             T = len(cones)
-            print(f"✅ Loaded {T} frames")
-            print(f"📐 Spatial extent: {extent}")
+            print(f"Loaded {T} frames")
+            print(f"Spatial extent: {extent}")
             
             # Video generation parameters (same defaults as function)
             frame_count = min(frame_count, T)  # Same logic as video function
             actual_frames = int(min(frame_count, max(0, (T - frame_start)) // max(1, frame_step)))
             
-            print(f"🎬 Video parameters:")
+            print(f"Video parameters:")
             print(f"   - Frame start: {frame_start}")
             print(f"   - Frame count: {frame_count}")
             print(f"   - Frame step: {frame_step}")
@@ -115,15 +115,15 @@ class PipelineVisualizer:
             self.current_frame = to_uint8_gray(cones[self.frame_idx])  # Exact same conversion
             self.current_extent = extent
             
-            print(f"\n🔍 Analyzing frame {self.frame_idx} (middle of sequence)")
-            print(f"📊 Frame shape: {self.current_frame.shape}")
-            print(f"📊 Pixel range: {self.current_frame.min()} - {self.current_frame.max()}")
+            print(f"\nAnalyzing frame {self.frame_idx} (middle of sequence)")
+            print(f"Frame shape: {self.current_frame.shape}")
+            print(f"Pixel range: {self.current_frame.min()} - {self.current_frame.max()}")
             
             self.data_available = True
             
         except Exception as e:
-            print(f"⚠️  Could not load real data: {e}")
-            print("📝 Using synthetic frame for demonstration")
+            print(f"  Could not load real data: {e}")
+            print("Using synthetic frame for demonstration")
             
             # Create synthetic frame matching typical sonar dimensions
             self.current_frame = np.random.randint(0, 255, (400, 600), dtype=np.uint8)
@@ -131,7 +131,7 @@ class PipelineVisualizer:
             self.frame_idx = 0
             self.data_available = False
         
-        print(f"\n✅ Data loading complete - ready for video generation pipeline analysis")
+        print(f"\nData loading complete - ready for video generation pipeline analysis")
         return self.data_available
     
     def initialize_processor(self) -> SonarDataProcessor:
@@ -150,18 +150,18 @@ class PipelineVisualizer:
         
         # Reset tracking (exact same call as in video function)
         self.processor.reset_tracking()
-        print("✅ Processor tracking reset")
+        print("Processor tracking reset")
         
-        print(f"\n🔧 Processor Configuration:")
+        print(f"\nProcessor Configuration:")
         print(f"Image processing config: {type(self.processor.img_config).__name__}")
         print(f"Tracking initialized: {self.processor.last_center is None}")
         print(f"Current AOI: {self.processor.current_aoi}")
         
-        print(f"\n📋 VIDEO_CONFIG settings (used for annotations):")
+        print(f"\nVIDEO_CONFIG settings (used for annotations):")
         for key, value in VIDEO_CONFIG.items():
             print(f"   - {key}: {value}")
         
-        print(f"\n📋 IMAGE_PROCESSING_CONFIG settings:")
+        print(f"\nIMAGE_PROCESSING_CONFIG settings:")
         for key, value in IMAGE_PROCESSING_CONFIG.items():
             if isinstance(value, dict):
                 print(f"   - {key}:")
@@ -170,7 +170,7 @@ class PipelineVisualizer:
             else:
                 print(f"   - {key}: {value}")
         
-        print(f"\n✅ Processor ready - same configuration as video generation system")
+        print(f"\nProcessor ready - same configuration as video generation system")
         return self.processor
     
     def visualize_data_loading(self, save_path: Optional[str] = None) -> None:
@@ -204,7 +204,7 @@ class PipelineVisualizer:
         
         if save_path:
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            print(f"✅ Data loading visualization saved: {save_path}")
+            print(f"Data loading visualization saved: {save_path}")
         
         plt.show()
     
@@ -252,7 +252,7 @@ class PipelineVisualizer:
         
         if save_path:
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            print(f"✅ Figure 1 saved: {save_path}")
+            print(f"Figure 1 saved: {save_path}")
         
         plt.show()
         return edges_raw, edges_proc
@@ -325,7 +325,7 @@ class PipelineVisualizer:
         
         if save_path:
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            print(f"✅ Figure 2 saved: {save_path}")
+            print(f"Figure 2 saved: {save_path}")
         
         plt.show()
         return contours, best_contour, features, stats
@@ -429,7 +429,7 @@ class PipelineVisualizer:
         
         if save_path:
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            print(f"✅ Figure 3 saved: {save_path}")
+            print(f"Figure 3 saved: {save_path}")
         
         plt.show()
         return result
@@ -582,7 +582,7 @@ class PipelineVisualizer:
         
         if save_path:
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            print(f"✅ Figure 4 saved: {save_path}")
+            print(f"Figure 4 saved: {save_path}")
         
         plt.show()
     
@@ -602,8 +602,8 @@ class PipelineVisualizer:
         """
         print("SOLAQUA Video Generation Pipeline Analysis")
         print("=" * 60)
-        print("✅ Video generation functions loaded!")
-        print("✅ Using EXACT same code as create_enhanced_contour_detection_video_with_processor()")
+        print("Video generation functions loaded!")
+        print("Using EXACT same code as create_enhanced_contour_detection_video_with_processor()")
         
         results = {}
         
@@ -642,9 +642,9 @@ class PipelineVisualizer:
         )
         
         print("\\n" + "=" * 60)
-        print("✅ Complete pipeline analysis finished!")
-        print("✅ All visualization figures saved to:", output_dir)
-        
+        print("Complete pipeline analysis finished!")
+        print("All visualization figures saved to:", output_dir)
+
         return results
 
 
@@ -686,7 +686,7 @@ def test_adaptive_merging_parameters(npz_data_path: str = "/Volumes/LaCie/SOLAQU
     from .sonar_image_analysis import adaptive_linear_momentum_merge_fast, preprocess_edges
     import matplotlib.pyplot as plt
     
-    print("🧪 Testing Adaptive Linear Merging Parameter Combinations")
+    print("Testing Adaptive Linear Merging Parameter Combinations")
     print("=" * 60)
     
     # Load test data
@@ -694,11 +694,11 @@ def test_adaptive_merging_parameters(npz_data_path: str = "/Volumes/LaCie/SOLAQU
     data_loaded = visualizer.load_data(npz_data_path, npz_file_index)
     
     if not data_loaded or visualizer.current_frame is None:
-        print("❌ Could not load test data")
+        print("Could not load test data")
         return
     
     frame = visualizer.current_frame
-    print(f"📊 Test frame shape: {frame.shape}")
+    print(f"Test frame shape: {frame.shape}")
     
     # Test different parameter combinations
     test_configs = [
@@ -760,12 +760,12 @@ def test_adaptive_merging_parameters(npz_data_path: str = "/Volumes/LaCie/SOLAQU
         # Save comparison
         save_path = f"{save_dir}/adaptive_merging_test_{config['name'].lower().replace(' ', '_')}.png"
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"   ✅ Saved comparison: {save_path}")
+        print(f"Saved comparison: {save_path}")
         
         plt.show()
     
-    print(f"\n🎯 Testing complete! Check {save_dir} for comparison images.")
-    print("\n💡 Parameter tuning guide:")
+    print(f"\nTesting complete! Check {save_dir} for comparison images.")
+    print("\nParameter tuning guide:")
     print("   - adaptive_base_radius: Controls base merging distance (1-5)")
     print("   - adaptive_max_elongation: Max ellipse elongation (2-8)")  
     print("   - adaptive_linearity_threshold: Sensitivity to linear patterns (0.1-0.5)")

@@ -96,9 +96,9 @@ def export_optimized_sonar_video(
     #  - cone_raster_like_display_cell, read_video_index
     #  - load_png_bgr, to_local, put_text, ts_for_name
 
-    print("🛠️ OPTIMIZED SONAR VIDEO")
+    print("OPTIMIZED SONAR VIDEO")
     print("=" * 70)
-    print(f"🎯 Target Bag: {TARGET_BAG}")
+    print(f"Target Bag: {TARGET_BAG}")
     print(f"   Cone Size: {CONE_W}x{CONE_H}")
     print(f"   Range: {RANGE_MIN_M}-{DISPLAY_RANGE_MAX_M}m | FOV: {FOV_DEG}°")
     
@@ -108,29 +108,29 @@ def export_optimized_sonar_video(
         
         # Check if video overlay is globally enabled
         if VIDEO_CONFIG.get('enable_video_overlay', False):
-            print(f"   🔍 Auto-detecting video files for bag: {TARGET_BAG}")
+            print(f"Auto-detecting video files for bag: {TARGET_BAG}")
             video_info = get_video_overlay_info(TARGET_BAG)
             if video_info:
                 # Use the PNG frames directory
                 frames_dir = video_info['video_frames_dir']
-                print(f"   ✅ Found video frames: {frames_dir.name}")
+                print(f"Found video frames: {frames_dir.name}")
                 VIDEO_SEQ_DIR = frames_dir  # Set the frames directory
-                print(f"   📁 Using frames directory: {VIDEO_SEQ_DIR}")
+                print(f"Using frames directory: {VIDEO_SEQ_DIR}")
             else:
-                print(f"   ❌ No video files found for bag {TARGET_BAG}")
+                print(f"No video files found for bag {TARGET_BAG}")
         else:
-            print(f"   ℹ️  Video overlay disabled in configuration (enable_video_overlay=False)")
+            print(f"Video overlay disabled in configuration (enable_video_overlay=False)")
     
-    print(f"   🎥 Camera: {'enabled' if VIDEO_SEQ_DIR is not None else 'disabled'}")
-    print(f"   🕸  Net-line: {'enabled' if INCLUDE_NET else 'disabled'}"
+    print(f"Camera: {'enabled' if VIDEO_SEQ_DIR is not None else 'disabled'}")
+    print(f"Net-line: {'enabled' if INCLUDE_NET else 'disabled'}"
           + (f" (dist tol={NET_DISTANCE_TOLERANCE}s, pitch tol={NET_PITCH_TOLERANCE}s)" if INCLUDE_NET else ""))
-    print(f"   📊 Sonar Analysis: {'enabled' if SONAR_DISTANCE_RESULTS is not None else 'disabled'}")
+    print(f"Sonar Analysis: {'enabled' if SONAR_DISTANCE_RESULTS is not None else 'disabled'}")
 
     # --- Resolve exports folder and load sonar timestamps/frames ---
     exports_root = Path(EXPORTS_FOLDER) if EXPORTS_FOLDER is not None else Path(EXPORTS_DIR_DEFAULT)
     sonar_csv_file = exports_root / EXPORTS_SUBDIRS.get('by_bag', 'by_bag') / f"sensor_sonoptix_echo_image__{TARGET_BAG}_video.csv"
     if not sonar_csv_file.exists():
-        print(f"❌ ERROR: Sonar CSV not found: {sonar_csv_file}")
+        print(f"ERROR: Sonar CSV not found: {sonar_csv_file}")
         return
 
     print(f"   Loading sonar data: {sonar_csv_file.name}")
@@ -138,10 +138,10 @@ def export_optimized_sonar_video(
     df = load_df(sonar_csv_file)
     if "ts_utc" not in df.columns:
         if "t" not in df.columns:
-            print("❌ ERROR: Missing timestamp column")
+            print("ERROR: Missing timestamp column")
             return
         df["ts_utc"] = pd.to_datetime(df["t"], unit="s", utc=True, errors="coerce")
-    print(f"   ✅ Loaded {len(df)} sonar frames in {time.time()-t0:.2f}s")
+    print(f"Loaded {len(df)} sonar frames in {time.time()-t0:.2f}s")
 
     # --- Optional: load navigation (NetDistance/NetPitch) ---
     nav_complete = None
@@ -152,11 +152,11 @@ def export_optimized_sonar_video(
             nav_complete = pd.read_csv(nav_file)
             nav_complete["timestamp"] = pd.to_datetime(nav_complete["ts_utc"])
             nav_complete = nav_complete.sort_values("timestamp")
-            print(f"   ✅ Loaded {len(nav_complete)} navigation records in {time.time()-t0:.2f}s")
+            print(f"Loaded {len(nav_complete)} navigation records in {time.time()-t0:.2f}s")
             avail = [c for c in ["NetDistance", "NetPitch", "timestamp"] if c in nav_complete.columns]
             print(f"      Available: {avail}")
         else:
-            print("   ⚠️ Navigation file not found; net-line overlay disabled")
+            print("Navigation file not found; net-line overlay disabled")
             INCLUDE_NET = False
 
     # --- Optional: load camera index ---
@@ -167,9 +167,9 @@ def export_optimized_sonar_video(
             dfv = read_video_index(VIDEO_SEQ_DIR)
             dfv = dfv.dropna(subset=["ts_utc"]).sort_values("ts_utc").reset_index(drop=True)
             video_idx = pd.Index(dfv["ts_utc"])
-            print(f"   ✅ Loaded {len(dfv)} camera index entries")
+            print(f"Loaded {len(dfv)} camera index entries")
         except Exception as e:
-            print(f"   ❌ Camera index load failed: {e}")
+            print(f"Camera index load failed: {e}")
             VIDEO_SEQ_DIR = None
 
     # --- Frame subset and natural FPS ---
@@ -450,7 +450,7 @@ def export_optimized_sonar_video(
             return cone_bgr
 
         except Exception as e:
-            print(f"❌ Frame {frame_idx} error: {e}")
+            print(f"Frame {frame_idx} error: {e}")
             return None
 
     # --- generate video ---

@@ -84,7 +84,7 @@ class Ping360Visualizer:
             if hasattr(self, key):
                 setattr(self, key, value)
             else:
-                print(f"⚠️  Warning: Unknown parameter '{key}' ignored")
+                print(f"  Warning: Unknown parameter '{key}' ignored")
     
     def load_data(self, pings_csv: Union[str, pathlib.Path], 
                   config_csv: Optional[Union[str, pathlib.Path]] = None) -> pd.DataFrame:
@@ -106,7 +106,7 @@ class Ping360Visualizer:
         pings_csv = pathlib.Path(pings_csv)
         assert pings_csv.exists(), f"Missing file: {pings_csv}"
         
-        print(f"📂 Loading Ping360 data from: {pings_csv.name}")
+        print(f"Loading Ping360 data from: {pings_csv.name}")
         
         self.df = pd.read_csv(pings_csv)
         
@@ -124,7 +124,7 @@ class Ping360Visualizer:
         profiles = []
         lens = []
         
-        print("🔄 Parsing JSON data arrays...")
+        print("Parsing JSON data arrays...")
         for s in self.df["data"].astype(str):
             try:
                 arr = np.asarray(json.loads(s), dtype=np.float32)
@@ -146,7 +146,7 @@ class Ping360Visualizer:
             a = np.clip(a, 0, 255).astype(np.uint8)
             self.stack[i, :a.size] = a
         
-        print(f"✅ Loaded {len(self.df)} pings, {self.n_samples} samples per ping")
+        print(f"Loaded {len(self.df)} pings, {self.n_samples} samples per ping")
         return self.df
     
     def compute_range_axis(self, default_c_ms: float = 1500.0) -> np.ndarray:
@@ -168,7 +168,7 @@ class Ping360Visualizer:
             R = float(self.df["sonar_range"].astype(float).mode().iloc[0])
             if R > 0:
                 self.r = np.linspace(0.0, R, self.n_samples, dtype=np.float32)
-                print(f"📏 Using sonar_range: 0.0 → {R:.1f}m")
+                print(f"Using sonar_range: 0.0 → {R:.1f}m")
                 return self.r
         
         # Try sample_period
@@ -183,12 +183,12 @@ class Ping360Visualizer:
                 sample_dt = sp_val * 1e-6
             dr = (default_c_ms * sample_dt) / 2.0
             self.r = np.arange(self.n_samples, dtype=np.float32) * dr
-            print(f"📏 Computed from sample_period: 0.0 → {self.r[-1]:.1f}m")
+            print(f"Computed from sample_period: 0.0 → {self.r[-1]:.1f}m")
             return self.r
         
         # Fallback: bin index
         self.r = np.arange(self.n_samples, dtype=np.float32)
-        print("📏 Using bin indices as range axis")
+        print("Using bin indices as range axis")
         return self.r
     
     def gate_near_field(self):
@@ -204,8 +204,8 @@ class Ping360Visualizer:
         self.stack_g = self.stack[:, gate_bins:]
         self.r_g = self.r[gate_bins:]
         
-        print(f"🚪 Gated first {gate_bins} bins (~{self.gate_near_m}m)")
-        print(f"   New samples per ping: {self.stack_g.shape[1]}")
+        print(f"Gated first {gate_bins} bins (~{self.gate_near_m}m)")
+        print(f"New samples per ping: {self.stack_g.shape[1]}")
     
     def preprocess_data(self):
         """
@@ -214,7 +214,7 @@ class Ping360Visualizer:
         if self.stack_g is None:
             self.gate_near_field()
         
-        print("🔧 Applying preprocessing...")
+        print("Applying preprocessing...")
         
         # 1) dB conversion
         db = 20.0 * np.log10(self.stack_g.astype(np.float32) / 255.0 + self.db_eps)
@@ -246,7 +246,7 @@ class Ping360Visualizer:
         print(f"📐 Angle span: {ang_span[0]:.1f}° → {ang_span[1]:.1f}°")
         print(f"   Coverage: ~{ang_cov} unique integer degrees")
         
-        print("✅ Preprocessing complete")
+        print(" Preprocessing complete")
     
     def plot_raw_stack(self, figsize: Tuple[float, float] = (9, 4)):
         """
@@ -281,10 +281,10 @@ class Ping360Visualizer:
         """Verify consistency between angle_deg and angle_ping360 fields if present."""
         if "angle_ping360" in self.df.columns:
             err = (self.df["angle_deg"].astype(float) - self.df["angle_ping360"].astype(float) * 0.9).abs()
-            print("📊 Angle consistency (|angle_deg - 0.9*angle_ping360|) [deg]:")
+            print("Angle consistency (|angle_deg - 0.9*angle_ping360|) [deg]:")
             print(err.describe())
         else:
-            print("ℹ️  angle_ping360 not present; skipped consistency check.")
+            print("ℹangle_ping360 not present; skipped consistency check.")
     
     def create_polar_image(self, use_processed: bool = True) -> np.ndarray:
         """
@@ -631,15 +631,15 @@ def print_ping360_files(base_path: Union[str, pathlib.Path] = "."):
     
     if not files:
         # Use configured path in the message for clarity
-        print(f"❌ No Ping360 files found in {pathlib.Path(EXPORTS_DIR_DEFAULT) / EXPORTS_SUBDIRS.get('by_bag','by_bag')}/")
+        print(f"No Ping360 files found in {pathlib.Path(EXPORTS_DIR_DEFAULT) / EXPORTS_SUBDIRS.get('by_bag','by_bag')}/")
         return
     
-    print("🔍 Found Ping360 files:")
+    print("Found Ping360 files:")
     for i, (ping_csv, config_csv) in enumerate(files):
         print(f"[{i}] {ping_csv.name}")
         if config_csv:
             print(f"    + {config_csv.name}")
     
-    print(f"\n✅ Found {len(files)} Ping360 datasets")
-    print("💡 Use the index number to select a file in the next cell")
+    print(f"\n Found {len(files)} Ping360 datasets")
+    print("Use the index number to select a file in the next cell")
 

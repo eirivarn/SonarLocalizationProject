@@ -52,7 +52,7 @@ class Nucleus1000DVLAnalyzer:
         if self.by_bag_folder.exists():
             self._discover_files()
         else:
-            print(f"⚠️  Warning: {self.by_bag_folder} does not exist")
+            print(f"Warning: {self.by_bag_folder} does not exist")
     
     def _discover_files(self):
         """Discover available nucleus1000dvl and sensor_dvl files"""
@@ -133,8 +133,8 @@ class Nucleus1000DVLAnalyzer:
         pandas.DataFrame or dict : Loaded data
         """
         if sensor_type not in self.available_sensors:
-            print(f"❌ Sensor '{sensor_type}' not available")
-            print(f"   Available sensors: {', '.join(self.available_sensors)}")
+            print(f"Sensor '{sensor_type}' not available")
+            print(f"Available sensors: {', '.join(self.available_sensors)}")
             return None
         
         if bag_name is None:
@@ -146,13 +146,13 @@ class Nucleus1000DVLAnalyzer:
                     all_data[bag] = data
             
             if verbose:
-                print(f"✅ Loaded {sensor_type} data for {len(all_data)} bags")
+                print(f"Loaded {sensor_type} data for {len(all_data)} bags")
             
             return all_data
         else:
             # Load specific bag
             if bag_name not in self.available_bags:
-                print(f"❌ Bag '{bag_name}' not available")
+                print(f" Bag '{bag_name}' not available")
                 print(f"   Available bags: {', '.join(self.available_bags)}")
                 return None
             
@@ -172,7 +172,7 @@ class Nucleus1000DVLAnalyzer:
         
         if not filepath.exists():
             if verbose:
-                print(f"⚠️  File not found: {filename}")
+                print(f"File not found: {filename}")
             return None
         
         try:
@@ -195,12 +195,12 @@ class Nucleus1000DVLAnalyzer:
                         pass
             
             if verbose:
-                print(f"📁 Loaded {filename}: {len(df)} rows, {len(df.columns)} columns")
+                print(f"Loaded {filename}: {len(df)} rows, {len(df.columns)} columns")
             
             return df
             
         except Exception as e:
-            print(f"❌ Error loading {filename}: {e}")
+            print(f"Error loading {filename}: {e}")
             return None
     
     def get_summary(self, sensor_type=None):
@@ -212,21 +212,21 @@ class Nucleus1000DVLAnalyzer:
         sensor_type : str or None
             Specific sensor type, or None for all
         """
-        print("📊 Nucleus1000DVL Data Summary")
+        print("Nucleus1000DVL Data Summary")
         print("=" * 40)
         
         sensors_to_check = [sensor_type] if sensor_type else self.available_sensors
         
         for sensor in sensors_to_check:
-            print(f"\n🔧 {sensor.upper()}:")
+            print(f"\n{sensor.upper()}:")
             
             for bag in self.available_bags:
                 data = self._load_single_file(f"nucleus1000dvl_{sensor}", bag, verbose=False)
                 if data is not None:
                     duration = data['t_rel'].max() / 60.0 if 't_rel' in data.columns else 0
-                    print(f"   📅 {bag}: {len(data)} samples, {duration:.1f} min")
+                    print(f"   {bag}: {len(data)} samples, {duration:.1f} min")
                 else:
-                    print(f"   📅 {bag}: No data")
+                    print(f"   {bag}: No data")
     
     def plot_bottomtrack_velocity(self, bag_name=None, interactive=True):
         """
@@ -257,7 +257,7 @@ class Nucleus1000DVLAnalyzer:
         if HAS_PLOTLY:
             self._plot_bottomtrack_interactive(data, bags_to_plot, plot_title)
         else:
-            print("❌ Plotly not available. Install plotly to view interactive plots.")
+            print("Plotly not available. Install plotly to view interactive plots.")
     
     def _plot_bottomtrack_interactive(self, data, bags_to_plot, title):
         """Create interactive bottomtrack velocity plot with plotly"""
@@ -365,14 +365,14 @@ class Nucleus1000DVLAnalyzer:
             title = f"INS Data - {bag_name}"
         
         if df is None or len(df) == 0:
-            print(f"❌ No INS data for {bag_name}")
+            print(f"No INS data for {bag_name}")
             return
         
         # Always use interactive Plotly plots (matplotlib support removed)
         if HAS_PLOTLY:
             self._plot_ins_interactive(df, variables, title)
         else:
-            print("❌ Plotly not available. Install plotly to view interactive plots.")
+            print("Plotly not available. Install plotly to view interactive plots.")
     
     def _plot_ins_interactive(self, df, variables, title):
         """Create interactive INS plot with plotly"""
@@ -443,7 +443,7 @@ class Nucleus1000DVLAnalyzer:
         if HAS_PLOTLY:
             self._plot_trajectory_2d_interactive(data, bags_to_plot, title)
         else:
-            print("❌ Plotly not available. Install plotly to view interactive plots.")
+            print("Plotly not available. Install plotly to view interactive plots.")
     
     def _plot_trajectory_2d_interactive(self, data, bags_to_plot, title):
         """Create interactive 2D trajectory plot"""
@@ -512,7 +512,7 @@ class Nucleus1000DVLAnalyzer:
         and is useful for quickly inspecting available sensors for a bag.
         """
         if bag_name is None:
-            print("❌ No bag specified for exploration")
+            print("No bag specified for exploration")
             return
 
         print(f"\n🔍 Exploring bag: {bag_name}")
@@ -524,10 +524,10 @@ class Nucleus1000DVLAnalyzer:
                     duration_min = data['t_rel'].max() / 60.0 if 't_rel' in data.columns else 0
                 except Exception:
                     duration_min = 0
-                print(f"   📏 Shape: {data.shape}")
-                print(f"   ⏱️  Duration: {duration_min:.1f} minutes")
+                print(f" Shape: {data.shape}")
+                print(f" Duration: {duration_min:.1f} minutes")
             else:
-                print("   ❌ No data available")
+                print(" No data available")
 
     def compare_bottomtrack_across_bags(self, output_folder: str | None = None, export_plots=False):
         """
@@ -536,10 +536,10 @@ class Nucleus1000DVLAnalyzer:
         This encapsulates the multi-file comparison notebook cell.
         """
         if 'bottomtrack' not in self.available_sensors or len(self.available_bags) <= 1:
-            print("⚠️  Not enough bottomtrack data across bags for comparison")
+            print("Not enough bottomtrack data across bags for comparison")
             return
 
-        print(f"📊 Comparing bottomtrack across {len(self.available_bags)} bags")
+        print(f"Comparing bottomtrack across {len(self.available_bags)} bags")
         # Delegate to the interactive bottomtrack plot (handles multi-bag)
         # Resolve output folder using configured defaults if not provided
         if output_folder is None:
@@ -550,9 +550,9 @@ class Nucleus1000DVLAnalyzer:
             try:
                 self.plot_bottomtrack_velocity(output_folder, interactive=True)
             except Exception as e:
-                print(f"⚠️ Failed to create interactive bottomtrack comparison: {e}")
+                print(f"Failed to create interactive bottomtrack comparison: {e}")
         else:
-            print("❌ Plotly not available. Install plotly to view interactive comparisons.")
+            print("Plotly not available. Install plotly to view interactive comparisons.")
 
     def compute_summary_stats(self, export_summary=True, output_folder: str | None = None):
         """
@@ -589,7 +589,7 @@ class Nucleus1000DVLAnalyzer:
             outp = Path(output_folder) / "nucleus1000dvl_detailed_summary.csv"
             outp.parent.mkdir(parents=True, exist_ok=True)
             summary_df.to_csv(outp, index=False)
-            print(f"💾 Summary exported to: {outp}")
+            print(f"Summary exported to: {outp}")
 
         return summary_df
 
@@ -609,7 +609,7 @@ class Nucleus1000DVLAnalyzer:
             nav_analyzer.compare_navigation_guidance(bag_name, interactive=interactive)
             return True
         except Exception as e:
-            print(f"⚠️ Navigation/guidance analysis failed: {e}")
+            print(f"Navigation/guidance analysis failed: {e}")
             return False
  
     def compare_dvl_sensors(self, bag_name=None, interactive=True):
@@ -625,12 +625,12 @@ class Nucleus1000DVLAnalyzer:
         """
         if bag_name is None:
             if not self.available_bags:
-                print("❌ No bags available")
+                print("No bags available")
                 return
             bag_name = self.available_bags[0]
-            print(f"📊 Using bag: {bag_name}")
+            print(f"Using bag: {bag_name}")
         
-        print(f"🔄 Comparing DVL sensors for bag: {bag_name}")
+        print(f"Comparing DVL sensors for bag: {bag_name}")
         
         # Load nucleus1000dvl data
         nucleus_bt = self.load_sensor_data("bottomtrack", bag_name, verbose=False)
@@ -782,10 +782,10 @@ def create_comprehensive_dvl_dashboard(analyzer, bag_name=None, output_html="dvl
     # Determine which bag to use
     if bag_name is None:
         if not analyzer.available_bags:
-            print("❌ No bags available")
+            print("No bags available")
             return
         bag_name = analyzer.available_bags[0]
-        print(f"📊 Using bag: {bag_name}")
+        print(f"Using bag: {bag_name}")
     
     # Load all sensor data for the bag
     sensor_data = {}
@@ -865,7 +865,7 @@ def create_comprehensive_dvl_dashboard(analyzer, bag_name=None, output_html="dvl
     output_path.parent.mkdir(parents=True, exist_ok=True)
     
     pyo.plot(fig, filename=str(output_path), auto_open=False)
-    print(f"📊 Dashboard saved to: {output_path}")
+    print(f"Dashboard saved to: {output_path}")
     
     return fig
 
@@ -889,12 +889,12 @@ def run_full_notebook_workflow(by_bag_folder: str | None = None, bag_selection=N
     Parameters mirror the top-level notebook configuration so the notebook
     can call this single function.
     """
-    print("🚀 Running full Nucleus1000DVL notebook workflow...")
+    print("Running full Nucleus1000DVL notebook workflow...")
     analyzer = Nucleus1000DVLAnalyzer(by_bag_folder)
 
-    print(f"\n📋 Data Discovery Summary:")
-    print(f"   📅 Available bags: {len(analyzer.available_bags)}")
-    print(f"   🔧 Available sensors: {len(analyzer.available_sensors)}")
+    print(f"\nData Discovery Summary:")
+    print(f"Available bags: {len(analyzer.available_bags)}")
+    print(f"Available sensors: {len(analyzer.available_sensors)}")
 
     # Choose bag
     selected_bag = bag_selection
@@ -902,51 +902,51 @@ def run_full_notebook_workflow(by_bag_folder: str | None = None, bag_selection=N
         selected_bag = analyzer.available_bags[0]
 
     if selected_bag is None:
-        print("❌ No bag available. Aborting workflow.")
+        print("No bag available. Aborting workflow.")
         return {'error': 'no_bag'}
 
-    print(f"\n📅 Using bag: {selected_bag}")
+    print(f"\nUsing bag: {selected_bag}")
     
     # Get sensors available for this specific bag
     available_sensors_for_bag = analyzer.get_sensors_for_bag(selected_bag)
-    print(f"   🔧 Sensors available for this bag: {', '.join(available_sensors_for_bag)}")
+    print(f"Sensors available for this bag: {', '.join(available_sensors_for_bag)}")
 
     # Basic exploration
-    print("\n📊 Basic data exploration for selected bag")
+    print("\nBasic data exploration for selected bag")
     for sensor in available_sensors_for_bag:
-        print(f"\n🔧 {sensor.upper()} Data:")
+        print(f"\n{sensor.upper()} Data:")
         data = analyzer.load_sensor_data(sensor, selected_bag, verbose=False)
         if data is not None and len(data) > 0:
             try:
                 duration_min = data['t_rel'].max() / 60.0 if 't_rel' in data.columns else 0
             except Exception:
                 duration_min = 0
-            print(f"   📏 Shape: {data.shape}")
-            print(f"   ⏱️  Duration: {duration_min:.1f} minutes")
+            print(f"Shape: {data.shape}")
+            print(f"Duration: {duration_min:.1f} minutes")
         else:
-            print("   ❌ No data available")
+            print("No data available")
 
     # Generate targeted plots (non-interactive by default unless interactive True)
-    print("\n🚀 Generating plots (may open interactive windows if enabled)...")
+    print("\nGenerating plots (may open interactive windows if enabled)...")
     # Bottomtrack
     if 'bottomtrack' in analyzer.available_sensors:
         try:
             analyzer.plot_bottomtrack_velocity(selected_bag if selected_bag else None, interactive=interactive)
         except Exception as e:
-            print(f"⚠️ Failed to plot bottomtrack: {e}")
+            print(f"Failed to plot bottomtrack: {e}")
 
     # Trajectory
     if 'ins' in analyzer.available_sensors:
         try:
             analyzer.plot_trajectory_2d(selected_bag if selected_bag else None, interactive=interactive)
         except Exception as e:
-            print(f"⚠️ Failed to plot trajectory: {e}")
+            print(f"Failed to plot trajectory: {e}")
 
     # INS data
     try:
         analyzer.plot_ins_data(selected_bag if selected_bag else None, variables=['position', 'velocity'], interactive=interactive)
     except Exception as e:
-        print(f"⚠️ Failed to plot INS: {e}")
+        print(f"Failed to plot INS: {e}")
 
     # Multi-file comparison across bags (if multiple)
     if len(analyzer.available_bags) > 1:
@@ -957,11 +957,11 @@ def run_full_notebook_workflow(by_bag_folder: str | None = None, bag_selection=N
             # The original notebook produced bottomtrack comparison; reuse that
             analyzer.plot_bottomtrack_velocity(None, interactive=interactive)
         except Exception as e:
-            print(f"⚠️ Multi-file comparison failed: {e}")
+            print(f" Multi-file comparison failed: {e}")
 
     # Statistical summary and export
     try:
-        print("\n📊 Computing summary statistics...")
+        print("\n Computing summary statistics...")
         # Reuse notebook-style summary generation
         summary_stats = []
         for sensor in analyzer.available_sensors:
@@ -974,31 +974,31 @@ def run_full_notebook_workflow(by_bag_folder: str | None = None, bag_selection=N
                     summary_stats.append(entry)
         if summary_stats:
             summary_df = pd.DataFrame(summary_stats)
-            print(f"\n📋 Overall Summary: {len(summary_df)} datasets")
+            print(f"\nOverall Summary: {len(summary_df)} datasets")
             if export_summary:
                 outp = Path(output_folder) / "nucleus1000dvl_detailed_summary.csv"
                 outp.parent.mkdir(parents=True, exist_ok=True)
                 summary_df.to_csv(outp, index=False)
-                print(f"💾 Summary exported to: {outp}")
+                print(f"Summary exported to: {outp}")
     except Exception as e:
-        print(f"⚠️ Summary generation failed: {e}")
+        print(f" Summary generation failed: {e}")
 
     # Dashboard creation
     try:
         if interactive and HAS_PLOTLY:
-            print("\n🎛️ Creating interactive dashboard...")
+            print("\nCreating interactive dashboard...")
             create_comprehensive_dvl_dashboard(analyzer, bag_name=selected_bag, output_html="nucleus1000dvl_dashboard.html")
         else:
-            print("\nℹ️ Skipping interactive dashboard (Plotly not available or interactive=False).")
+            print("\nℹSkipping interactive dashboard (Plotly not available or interactive=False).")
     except Exception as e:
-        print(f"⚠️ Dashboard creation failed: {e}")
+        print(f" Dashboard creation failed: {e}")
 
     # DVL sensor comparison
     try:
-        print("\n🔍 Running DVL sensor comparison...")
+        print("\nRunning DVL sensor comparison...")
         analyzer.compare_dvl_sensors(selected_bag, interactive=interactive)
     except Exception as e:
-        print(f"⚠️ DVL sensor comparison failed: {e}")
+        print(f" DVL sensor comparison failed: {e}")
 
-    print("\n✅ Notebook workflow complete.")
+    print("\n Notebook workflow complete.")
     return {'status': 'done', 'selected_bag': selected_bag}

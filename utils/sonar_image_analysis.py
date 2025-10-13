@@ -1833,7 +1833,7 @@ class ComparisonEngine:
         }
         
         # Print summary
-        print("\n📊 SONAR vs DVL COMPARISON STATISTICS:")
+        print("\nSONAR vs DVL COMPARISON STATISTICS:")
         print("="*50)
         print(f"Sonar mean distance: {sonar_mean:.3f} m")
         print(f"DVL mean distance:   {dvl_mean:.3f} m")
@@ -1893,7 +1893,7 @@ class ComparisonEngine:
         
         # Update layout
         title = "Interactive Distance & Pitch Comparison" if has_pitch else "Interactive Distance Comparison"
-        fig.update_layout(title=f"🔄 {title}: Sonar vs DVL", hovermode='x unified',
+        fig.update_layout(title=f"{title}: Sonar vs DVL", hovermode='x unified',
                          height=800 if has_pitch else 600)
         
         # Update axes
@@ -2082,10 +2082,10 @@ def create_enhanced_contour_detection_video_with_processor(npz_file_index=0, fra
         fallback_path = outp.with_suffix('.avi')
         vw = cv2.VideoWriter(str(fallback_path), cv2.VideoWriter_fourcc(*'XVID'), VIDEO_CONFIG['fps'], (W, H))
         if vw.isOpened():
-            print(f"⚠️ Fallback: Using {fallback_path} (AVI format)")
+            print(f"Fallback: Using {fallback_path} (AVI format)")
             outp = fallback_path
         else:
-            print("❌ Error: Could not initialize video writer")
+            print("Error: Could not initialize video writer")
             return None
 
     # Reset processor tracking
@@ -2094,7 +2094,7 @@ def create_enhanced_contour_detection_video_with_processor(npz_file_index=0, fra
     # Tracking statistics
     tracked, new, lost = 0, 0, 0
     
-    print(f"✅ Processing {actual} frames with simplified processor...")
+    print(f"Processing {actual} frames with simplified processor...")
     
     for i in range(actual):
         idx = frame_start + i * frame_step
@@ -2220,7 +2220,7 @@ def create_enhanced_contour_detection_video_with_processor(npz_file_index=0, fra
     print(f"\n=== ENHANCED VIDEO CREATION COMPLETE ===")
     print(f"Video saved to: {output_path}")
     print(f"Video specs: {W}x{H}, {VIDEO_CONFIG['fps']} fps, {actual} frames")
-    print(f"🟢 SIMPLIFIED TRACKING STATS:")
+    print(f"SIMPLIFIED TRACKING STATS:")
     total_det = tracked + new
     print(f"  - Total detected frames: {total_det}")
     print(f"  - Lost/searching frames: {lost}")

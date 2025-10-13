@@ -53,7 +53,7 @@ class NavigationGuidanceAnalyzer:
         if self.by_bag_folder.exists():
             self._discover_files()
         else:
-            print(f"⚠️  Warning: {by_bag_folder} does not exist")
+            print(f"  Warning: {by_bag_folder} does not exist")
     
     def _discover_files(self):
         """Discover available navigation and guidance files"""
@@ -83,9 +83,9 @@ class NavigationGuidanceAnalyzer:
         self.available_bags = sorted(list(bags))
         self.available_sensors = sorted(list(sensors))
         
-        print(f"🔍 Found Navigation/Guidance data:")
-        print(f"   📅 Bags: {len(self.available_bags)}")
-        print(f"   📊 Sensors: {len(self.available_sensors)}")
+        print(f" Found Navigation/Guidance data:")
+        print(f"    Bags: {len(self.available_bags)}")
+        print(f"    Sensors: {len(self.available_sensors)}")
         print(f"   Sensors: {', '.join(self.available_sensors)}")
     
     def load_sensor_data(self, sensor_type, bag_name=None, verbose=True):
@@ -110,7 +110,7 @@ class NavigationGuidanceAnalyzer:
             bag_name = self.available_bags[0] if self.available_bags else None
             
         if bag_name is None:
-            print("❌ No bags available")
+            print(" No bags available")
             return None
             
         return self._load_single_file(sensor_type, bag_name, verbose)
@@ -122,7 +122,7 @@ class NavigationGuidanceAnalyzer:
         
         if not file_path.exists():
             if verbose:
-                print(f"❌ File not found: {file_pattern}")
+                print(f" File not found: {file_pattern}")
             return None
         
         try:
@@ -142,13 +142,13 @@ class NavigationGuidanceAnalyzer:
                 data['t_rel_min'] = data['t_rel'] / 60.0
             
             if verbose:
-                print(f"📁 Loaded {file_pattern}: {len(data)} rows, {len(data.columns)} columns")
+                print(f" Loaded {file_pattern}: {len(data)} rows, {len(data.columns)} columns")
             
             return data
             
         except Exception as e:
             if verbose:
-                print(f"❌ Error loading {file_pattern}: {e}")
+                print(f" Error loading {file_pattern}: {e}")
             return None
     
     def analyze_guidance_errors(self, bag_name=None, interactive=True):
@@ -168,10 +168,10 @@ class NavigationGuidanceAnalyzer:
         guidance_data = self.load_sensor_data("guidance", bag_name)
         
         if guidance_data is None:
-            print("❌ No guidance data available")
+            print(" No guidance data available")
             return
         
-        print(f"🎯 Analyzing guidance errors for bag: {bag_name}")
+        print(f" Analyzing guidance errors for bag: {bag_name}")
         
         # Error columns
         error_cols = [col for col in guidance_data.columns if col.startswith('error_')]
@@ -538,13 +538,13 @@ class NavigationGuidanceAnalyzer:
         plane_pos_data = self.load_sensor_data("navigation_plane_approximation_position", bag_name)
         
         if guidance_data is None or plane_data is None:
-            print("❌ Missing guidance or navigation data")
+            print(" Missing guidance or navigation data")
             return
         
         print(f"⚖️  Comparing navigation and guidance for bag: {bag_name}")
         
         # Print summary statistics
-        print(f"\n📊 Data Summary:")
+        print(f"\n Data Summary:")
         print(f"  - Guidance samples: {len(guidance_data)}")
         print(f"  - Navigation plane samples: {len(plane_data)}")
         if plane_pos_data is not None:
@@ -554,7 +554,7 @@ class NavigationGuidanceAnalyzer:
         guidance_duration = guidance_data['t_rel'].max() / 60.0
         plane_duration = plane_data['t_rel'].max() / 60.0
         
-        print(f"\n🕐 Sampling Rates:")
+        print(f"\n Sampling Rates:")
         print(f"  - Guidance: {len(guidance_data)/guidance_duration:.1f} samples/min")
         print(f"  - Navigation plane: {len(plane_data)/plane_duration:.1f} samples/min")
         
@@ -750,6 +750,6 @@ class NavigationGuidanceAnalyzer:
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         summary_df.to_csv(output_path, index=False)
-        print(f"✅ Summary exported to: {output_path}")
+        print(f" Summary exported to: {output_path}")
 
         return summary_df
