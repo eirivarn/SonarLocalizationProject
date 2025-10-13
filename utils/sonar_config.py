@@ -77,7 +77,7 @@ class ConeGridSpec:
 IMAGE_PROCESSING_CONFIG: Dict = {
     
     # === BINARY CONVERSION (NEW: SIGNAL-STRENGTH INDEPENDENT) ===
-    'binary_threshold': 50,            # Threshold for converting frame to binary (0-255)
+    'binary_threshold': 90,            # Threshold for converting frame to binary (0-255)
                                         # Pixels > threshold become white (255), others black (0)
                                         # Makes pipeline completely signal-strength independent
                                         # Focus on structural patterns only
@@ -90,25 +90,25 @@ IMAGE_PROCESSING_CONFIG: Dict = {
 
     # === ADAPTIVE LINEAR MERGING ===
 
-    'adaptive_base_radius': 2,          # Base circular merging radius 
+    'adaptive_base_radius':2,           # Base circular merging radius 
                                         # Starting radius for circular kernel before elongation
                                         # Larger values = more aggressive base merging
 
-    'adaptive_max_elongation': 4,        # Maximum elongation factor
-                                        # 1.0 = always circular, 4.0 = ellipse can be 4x longer than wide
-                                        # Higher values = stronger linear feature enhancement
+    'adaptive_max_elongation': 5,        # Maximum elongation factor
+                                         # 1.0 = always circular, 4.0 = ellipse can be 4x longer than wide
+                                         # Higher values = stronger linear feature enhancement
 
-    'adaptive_linearity_threshold': 0.3, # Minimum linearity to trigger elongation 
-                                        # Lower values = more pixels get elliptical kernels (more sensitive)
-                                        # Higher values = only very linear patterns get elongated (selective)
+    'adaptive_linearity_threshold': 0.75, # Minimum linearity to trigger elongation 
+                                         # Lower values = more pixels get elliptical kernels (more sensitive)
+                                         # Higher values = only very linear patterns get elongated (selective)
 
-    'adaptive_angle_steps': 10,           # Number of angles tested for linearity 
-                                        # Uses 20° increments for optimal speed/quality balance
-                                        # More steps = better angle resolution but slower processing
+    'adaptive_angle_steps': 10,          # Number of angles tested for linearity 
+                                         # Uses 20° increments for optimal speed/quality balance
+                                         # More steps = better angle resolution but slower processing
 
-    'momentum_boost': 10.0,             # Enhancement strength multiplier 
-                                        # Higher values = stronger directional feature enhancement
-                                        # Lower values = more subtle enhancement, preserves original intensities
+    'momentum_boost': 30.0,              # Enhancement strength multiplier 
+                                         # Higher values = stronger directional feature enhancement
+                                         # Lower values = more subtle enhancement, preserves original intensities
     
     # === EDGE DETECTION (SIMPLIFIED FOR BINARY DATA) ===
     # Binary edge detection using gradient operators - no Canny parameters needed

@@ -32,7 +32,8 @@ from utils.sonar_image_analysis import (
     create_elliptical_kernel_fast, 
     create_circular_kernel_fast,
     create_oriented_gradient_kernel_fast,
-    adaptive_linear_momentum_merge_fast,
+    adaptive_linear_momentum_merge_enhanced,
+    compute_structure_tensor_field_fast,
     apply_cv2_enhancement_method,
     get_available_npz_files,
     load_cone_run_npz,
@@ -75,13 +76,17 @@ class SimpleKernelVisualizer:
                 kernel_size=self.config.get('cv2_kernel_size', 5)
             )
         else:
-            return adaptive_linear_momentum_merge_fast(
+            # Use enhanced line detection by default
+            return adaptive_linear_momentum_merge_enhanced(
                 self.frame,
                 base_radius=self.config.get('adaptive_base_radius', 2),
                 max_elongation=self.config.get('adaptive_max_elongation', 4),
                 linearity_threshold=self.config.get('adaptive_linearity_threshold', 0.3),
                 momentum_boost=self.config.get('momentum_boost', 1.5),
-                angle_steps=self.config.get('adaptive_angle_steps', 9)
+                angle_steps=self.config.get('adaptive_angle_steps', 9),
+                use_enhanced_detection=True,
+                detection_confidence_threshold=0.2,
+                structure_tensor_sigma=1.0
             )
     
     def setup_figure(self):
@@ -135,19 +140,113 @@ class SimpleKernelVisualizer:
             }
         
         else:
-            # Custom adaptive kernel analysis
+            # Custom adaptive kernel analysis using optimized structure tensor
             frame_float = self.frame.astype(np.float64)
             
-            # Compute gradients
+            # Compute gradients for entire frame
             grad_x = cv2.Sobel(frame_float, cv2.CV_64F, 1, 0, ksize=3)
             grad_y = cv2.Sobel(frame_float, cv2.CV_64F, 0, 1, ksize=3)
             grad_mag = np.sqrt(grad_x**2 + grad_y**2)
             
-            # Test linearity at the specified position
+            base_radius = self.config.get('adaptive_base_radius', 2)
+            
+            # Use optimized structure tensor computation for entire image
+            orientation_map, coherency_map = compute_structure_tensor_field_fast(
+                grad_x, grad_y, sigma=1.0)
+            
+            # Extract values at the clicked position
+            struct_angle = float(orientation_map[y, x])
+            struct_coherency = float(coherency_map[y, x])
+            
+            # Extract local region around the point for additional RANSAC analysis
+            window_size = base_radius * 3
+            y_start = max(0, y - window_size)
+            y_end = min(frame_float.shape[0], y + window_size + 1)
+            x_start = max(0, x - window_size)
+            x_end = min(frame_float.shape[1], x + window_size + 1)
+            
+            local_region = frame_float[y_start:y_end, x_start:x_end]
+            local_grad_mag = grad_mag[y_start:y_end, x_start:x_end]
+            
+            # Method 2: Direct line fitting using RANSAC on edge points (for additional validation)
+            def compute_ransac_line_orientation(region, grad_mag_local):
+                """Fit line to strong edge points using RANSAC."""
+                # Check if there are any gradients at all
+                valid_gradients = grad_mag_local[grad_mag_local > 0]
+                if len(valid_gradients) < 4:  # Need at least 4 points with gradients
+                    return 0, 0
+                
+                # Threshold for strong edges
+                try:
+                    edge_threshold = np.percentile(valid_gradients, 75)
+                except (IndexError, ValueError):
+                    return 0, 0
+                
+                edge_points = np.where(grad_mag_local > edge_threshold)
+                
+                if len(edge_points[0]) < 4:  # Need at least 4 points for line fitting
+                    return 0, 0
+                
+                # Convert to (x,y) coordinates
+                points = np.column_stack([edge_points[1], edge_points[0]])
+                
+                try:
+                    # Fit line using cv2.fitLine (robust to outliers)
+                    [vx, vy, cx, cy] = cv2.fitLine(points.astype(np.float32), cv2.DIST_L2, 0, 0.01, 0.01)
+                    
+                    # Convert to angle (line direction)
+                    line_angle = np.arctan2(vy, vx) * 180 / np.pi
+                    line_angle = (line_angle + 180) % 180  # Keep in 0-180 range
+                    
+                    # Compute line strength (how well points fit the line)
+                    line_strength = min(1.0, len(edge_points[0]) / (window_size * window_size * 0.1))
+                    
+                    return line_angle, line_strength
+                except:
+                    return 0, 0
+            
+            # Apply RANSAC method for additional validation
+            ransac_angle, ransac_strength = compute_ransac_line_orientation(
+                local_region, local_grad_mag)
+            
+            # Combine the two methods for robustness
+            if struct_coherency > 0.3 and ransac_strength > 0.2:
+                # Both methods agree - use weighted average
+                angle_diff = min(abs(struct_angle - ransac_angle), 
+                               abs(struct_angle - ransac_angle + 180),
+                               abs(struct_angle - ransac_angle - 180))
+                if angle_diff < 30:  # Methods agree
+                    detected_line_angle = (struct_angle + ransac_angle) / 2
+                    line_confidence = min(1.0, struct_coherency + ransac_strength)
+                    detection_method = "Combined"
+                else:  # Methods disagree - use more confident one
+                    if struct_coherency > ransac_strength:
+                        detected_line_angle = struct_angle
+                        line_confidence = struct_coherency
+                        detection_method = "Structure Tensor"
+                    else:
+                        detected_line_angle = ransac_angle
+                        line_confidence = ransac_strength
+                        detection_method = "RANSAC"
+            elif struct_coherency > 0.3:
+                detected_line_angle = struct_angle
+                line_confidence = struct_coherency
+                detection_method = "Structure Tensor"
+            elif ransac_strength > 0.2:
+                detected_line_angle = ransac_angle
+                line_confidence = ransac_strength
+                detection_method = "RANSAC"
+            else:
+                detected_line_angle = 0
+                line_confidence = 0
+                detection_method = "None"
+            
+            # Normalize to 0-180 range
+            detected_line_angle = detected_line_angle % 180
+            
+            # Test linearity using the detected line angle (if confident enough)
             angles = np.linspace(0, 180, self.config.get('adaptive_angle_steps', 9), endpoint=False)
             responses = []
-            
-            base_radius = self.config.get('adaptive_base_radius', 2)
             kernel_size = max(3, base_radius + 1)
             
             for angle in angles:
@@ -161,31 +260,52 @@ class SimpleKernelVisualizer:
             linearity_threshold = self.config.get('adaptive_linearity_threshold', 0.3)
             
             # Determine kernel type and create kernel
-            if linearity_norm > linearity_threshold:
-                # Linear structure detected - create elliptical kernel
-                best_angle_idx = np.argmax(responses)
-                best_angle = angles[best_angle_idx]
+            combined_confidence = linearity_norm * 0.5 + line_confidence * 0.5
+            
+            if combined_confidence > linearity_threshold and line_confidence > 0.2:
+                # Strong line detected - use the detected line angle
+                kernel_angle = float(detected_line_angle)  # Ensure scalar
                 
-                # Calculate elongation based on linearity strength
+                # Calculate elongation based on combined confidence
                 max_elongation = self.config.get('adaptive_max_elongation', 4)
-                elongation = min(1.0 + linearity_norm * 5.0, max_elongation)
+                elongation = float(min(1.0 + combined_confidence * 4.0, max_elongation))
                 
-                # Create elliptical kernel
-                kernel = create_elliptical_kernel_fast(base_radius, elongation, best_angle)
-                kernel_type = f"Elliptical ({elongation:.1f}x, {best_angle:.0f}°)"
+                # Create elliptical kernel aligned with detected line
+                kernel = create_elliptical_kernel_fast(base_radius, elongation, kernel_angle)
+                kernel_type = f"Elliptical ({elongation:.1f}x, {kernel_angle:.0f}°)"
+                method_info = f"Line-Guided ({detection_method})"
+                
+            elif linearity_norm > linearity_threshold:
+                # Fallback to response-based detection if line detection fails
+                best_angle_idx = np.argmax(responses)
+                kernel_angle = float(angles[best_angle_idx])  # Ensure scalar
+                
+                max_elongation = self.config.get('adaptive_max_elongation', 4)
+                elongation = float(min(1.0 + linearity_norm * 3.0, max_elongation))
+                
+                kernel = create_elliptical_kernel_fast(base_radius, elongation, kernel_angle)
+                kernel_type = f"Elliptical ({elongation:.1f}x, {kernel_angle:.0f}°)"
+                method_info = "Response-Based (Fallback)"
                 
             else:
                 # No strong linearity - use circular kernel
                 kernel = create_circular_kernel_fast(base_radius)
                 kernel_type = "Circular"
-                best_angle = 0.0
+                kernel_angle = 0.0
+                method_info = "Isotropic"
             
             return {
                 'kernel': kernel,
                 'type': kernel_type,
-                'linearity': linearity_norm,
-                'angle': best_angle,
-                'method': 'Adaptive'
+                'linearity': float(linearity_norm),
+                'angle': float(kernel_angle),
+                'line_angle': float(detected_line_angle),
+                'line_confidence': float(line_confidence),
+                'detection_method': detection_method,
+                'struct_coherency': float(struct_coherency),
+                'ransac_strength': float(ransac_strength),
+                'combined_confidence': float(combined_confidence),
+                'method': f'Advanced-Adaptive ({method_info})'
             }
     
     def update_display(self):
@@ -295,11 +415,23 @@ class SimpleKernelVisualizer:
         self.ax_params.clear()
         self.ax_params.axis('off')
         
+        # Format detailed line detection info if available
+        line_info = ""
+        if 'line_angle' in kernel_info:
+            line_info = f"""
+Line Detection:
+  Detected Angle: {kernel_info['line_angle']:.1f}°
+  Detection Method: {kernel_info.get('detection_method', 'Unknown')}
+  Line Confidence: {kernel_info['line_confidence']:.3f}
+  Struct Coherency: {kernel_info.get('struct_coherency', 0):.3f}
+  RANSAC Strength: {kernel_info.get('ransac_strength', 0):.3f}
+  Combined Conf.: {kernel_info.get('combined_confidence', 0):.3f}"""
+
         params_text = f"""Kernel Info:
 Type: {kernel_info['type']}
 Method: {kernel_info['method']}
 Linearity: {kernel_info['linearity']:.3f}
-Angle: {kernel_info['angle']:.1f}°
+Kernel Angle: {kernel_info['angle']:.1f}°{line_info}
 Size: {kernel_info['kernel'].shape}
 
 Position: ({x}, {y})

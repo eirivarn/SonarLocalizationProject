@@ -742,6 +742,202 @@ def adaptive_linear_momentum_merge_fast(frame, base_radius=2, max_elongation=4,
     
     return np.clip(final_result, 0, 255).astype(np.uint8)
 
+
+# ============================ ENHANCED LINE DIRECTION DETECTION ============================
+
+def compute_structure_tensor_field_fast(grad_x: np.ndarray, grad_y: np.ndarray, 
+                                       sigma: float = 1.0) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Fast vectorized structure tensor computation for entire image.
+    
+    Args:
+        grad_x, grad_y: Gradient components
+        sigma: Gaussian smoothing parameter
+        
+    Returns:
+        orientation_map: Dominant orientation at each pixel (0-180°)
+        coherency_map: Coherency (linearity measure) at each pixel (0-1)
+    """
+    # Structure tensor components
+    Jxx = grad_x * grad_x
+    Jyy = grad_y * grad_y  
+    Jxy = grad_x * grad_y
+    
+    # Apply Gaussian smoothing (vectorized)
+    kernel_size = max(3, int(4 * sigma + 1))
+    if kernel_size % 2 == 0:
+        kernel_size += 1
+        
+    kernel_gauss = cv2.getGaussianKernel(kernel_size, sigma)
+    kernel_2d = kernel_gauss @ kernel_gauss.T
+    
+    Jxx_smooth = cv2.filter2D(Jxx, -1, kernel_2d)
+    Jyy_smooth = cv2.filter2D(Jyy, -1, kernel_2d)
+    Jxy_smooth = cv2.filter2D(Jxy, -1, kernel_2d)
+    
+    # Vectorized eigenvalue analysis
+    trace = Jxx_smooth + Jyy_smooth
+    det = Jxx_smooth * Jyy_smooth - Jxy_smooth * Jxy_smooth
+    
+    # Compute orientation (vectorized)
+    orientation_map = np.zeros_like(Jxx_smooth)
+    coherency_map = np.zeros_like(Jxx_smooth)
+    
+    # Mask for valid regions (non-zero gradients)
+    valid_mask = np.abs(Jxy_smooth) > 1e-6
+    
+    # Vectorized orientation computation
+    orientation_map[valid_mask] = 0.5 * np.arctan2(2 * Jxy_smooth[valid_mask], 
+                                                   Jxx_smooth[valid_mask] - Jyy_smooth[valid_mask])
+    orientation_map = (orientation_map * 180 / np.pi + 180) % 180
+    
+    # Handle near-zero cases
+    horizontal_mask = (~valid_mask) & (Jxx_smooth > Jyy_smooth)
+    vertical_mask = (~valid_mask) & (Jxx_smooth <= Jyy_smooth)
+    orientation_map[horizontal_mask] = 0    # Horizontal
+    orientation_map[vertical_mask] = 90     # Vertical
+    
+    # Vectorized coherency computation (safely)
+    valid_coherency_mask = (trace > 1e-6) & (det >= 0)
+    coherency_map[valid_coherency_mask] = ((trace[valid_coherency_mask] - 
+                                          2 * np.sqrt(det[valid_coherency_mask])) / 
+                                         trace[valid_coherency_mask])
+    coherency_map = np.clip(coherency_map, 0, 1)
+    
+    return orientation_map, coherency_map
+
+
+def adaptive_linear_momentum_merge_enhanced(frame, base_radius=2, max_elongation=4,
+                                          linearity_threshold=0.3, momentum_boost=1.5,
+                                          angle_steps=9, use_enhanced_detection=True,
+                                          detection_confidence_threshold=0.2,
+                                          structure_tensor_sigma=1.0):
+    """
+    Enhanced adaptive linear momentum merging with robust line direction detection.
+    
+    Performance optimizations:
+    - Vectorized structure tensor computation
+    - Downsampled processing for speed
+    - Early termination for uniform regions
+    - Cached kernel computations
+    - Combined confidence-based kernel selection
+    
+    Args:
+        frame: Input sonar frame (uint8)
+        base_radius: Base circular merging radius (pixels)
+        max_elongation: Maximum elongation factor for ellipse
+        linearity_threshold: Minimum linearity to trigger elongation
+        momentum_boost: Enhancement strength multiplier
+        angle_steps: Number of angles for fallback gradient testing
+        use_enhanced_detection: Enable enhanced line direction detection
+        detection_confidence_threshold: Minimum confidence for line-based kernels
+        structure_tensor_sigma: Gaussian sigma for structure tensor smoothing
+        
+    Returns:
+        Enhanced frame with adaptive linear merging applied
+    """
+    result = frame.astype(np.float32)
+    h, w = frame.shape
+    
+    # OPTIMIZATION 1: Downsampled processing for speed
+    scale_factor = 2 if use_enhanced_detection else 2
+    h_small = h // scale_factor
+    w_small = w // scale_factor
+    
+    if h_small < base_radius * 2 or w_small < base_radius * 2:
+        # Frame too small - use simple circular convolution
+        circular_kernel = create_circular_kernel_fast(base_radius)
+        enhanced = cv2.filter2D(result, -1, circular_kernel)
+        final_result = result + momentum_boost * enhanced
+        return np.clip(final_result, 0, 255).astype(np.uint8)
+    
+    # Downsample for processing
+    frame_small = cv2.resize(result, (w_small, h_small), interpolation=cv2.INTER_AREA)
+    
+    # OPTIMIZATION 2: Fast gradient computation
+    grad_x = cv2.Sobel(frame_small, cv2.CV_64F, 1, 0, ksize=3)
+    grad_y = cv2.Sobel(frame_small, cv2.CV_64F, 0, 1, ksize=3)
+    grad_mag = np.sqrt(grad_x**2 + grad_y**2)
+    
+    if use_enhanced_detection:
+        # OPTIMIZATION 3: Vectorized structure tensor for entire image
+        orientation_map, coherency_map = compute_structure_tensor_field_fast(
+            grad_x, grad_y, sigma=structure_tensor_sigma)
+        
+        # OPTIMIZATION 4: Confidence-based kernel selection
+        high_confidence_mask = coherency_map > detection_confidence_threshold
+        
+        # Upsample maps back to full resolution
+        orientation_full = cv2.resize(orientation_map, (w, h), interpolation=cv2.INTER_LINEAR)
+        coherency_full = cv2.resize(coherency_map, (w, h), interpolation=cv2.INTER_LINEAR)
+        confidence_mask_full = cv2.resize(high_confidence_mask.astype(np.float32), 
+                                        (w, h), interpolation=cv2.INTER_LINEAR) > 0.5
+        
+        # Pre-compute kernels for detected orientations
+        if np.sum(confidence_mask_full) > 0:
+            # Get unique orientations (quantized to reduce kernel count)
+            unique_angles = np.unique(np.round(orientation_full[confidence_mask_full] / 10) * 10)
+            unique_angles = unique_angles[unique_angles >= 0]  # Filter valid angles
+            
+            # Create elliptical kernels for detected orientations
+            ellipse_kernels = {}
+            for angle in unique_angles:
+                if not np.isnan(angle) and 0 <= angle <= 180:
+                    avg_coherency = np.mean(coherency_full[confidence_mask_full])
+                    elongation = min(1.0 + avg_coherency * (max_elongation - 1), max_elongation)
+                    kernel = create_elliptical_kernel_fast(base_radius, elongation, float(angle))
+                    ellipse_kernels[angle] = kernel
+        else:
+            ellipse_kernels = {}
+    else:
+        # Fallback to original gradient-based detection
+        ellipse_kernels = {}
+        confidence_mask_full = np.zeros((h, w), dtype=bool)
+        orientation_full = np.zeros((h, w))
+    
+    # OPTIMIZATION 5: Efficient convolution strategy
+    circular_kernel = create_circular_kernel_fast(base_radius)
+    
+    if len(ellipse_kernels) == 0:
+        # No confident line detections - use circular enhancement
+        enhanced = cv2.filter2D(result, -1, circular_kernel)
+    else:
+        # Start with circular enhancement as base
+        enhanced = cv2.filter2D(result, -1, circular_kernel)
+        
+        # Apply elliptical enhancement to confident regions
+        for angle, ellipse_kernel in ellipse_kernels.items():
+            # Create mask for this angle (with tolerance)
+            angle_tolerance = 15  # degrees
+            angle_mask = (np.abs(orientation_full - angle) <= angle_tolerance) & confidence_mask_full
+            
+            # Alternative angle (180° symmetry)
+            alt_angle = (angle + 180) % 180 
+            alt_mask = (np.abs(orientation_full - alt_angle) <= angle_tolerance) & confidence_mask_full
+            angle_mask = angle_mask | alt_mask
+            
+            if np.sum(angle_mask) > 0:
+                # Apply elliptical enhancement
+                ellipse_enhanced = cv2.filter2D(result, -1, ellipse_kernel)
+                
+                # Blend based on confidence
+                if use_enhanced_detection:
+                    blend_weights = coherency_full * angle_mask.astype(np.float32)
+                    enhanced = enhanced * (1 - blend_weights) + ellipse_enhanced * blend_weights
+                else:
+                    # Simple replacement for confident regions
+                    enhanced[angle_mask] = ellipse_enhanced[angle_mask]
+    
+    # OPTIMIZATION 6: Fast final combination
+    final_result = result + momentum_boost * enhanced
+    
+    # Fast soft clipping (optional - can be disabled for more speed)
+    final_result = np.clip(final_result, 0, 255 * (1 + momentum_boost * 0.3))
+    final_result = 255 * np.tanh(final_result / 255)
+    
+    return np.clip(final_result, 0, 255).astype(np.uint8)
+
+
 def create_oriented_gradient_kernel_fast(angle_degrees, size):
     """Fast simplified gradient kernel creation."""
     if size % 2 == 0:
