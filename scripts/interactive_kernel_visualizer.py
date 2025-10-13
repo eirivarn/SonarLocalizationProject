@@ -23,6 +23,7 @@ import numpy as np
 import cv2
 import matplotlib.pyplot as plt
 import argparse
+from matplotlib.patches import Rectangle
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -49,13 +50,20 @@ class SimpleKernelVisualizer:
         self.current_pos = (frame.shape[1]//2, frame.shape[0]//2)
         self.show_enhanced = False
         
+        # Initialize zoom parameters
+        self.current_zoom_params = {
+            'zoom_x1': 0, 'zoom_x2': 100,
+            'zoom_y1': 0, 'zoom_y2': 100,
+            'zoom_scale': 4
+        }
+        
         # Configuration
         self.config = IMAGE_PROCESSING_CONFIG.copy()
         
         # Pre-compute enhanced frame
         self.enhanced_frame = self._compute_enhanced_frame()
         
-        print("🎨 Setting up visualization...")
+        print("Setting up visualization...")
         self.setup_figure()
         
     def _compute_enhanced_frame(self):
@@ -77,11 +85,15 @@ class SimpleKernelVisualizer:
             )
     
     def setup_figure(self):
-        """Setup matplotlib figure with simpler layout."""
+        """Setup matplotlib figure with zoomed area view."""
         self.fig, ((self.ax_main, self.ax_kernel), 
-                  (self.ax_params, self.ax_config)) = plt.subplots(2, 2, figsize=(14, 10))
+                  (self.ax_zoom, self.ax_params), 
+                  (self.ax_config, self.ax_empty)) = plt.subplots(3, 2, figsize=(14, 12))
         
-        self.fig.suptitle('Simple Kernel Visualizer - Click to explore!', fontsize=14, fontweight='bold')
+        # Hide the empty subplot
+        self.ax_empty.axis('off')
+        
+        self.fig.suptitle('Interactive Kernel Visualizer - Click to explore!', fontsize=14, fontweight='bold')
         
         # Initial display
         self.update_display()
@@ -90,7 +102,7 @@ class SimpleKernelVisualizer:
         self.fig.canvas.mpl_connect('button_press_event', self.on_click)
         self.fig.canvas.mpl_connect('key_press_event', self.on_key_press)
         
-        print("✅ Figure setup complete")
+        print("Figure setup complete")
         
     def get_kernel_at_position(self, x, y):
         """Get merging kernel information at specified position."""
@@ -179,7 +191,7 @@ class SimpleKernelVisualizer:
     def update_display(self):
         """Update all display elements."""
         
-        print(f"🔄 Updating display at position ({self.current_pos[0]}, {self.current_pos[1]})")
+        print(f"Updating display at position ({self.current_pos[0]}, {self.current_pos[1]})")
         
         # Main image
         self.ax_main.clear()
@@ -204,7 +216,6 @@ class SimpleKernelVisualizer:
         y2 = y + half_size
         
         # Draw square outline with thin edge
-        from matplotlib.patches import Rectangle
         square = Rectangle((x1, y1), kernel_size, kernel_size, 
                          linewidth=1.5, edgecolor='red', facecolor='none', alpha=0.8)
         self.ax_main.add_patch(square)
@@ -228,19 +239,75 @@ class SimpleKernelVisualizer:
         im = self.ax_kernel.imshow(kernel_display, cmap='hot', aspect='equal')
         self.ax_kernel.set_title(f"Kernel at ({x}, {y})")
         
+        # Zoomed area view
+        self.ax_zoom.clear()
+        
+        # Extract the area within the red square with some padding
+        zoom_padding = 10
+        zoom_x1 = max(0, x1 - zoom_padding)
+        zoom_x2 = min(self.frame.shape[1], x2 + zoom_padding)
+        zoom_y1 = max(0, y1 - zoom_padding)
+        zoom_y2 = min(self.frame.shape[0], y2 + zoom_padding)
+        
+        # Store zoom parameters for use in params display
+        self.current_zoom_params = {
+            'zoom_x1': zoom_x1, 'zoom_x2': zoom_x2,
+            'zoom_y1': zoom_y1, 'zoom_y2': zoom_y2,
+            'zoom_scale': 4
+        }
+        
+        # Extract zoomed region from current display frame
+        zoomed_region = display_frame[zoom_y1:zoom_y2, zoom_x1:zoom_x2]
+        
+        if zoomed_region.size > 0:
+            # Scale up the zoomed region for better visibility
+            zoom_scale = self.current_zoom_params['zoom_scale']
+            zoomed_scaled = cv2.resize(zoomed_region, None, 
+                                     fx=zoom_scale, fy=zoom_scale, 
+                                     interpolation=cv2.INTER_NEAREST)
+            
+            self.ax_zoom.imshow(zoomed_scaled, cmap='viridis', aspect='equal')
+            
+            # Draw kernel area outline in zoomed view
+            # Adjust coordinates for the zoomed and scaled view
+            kernel_x_center = (x - zoom_x1) * zoom_scale
+            kernel_y_center = (y - zoom_y1) * zoom_scale
+            kernel_size_scaled = kernel_size * zoom_scale
+            
+            # Draw the kernel area
+            kernel_rect = Rectangle((kernel_x_center - kernel_size_scaled//2, 
+                                   kernel_y_center - kernel_size_scaled//2), 
+                                   kernel_size_scaled, kernel_size_scaled,
+                                   linewidth=2, edgecolor='red', facecolor='none', alpha=0.8)
+            self.ax_zoom.add_patch(kernel_rect)
+            
+            # Add center point
+            self.ax_zoom.plot(kernel_x_center, kernel_y_center, 'r.', markersize=8)
+            
+            self.ax_zoom.set_title(f"Zoomed Area ({zoom_scale}x) - Kernel Region")
+        else:
+            self.ax_zoom.text(0.5, 0.5, 'Invalid zoom region', 
+                            transform=self.ax_zoom.transAxes, 
+                            ha='center', va='center', fontsize=12)
+            self.ax_zoom.set_title("Zoom View")
+        
         # Kernel parameters
         self.ax_params.clear()
         self.ax_params.axis('off')
         
-        params_text = f"""Type: {kernel_info['type']}
+        params_text = f"""Kernel Info:
+Type: {kernel_info['type']}
 Method: {kernel_info['method']}
 Linearity: {kernel_info['linearity']:.3f}
 Angle: {kernel_info['angle']:.1f}°
 Size: {kernel_info['kernel'].shape}
-Position: ({x}, {y})"""
+
+Position: ({x}, {y})
+Zoom Region: ({self.current_zoom_params['zoom_x1']},{self.current_zoom_params['zoom_y1']}) to ({self.current_zoom_params['zoom_x2']},{self.current_zoom_params['zoom_y2']})
+Zoom Scale: {self.current_zoom_params['zoom_scale']}x"""
         
         self.ax_params.text(0.05, 0.95, params_text, transform=self.ax_params.transAxes,
-                          fontsize=11, verticalalignment='top', fontfamily='monospace')
+                          fontsize=10, verticalalignment='top', fontfamily='monospace')
         
         # Configuration panel
         self.ax_config.clear()
@@ -250,6 +317,11 @@ Position: ({x}, {y})"""
             config_text = f"""CV2 Enhancement
 Method: {self.config.get('cv2_method', 'morphological')}
 Kernel Size: {self.config.get('cv2_kernel_size', 5)}
+
+Views:
+- Main: Full sonar image
+- Kernel: Applied filter
+- Zoom: 4x magnified area
 
 Controls:
 [Click] Select position
@@ -261,6 +333,11 @@ Controls:
 Base Radius: {self.config.get('adaptive_base_radius', 2)}
 Max Elongation: {self.config.get('adaptive_max_elongation', 4)}
 Linearity Threshold: {self.config.get('adaptive_linearity_threshold', 0.3)}
+
+Views:
+- Main: Full sonar image
+- Kernel: Applied filter
+- Zoom: 4x magnified area
 
 Controls:
 [Click] Select position
@@ -278,12 +355,12 @@ Controls:
         """Handle mouse click events."""
         if event.inaxes == self.ax_main and event.xdata is not None and event.ydata is not None:
             self.current_pos = (int(event.xdata), int(event.ydata))
-            print(f"👆 Clicked at ({self.current_pos[0]}, {self.current_pos[1]})")
+            print(f"Clicked at ({self.current_pos[0]}, {self.current_pos[1]})")
             self.update_display()
     
     def on_key_press(self, event):
         """Handle key press events."""
-        print(f"⌨️ Key pressed: {event.key}")
+        print(f"Key pressed: {event.key}")
         
         if event.key == ' ':  # Space - toggle enhanced/original
             self.show_enhanced = not self.show_enhanced
@@ -291,12 +368,12 @@ Controls:
             
         elif event.key == 'c':  # Toggle CV2/Adaptive
             self.use_cv2 = not self.use_cv2
-            print(f"🔄 Switched to {'CV2' if self.use_cv2 else 'Adaptive'} mode")
+            print(f"Switched to {'CV2' if self.use_cv2 else 'Adaptive'} mode")
             self.enhanced_frame = self._compute_enhanced_frame()
             self.update_display()
             
         elif event.key == 'q':  # Quit
-            print("👋 Quitting...")
+            print("Quitting...")
             plt.close('all')
 
 
@@ -306,24 +383,24 @@ def load_sonar_frame(npz_index=0, frame_index=0):
     try:
         files = get_available_npz_files()
         if npz_index >= len(files):
-            print(f"❌ Error: NPZ index {npz_index} not available. Found {len(files)} files.")
+            print(f"Error: NPZ index {npz_index} not available. Found {len(files)} files.")
             return None
             
-        print(f"📁 Loading NPZ file {npz_index}: {files[npz_index].name}")
+        print(f"Loading NPZ file {npz_index}: {files[npz_index].name}")
         
         cones, timestamps, extent, metadata = load_cone_run_npz(files[npz_index])
         
         if frame_index >= len(cones):
-            print(f"❌ Error: Frame index {frame_index} not available. Found {len(cones)} frames.")
+            print(f"Error: Frame index {frame_index} not available. Found {len(cones)} frames.")
             return None
             
         frame = to_uint8_gray(cones[frame_index])
-        print(f"🖼️ Loaded frame {frame_index}: {frame.shape} pixels")
+        print(f"Loaded frame {frame_index}: {frame.shape} pixels")
         
         return frame
         
     except Exception as e:
-        print(f"❌ Error loading sonar frame: {e}")
+        print(f"Error loading sonar frame: {e}")
         return None
 
 
@@ -340,7 +417,7 @@ def main():
     
     args = parser.parse_args()
     
-    print("🌊 SOLAQUA Simple Kernel Visualizer")
+    print("SOLAQUA Simple Kernel Visualizer")
     print("=" * 50)
     
     # Load sonar frame
@@ -348,20 +425,20 @@ def main():
     if frame is None:
         return 1
     
-    print("🎮 Starting simple visualizer...")
+    print("Starting simple visualizer...")
     print("   Click on the sonar image to explore kernels!")
     
     # Create and show visualizer
     try:
         visualizer = SimpleKernelVisualizer(frame, use_cv2=args.use_cv2)
-        print("👀 Window should be visible. Click anywhere on the left image!")
+        print("Window should be visible. Click anywhere on the left image!")
         plt.show()
         
     except KeyboardInterrupt:
-        print("\n👋 Goodbye!")
+        print("\nGoodbye!")
         
     except Exception as e:
-        print(f"❌ Error in visualizer: {e}")
+        print(f"Error in visualizer: {e}")
         import traceback
         traceback.print_exc()
         return 1

@@ -23,6 +23,9 @@ Usage:
 
 import argparse
 import sys
+import tempfile
+import shutil
+import os
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 
@@ -148,7 +151,7 @@ class SOLAQUACompleteExporter:
                 if len(topics) > 5:
                     print(f"       ... and {len(topics) - 5} more")
             except Exception as e:
-                print(f"     ❌ Error inspecting: {e}")
+                print(f"Error inspecting: {e}")
         
         # Inspect first video bag
         if bags['video_bags']:
@@ -162,7 +165,7 @@ class SOLAQUACompleteExporter:
                 if len(topics) > 3:
                     print(f"       ... and {len(topics) - 3} more")
             except Exception as e:
-                print(f"     ❌ Error inspecting: {e}")
+                print(f"Error inspecting: {e}")
     
     def export_csv_data(
         self, 
@@ -179,7 +182,7 @@ class SOLAQUACompleteExporter:
         Returns:
             True if successful
         """
-        print(f"\n📊 Exporting data to {file_format.upper()}...")
+        print(f"\nExporting data to {file_format.upper()}...")
         print(f"   Include video sonar: {include_video_sonar}")
         
         try:
@@ -194,15 +197,15 @@ class SOLAQUACompleteExporter:
             self.results['csv_export']['success'] = True
             self.results['csv_export']['files'] = len(export_index_df)
             
-            print(f"✅ CSV export completed successfully!")
-            print(f"   Exported {len(export_index_df)} topic files")
+            print(f"CSV export completed successfully!")
+            print(f"Exported {len(export_index_df)} topic files")
             
             return True
             
         except Exception as e:
             error_msg = f"Error during CSV export: {e}"
             self.results['csv_export']['errors'].append(error_msg)
-            print(f"❌ {error_msg}")
+            print(f"{error_msg}")
             return False
     
     def export_videos(
@@ -220,7 +223,7 @@ class SOLAQUACompleteExporter:
         Returns:
             True if successful
         """
-        print(f"\n🎥 Exporting videos to MP4...")
+        print(f"\nExporting videos to MP4...")
         print(f"   Target FPS: {target_fps or 'auto-detect'}")
         if limit_per_bag:
             print(f"   Note: Video limit not supported for MP4 export, processing all videos")
@@ -236,15 +239,15 @@ class SOLAQUACompleteExporter:
             self.results['video_export']['success'] = True
             self.results['video_export']['files'] = len(idx_mp4)
             
-            print(f"✅ Video export completed successfully!")
-            print(f"   Exported {len(idx_mp4)} MP4 files")
+            print(f"Video export completed successfully!")
+            print(f"Exported {len(idx_mp4)} MP4 files")
             
             return True
             
         except Exception as e:
             error_msg = f"Error during video export: {e}"
             self.results['video_export']['errors'].append(error_msg)
-            print(f"❌ {error_msg}")
+            print(f"{error_msg}")
             return False
     
     def export_frames(
@@ -282,15 +285,15 @@ class SOLAQUACompleteExporter:
             self.results['frame_export']['success'] = True
             self.results['frame_export']['files'] = len(idx_png)
             
-            print(f"✅ Frame export completed successfully!")
-            print(f"   Exported {len(idx_png)} frame sequences")
+            print(f"Frame export completed successfully!")
+            print(f"Exported {len(idx_png)} frame sequences")
             
             return True
             
         except Exception as e:
             error_msg = f"Error during frame export: {e}"
             self.results['frame_export']['errors'].append(error_msg)
-            print(f"❌ {error_msg}")
+            print(f"{error_msg}")
             return False
 
     def extract_frames_from_mp4(
@@ -312,7 +315,7 @@ class SOLAQUACompleteExporter:
         Returns:
             True if successful
         """
-        print(f"\n🎬 Extracting PNG frames from MP4 videos...")
+        print(f"\n Extracting PNG frames from MP4 videos...")
         print(f"   Frame stride: {stride} (every {stride}th frame)")
         print(f"   Limit per video: {limit_per_video or 'no limit'}")
         print(f"   Resize to: {resize_to or 'original size'}")
@@ -330,13 +333,13 @@ class SOLAQUACompleteExporter:
             mp4_files = [f for f in mp4_files if 'compressed_image' in f.name and 'ted' not in f.name]
             
             if not mp4_files:
-                print(f"⚠️  No compressed_image MP4 files found in {videos_dir}")
-                print(f"   (Only processing compressed_image videos, not ted camera videos)")
-                print(f"   Falling back to bag export...")
+                print(f"No compressed_image MP4 files found in {videos_dir}")
+                print(f"(Only processing compressed_image videos, not ted camera videos)")
+                print(f"Falling back to bag export...")
                 return self.export_frames(stride=stride, limit_per_bag=limit_per_video, resize_to=resize_to)
-            
-            print(f"   Found {len(mp4_files)} compressed_image MP4 files (excluding ted camera videos)")
-            
+
+            print(f"Found {len(mp4_files)} compressed_image MP4 files (excluding ted camera videos)")
+
             # Prepare output directory
             frames_dir = self.exports_dir / EXPORTS_SUBDIRS.get('frames', 'frames')
             frames_dir.mkdir(parents=True, exist_ok=True)
@@ -352,7 +355,7 @@ class SOLAQUACompleteExporter:
                 output_dir = frames_dir / f"{video_stem}_frames"
                 
                 if output_dir.exists() and not overwrite:
-                    print(f"     ⏭️  Skipping (directory exists): {output_dir.name}")
+                    print(f"Skipping (directory exists): {output_dir.name}")
                     total_sequences += 1
                     continue
                 
@@ -362,16 +365,16 @@ class SOLAQUACompleteExporter:
                     # Open video file
                     cap = cv2.VideoCapture(str(mp4_file))
                     if not cap.isOpened():
-                        print(f"     ❌ Could not open video: {mp4_file.name}")
+                        print(f"Could not open video: {mp4_file.name}")
                         continue
                     
                     # Get video properties
                     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
                     fps = cap.get(cv2.CAP_PROP_FPS)
                     duration = total_frames / fps if fps > 0 else 0
-                    
-                    print(f"     📹 Video info: {total_frames} frames, {fps:.1f} FPS, {duration:.1f}s")
-                    
+
+                    print(f"Video info: {total_frames} frames, {fps:.1f} FPS, {duration:.1f}s")
+
                     # Extract frames
                     frame_count = 0
                     extracted_count = 0
@@ -431,7 +434,7 @@ class SOLAQUACompleteExporter:
                             bag_csv_path = self.exports_dir / EXPORTS_SUBDIRS.get('by_bag', 'by_bag') / f"sensor_sonoptix_echo_image__{bag_name}_video.csv"
                             
                             if bag_csv_path.exists():
-                                print(f"     🕐 Converting to absolute timestamps using {bag_csv_path.name}")
+                                print(f"Converting to absolute timestamps using {bag_csv_path.name}")
                                 bag_df = sonar_utils.load_df(bag_csv_path)
                                 
                                 # Get bag start time
@@ -443,48 +446,48 @@ class SOLAQUACompleteExporter:
                                 if "ts_utc" in bag_df.columns:
                                     bag_start_time = bag_df["ts_utc"].min()
                                     index_df['ts_utc'] = bag_start_time + pd.to_timedelta(index_df['timestamp_sec'], unit='s')
-                                    print(f"        ✅ Added absolute timestamps (start: {bag_start_time})")
+                                    print(f"Added absolute timestamps (start: {bag_start_time})")
                                 else:
-                                    print(f"        ⚠️  Could not find timestamp columns in bag CSV")
+                                    print(f"Could not find timestamp columns in bag CSV")
                             else:
-                                print(f"        ⚠️  Bag CSV not found: {bag_csv_path.name}")
-                                print(f"        📝 Using relative timestamps only")
+                                print(f"Bag CSV not found: {bag_csv_path.name}")
+                                print(f"Using relative timestamps only")
                         
                         except Exception as e:
-                            print(f"        ⚠️  Timestamp conversion failed: {e}")
-                            print(f"        📝 Using relative timestamps only")
+                            print(f"Timestamp conversion failed: {e}")
+                            print(f"Using relative timestamps only")
                         
                         # Save the index
                         index_path = output_dir / "index.csv"
                         index_df.to_csv(index_path, index=False)
-                        print(f"     ✅ Extracted {extracted_count} frames (every {stride}th of {total_frames})")
-                        print(f"        Output: {output_dir.name}/")
+                        print(f"Extracted {extracted_count} frames (every {stride}th of {total_frames})")
+                        print(f"Output: {output_dir.name}/")
                         successful_extractions += 1
                     else:
-                        print(f"     ⚠️  No frames extracted")
+                        print(f"No frames extracted")
                     
                     total_sequences += 1
                     
                 except Exception as e:
-                    print(f"     ❌ Error extracting from {mp4_file.name}: {e}")
+                    print(f"Error extracting from {mp4_file.name}: {e}")
                     continue
             
             self.results['frame_export']['success'] = successful_extractions > 0
             self.results['frame_export']['files'] = total_sequences
             
-            print(f"\n✅ MP4 frame extraction completed!")
+            print(f"\n MP4 frame extraction completed!")
             print(f"   Processed {total_sequences} videos")
             print(f"   Successfully extracted: {successful_extractions} frame sequences")
             
             return successful_extractions > 0
             
         except ImportError:
-            print(f"❌ OpenCV (cv2) not available. Install with: pip install opencv-python")
+            print(f"OpenCV (cv2) not available. Install with: pip install opencv-python")
             return False
         except Exception as e:
             error_msg = f"Error during MP4 frame extraction: {e}"
             self.results['frame_export']['errors'].append(error_msg)
-            print(f"❌ {error_msg}")
+            print(f"{error_msg}")
             return False
     
     def export_camera_info(self) -> bool:
@@ -494,12 +497,12 @@ class SOLAQUACompleteExporter:
         Returns:
             True if successful
         """
-        print(f"\n📷 Exporting camera info to YAML...")
+        print(f"\nExporting camera info to YAML...")
         
         try:
             video_bags = find_video_bags(self.data_dir, recursive=True)
             if not video_bags:
-                print("⚠️  No video bags found for camera info export")
+                print("No video bags found for camera info export")
                 return True  # Not an error, just no bags
             
             camera_info_dir = self.exports_dir / "camera_info"
@@ -509,22 +512,22 @@ class SOLAQUACompleteExporter:
                 try:
                     df_info = export_camera_info_for_bag(bag, out_dir=camera_info_dir)
                     total_files += len(df_info)
-                    print(f"   Exported camera info from {bag.name}: {len(df_info)} files")
+                    print(f"Exported camera info from {bag.name}: {len(df_info)} files")
                 except Exception as e:
-                    print(f"   ⚠️  Error with {bag.name}: {e}")
+                    print(f"Error with {bag.name}: {e}")
             
             self.results['camera_info']['success'] = True
             self.results['camera_info']['files'] = total_files
             
-            print(f"✅ Camera info export completed!")
-            print(f"   Total YAML files: {total_files}")
+            print(f"Camera info export completed!")
+            print(f"Total YAML files: {total_files}")
             
             return True
             
         except Exception as e:
             error_msg = f"Error during camera info export: {e}"
             self.results['camera_info']['errors'].append(error_msg)
-            print(f"❌ {error_msg}")
+            print(f"{error_msg}")
             return False
     
     def create_cone_npz(
@@ -542,7 +545,7 @@ class SOLAQUACompleteExporter:
         Returns:
             True if successful
         """
-        print(f"\n🔧 Creating cone NPZ files from sonar data...")
+        print(f"\n Creating cone NPZ files from sonar data...")
         print(f"   Max bags to process: {max_bags or 'all'}")
         
         try:
@@ -569,7 +572,7 @@ class SOLAQUACompleteExporter:
             # Get exported bag stems
             stems = list_exported_bag_stems(self.exports_dir, bag_suffix="_data")
             if not stems:
-                print("⚠️  No exported bag stems found. Run CSV export first.")
+                print("No exported bag stems found. Run CSV export first.")
                 return False
             
             print(f"   Found {len(stems)} exported bag stems")
@@ -611,29 +614,29 @@ class SOLAQUACompleteExporter:
                             progress=False  # Keep output clean
                         )
                         
-                        print(f"     ✅ Created NPZ: {result['num_frames']} frames, shape {result['shape']}")
+                        print(f"Created NPZ: {result['num_frames']} frames, shape {result['shape']}")
                         successful_npz += 1
                         
                     except Exception as e:
-                        print(f"     ❌ Error: {e}")
+                        print(f"Error: {e}")
                         failed_npz += 1
                 else:
-                    print(f"     ⚠️  No sonar CSV found")
+                    print(f"No sonar CSV found")
                     failed_npz += 1
             
             self.results['npz_creation']['success'] = successful_npz > 0
             self.results['npz_creation']['files'] = successful_npz
             
-            print(f"✅ NPZ creation completed!")
-            print(f"   Successfully created: {successful_npz} NPZ files")
-            print(f"   Failed: {failed_npz} bags")
+            print(f"NPZ creation completed!")
+            print(f"Successfully created: {successful_npz} NPZ files")
+            print(f"Failed: {failed_npz} bags")
             
             return successful_npz > 0
             
         except Exception as e:
             error_msg = f"Error during NPZ creation: {e}"
             self.results['npz_creation']['errors'].append(error_msg)
-            print(f"❌ {error_msg}")
+            print(f"{error_msg}")
             return False
     
     def _find_sonar_csv_files(self, bag_stem: str) -> List[Path]:
@@ -666,7 +669,7 @@ class SOLAQUACompleteExporter:
     
     def generate_summary_report(self, requested_operations: List[str] = None) -> None:
         """Generate a summary report of export operations."""
-        print(f"\n📋 Export Summary Report")
+        print(f"\nExport Summary Report")
         print("=" * 60)
         
         # Map operation names to result keys
@@ -688,10 +691,6 @@ class SOLAQUACompleteExporter:
             if operation in operation_map:
                 result_key = operation_map[operation]
                 result = self.results[result_key]
-                
-                status = "✅" if result['success'] else "❌"
-                print(f"{status} {operation.replace('_', ' ').title()}")
-                print(f"     Files: {result['files']}")
                 
                 if result['errors']:
                     print(f"     Errors: {len(result['errors'])}")
@@ -724,7 +723,7 @@ class SOLAQUACompleteExporter:
                 # Only count actual files, not directories
                 file_count = len([f for f in files if f.is_file()])
                 if file_count > 0:
-                    print(f"   📁 {subdir}/: {description} ({file_count} files)")
+                    print(f"{subdir}/: {description} ({file_count} files)")
 
 
 def main():
@@ -814,6 +813,9 @@ Examples:
     # NPZ options
     parser.add_argument("--max-npz-bags", type=int,
                        help="Maximum bags to process for NPZ creation")
+    parser.add_argument("--bag-stem", type=str,
+                       help="Process only a specific bag stem (e.g. '2024-08-20_13-39-34'). "
+                            "When provided the script will temporarily symlink matching bag file(s) into a tmp folder and run operations against that folder.")
     
     args = parser.parse_args()
     
@@ -824,11 +826,34 @@ Examples:
             w, h = map(int, args.resize.split('x'))
             resize_to = (w, h)
         except:
-            print(f"❌ Invalid resize format: {args.resize}. Use WIDTHxHEIGHT")
+            print(f"Invalid resize format: {args.resize}. Use WIDTHxHEIGHT")
             return 1
     
+    # Optionally limit processing to a single bag stem by creating a temporary directory
+    tmp_bag_dir = None
+    data_dir_for_export = args.data_dir
+    if args.bag_stem:
+        data_root = Path(args.data_dir)
+        matches = list(data_root.rglob(f"*{args.bag_stem}*.bag"))
+        if not matches:
+            print(f"Could not find any bag files matching stem '{args.bag_stem}' under {data_root}")
+            return 1
+
+        # Create temporary directory and symlink matching bag(s)
+        tmp_bag_dir = Path(tempfile.mkdtemp(prefix="solaqua_single_bag_"))
+        for src in matches:
+            dst = tmp_bag_dir / src.name
+            try:
+                os.symlink(src.resolve(), dst)
+            except Exception:
+                # fallback to copy if symlink not permitted
+                shutil.copy2(src, dst)
+
+        print(f"ℹCreated temporary bag directory: {tmp_bag_dir} (contains {len(matches)} file(s))")
+        data_dir_for_export = str(tmp_bag_dir)
+
     # Initialize exporter
-    exporter = SOLAQUACompleteExporter(args.data_dir, args.exports_dir)
+    exporter = SOLAQUACompleteExporter(data_dir_for_export, args.exports_dir)
     
     # Determine operations to run
     operations = []
@@ -855,17 +880,17 @@ Examples:
     # Default to CSV if nothing specified
     if not operations:
         operations = ['csv']
-        print("ℹ️  No operations specified, defaulting to CSV export")
+        print("No operations specified, defaulting to CSV export")
     
     # Skip bag discovery and validation for MP4-only operations
     if use_mp4_extraction:
-        print(f"\n🚀 Starting MP4 frame extraction: {', '.join(operations)}")
-        print("ℹ️  Skipping bag discovery for MP4 extraction mode")
+        print(f"\nStarting MP4 frame extraction: {', '.join(operations)}")
+        print("ℹSkipping bag discovery for MP4 extraction mode")
     else:
         # Discover bags only when needed
         bags = exporter.discover_bags()
         if not bags['data_bags'] and not bags['video_bags']:
-            print("❌ No bag files found. Check your data directory.")
+            print("No bag files found. Check your data directory.")
             return 1
         
         # Inspect bags
@@ -874,7 +899,7 @@ Examples:
         if args.inspect_only:
             return 0
         
-        print(f"\n🚀 Starting export operations: {', '.join(operations)}")
+        print(f"\nStarting export operations: {', '.join(operations)}")
     
     # Run operations
     try:
@@ -913,15 +938,33 @@ Examples:
         
         # Generate summary report
         exporter.generate_summary_report(operations)
-        
+
         print(f"\n🎉 Export operations completed!")
+        # Cleanup temporary bag dir if created
+        if tmp_bag_dir is not None:
+            try:
+                shutil.rmtree(tmp_bag_dir)
+                print(f"Removed temporary bag directory: {tmp_bag_dir}")
+            except Exception as e:
+                print(f"Could not remove temporary dir {tmp_bag_dir}: {e}")
+
         return 0
         
     except KeyboardInterrupt:
-        print(f"\n⚠️  Export interrupted by user")
+        print(f"\nExport interrupted by user")
+        if tmp_bag_dir is not None:
+            try:
+                shutil.rmtree(tmp_bag_dir)
+            except Exception:
+                pass
         return 1
     except Exception as e:
-        print(f"\n❌ Unexpected error: {e}")
+        print(f"\nUnexpected error: {e}")
+        if tmp_bag_dir is not None:
+            try:
+                shutil.rmtree(tmp_bag_dir)
+            except Exception:
+                pass
         return 1
 
 
