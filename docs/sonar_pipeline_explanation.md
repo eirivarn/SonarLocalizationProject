@@ -512,21 +512,42 @@ Underwater fishing nets in sonar imagery typically exhibit:
 - **Elliptical AOI tracking:** Improved net tracking with smoothed center positioning
 - **Area of Interest (AOI):** Tracking previous detections improves robustness
 
-### 5.2 Adaptive Linear Merging Pipeline
+### 5.2 Signal-Strength Independent Binary Pipeline
 
 **Implementation:** `utils/sonar_image_analysis.py::preprocess_edges()`
 
-The preprocessing pipeline now uses **Adaptive Linear Merging** - a revolutionary approach that dynamically adapts merging kernels from circular to elliptical based on detected linear patterns in the sonar imagery.
+The pipeline has been redesigned to be **completely signal-strength independent** by converting to binary frames immediately. This fundamental architectural change ensures the algorithm focuses purely on structural patterns regardless of sonar signal intensity.
 
-#### Step 1: Adaptive Linear Momentum Merging
+#### Step 1: Binary Conversion
+
+**Signal-Strength Independence:**
+The first and most critical step is converting the input frame to binary format, eliminating all signal strength dependencies:
+
+```python
+# Convert to binary frame immediately - removes signal strength dependency
+binary_threshold = cfg.get('binary_threshold', 128)  # Default threshold
+binary_frame = (frame_u8 > binary_threshold).astype(np.uint8) * 255
+```
+
+**Benefits:**
+- **Structural Focus:** Algorithm analyzes only geometric patterns, not intensity variations
+- **Robust Detection:** Net detection works equally well in high/low signal strength areas
+- **Simplified Processing:** Binary data enables faster, more reliable edge detection
+- **Consistent Results:** Eliminates signal-strength-based detection variability
+
+#### Step 2: Binary Enhancement Pipeline
+
+The preprocessing pipeline then applies **Adaptive Linear Merging** to the binary frame - a revolutionary approach that dynamically adapts merging kernels from circular to elliptical based on detected linear patterns in the binary structural data.
+
+#### Step 3: Adaptive Linear Momentum Merging on Binary Data
 
 **Implementation:** `utils/sonar_image_analysis.py::adaptive_linear_momentum_merge_fast()`
 
-The core innovation replaces fixed directional kernels with adaptive elliptical kernels that elongate based on local linearity detection:
+The core innovation replaces fixed directional kernels with adaptive elliptical kernels that elongate based on local linearity detection in the binary structural data:
 
 ```python
-enhanced = adaptive_linear_momentum_merge_fast(
-    frame,
+enhanced_binary = adaptive_linear_momentum_merge_fast(
+    binary_frame,            # Binary frame input
     base_radius=2,           # Base circular kernel radius
     max_elongation=4,        # Maximum ellipse elongation factor
     linearity_threshold=0.3, # Sensitivity to linear patterns
@@ -535,18 +556,19 @@ enhanced = adaptive_linear_momentum_merge_fast(
 )
 ```
 
-#### Mathematical Theory: Linearity Detection
+#### Mathematical Theory: Binary Linearity Detection
 
-The algorithm detects linear structures using **oriented gradient kernels** that measure directional consistency:
+The algorithm detects linear structures in binary data using **oriented gradient kernels** that measure directional consistency:
 
-**1. Gradient Field Analysis:**
+**1. Binary Gradient Field Analysis:**
 ```python
-# Compute image gradients
-grad_x = cv2.Sobel(frame, cv2.CV_64F, 1, 0, ksize=3)
-grad_y = cv2.Sobel(frame, cv2.CV_64F, 0, 1, ksize=3)
+# Compute binary image gradients
+grad_x = cv2.Sobel(binary_frame, cv2.CV_64F, 1, 0, ksize=3)
+grad_y = cv2.Sobel(binary_frame, cv2.CV_64F, 0, 1, ksize=3)
 
 # Gradient magnitude and orientation
 grad_mag = np.sqrt(grad_x**2 + grad_y**2)
+grad_angle = np.arctan2(grad_y, grad_x)
 grad_angle = np.arctan2(grad_y, grad_x)
 ```
 
@@ -630,48 +652,71 @@ enhanced = cv2.resize(enhanced_small, (frame.shape[1], frame.shape[0]))
 
 **Speed Improvement:** 5-10x faster than full-resolution processing while maintaining detection quality.
 
-#### Step 2: Canny Edge Detection
+#### Step 4: Binary Edge Detection
+
+**Simplified Binary Edge Detection:**
+Unlike traditional Canny edge detection, binary frames enable direct gradient-based edge detection:
 
 ```python
-edges = cv2.Canny(enhanced, low=40, high=120)
+# Simple gradient-based edge detection on binary frame
+kernel_edge = np.array([[-1, -1, -1], [-1, 8, -1], [-1, -1, -1]], dtype=np.float32)
+edges = cv2.filter2D(binary_frame, cv2.CV_32F, kernel_edge)
+edges = (edges > 0).astype(np.uint8) * 255
 ```
 
-Applied to the adaptively enhanced image for improved edge quality.
+**Benefits of Binary Edge Detection:**
+- **No Gaussian Smoothing:** Binary data doesn't need noise reduction
+- **No Hysteresis Thresholding:** Single threshold sufficient for binary data
+- **Faster Processing:** Direct gradient operators without multi-stage Canny pipeline
+- **Cleaner Edges:** Binary structure creates sharper, more consistent edges
 
-#### Step 3: Morphological Closing
+#### Step 5: Morphological Closing
 
 ```python
-kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
 edges_closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
 ```
 
-Connects nearby edge fragments enhanced by adaptive merging.
+Connects nearby edge fragments enhanced by adaptive merging on binary structures.
 
-#### Step 4: Edge Dilation
+#### Step 6: Edge Dilation
 
 ```python
-edges_dilated = cv2.dilate(edges_closed, kernel, iterations=2)
+edges_dilated = cv2.dilate(edges_closed, kernel, iterations=1)
 ```
 
-Final thickening for robust contour extraction.
+Final thickening for robust contour extraction from binary edge data.
 
 #### Algorithm Advantages
 
-**1. Adaptive Behavior:**
-- **Circular kernels** in noisy/uniform regions → preserves detail without over-enhancement
-- **Elliptical kernels** along net strands → significantly amplifies linear structures
+**1. Signal-Strength Independence:**
+- **Binary conversion** eliminates signal strength variability
+- **Structural focus** ensures consistent detection regardless of sonar power/distance
+- **Robust results** across different signal conditions and environments
 
-**2. Orientation Independence:**
-- Automatically detects net orientation from gradient field
+**2. Adaptive Behavior:**
+- **Circular kernels** in noisy/uniform regions → preserves detail without over-enhancement
+- **Elliptical kernels** along net strands → significantly amplifies linear structures in binary data
+
+**3. Orientation Independence:**
+- Automatically detects net orientation from binary gradient field
 - No assumption about horizontal/vertical alignment
 
-**3. Noise Robustness:**
+**4. Binary Processing Benefits:**
+- **Simplified edge detection** without multi-stage Canny pipeline
+- **Faster processing** with direct gradient operators
+- **Cleaner contours** from binary structural data
+- **Consistent thresholding** without signal-dependent parameters
+
+**5. Noise Robustness:**
 - Linearity threshold prevents false elongation in noisy regions
 - Momentum boost selectively enhances only confirmed linear patterns
+- Binary conversion removes intensity-based noise artifacts
 
-**4. Performance Optimized:**
+**6. Performance Optimized:**
 - Fast implementation suitable for real-time processing
 - Maintains detection quality at reduced computational cost
+- Binary operations are computationally efficient
 
 **Configuration:** `IMAGE_PROCESSING_CONFIG` in `utils/sonar_config.py`
 

@@ -74,8 +74,14 @@ class ConeGridSpec:
     img_h: int = CONE_H_DEFAULT
 
 # --- Image-analysis / contour-detection defaults (moved from sonar_image_analysis) ---
-# Core image processing configuration using adaptive linear merging
+# Core image processing configuration using binary preprocessing and adaptive linear merging
 IMAGE_PROCESSING_CONFIG: Dict = {
+    
+    # === BINARY CONVERSION (NEW: SIGNAL-STRENGTH INDEPENDENT) ===
+    'binary_threshold': 50,            # Threshold for converting frame to binary (0-255)
+                                        # Pixels > threshold become white (255), others black (0)
+                                        # Makes pipeline completely signal-strength independent
+                                        # Focus on structural patterns only
     
     # === CV2 ENHANCEMENT ===
     # Fast OpenCV enhancement methods as alternative to custom adaptive kernels
@@ -107,16 +113,9 @@ IMAGE_PROCESSING_CONFIG: Dict = {
                                         # Higher values = stronger directional feature enhancement
                                         # Lower values = more subtle enhancement, preserves original intensities
     
-    # === CANNY EDGE DETECTION ===
-    # Sharp edge detection parameters - NO GAUSSIAN BLUR applied before Canny
-    'canny_low_threshold': 60,          # Lower threshold for Canny edge detection (0-255)
-                                        # Lower values = more edges detected (including noise)
-                                        # Higher values = only strong edges detected
-    
-    'canny_high_threshold': 180,        # Upper threshold for Canny edge detection (0-255)  
-                                        # Ratio with low_threshold should be 2:1 to 3:1
-                                        # Edges above high_threshold = definitely edges
-                                        # Edges between low/high = edges if connected to strong edges
+    # === EDGE DETECTION (SIMPLIFIED FOR BINARY DATA) ===
+    # Binary edge detection using gradient operators - no Canny parameters needed
+    # Binary frames use direct edge operators for cleaner, faster edge detection
     
     # === CONTOUR FILTERING ===
     'min_contour_area': 200,            # Minimum contour area in pixels to be considered valid

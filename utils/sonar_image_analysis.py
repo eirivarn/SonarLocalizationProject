@@ -1130,31 +1130,37 @@ def create_elliptical_kernel_fast(base_radius, elongation_factor, angle_degrees)
 
 def preprocess_edges(frame_u8: np.ndarray, cfg=IMAGE_PROCESSING_CONFIG) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Preprocess sonar frame for edge detection using adaptive linear merging or OpenCV methods.
+    Preprocess sonar frame for edge detection using binary conversion followed by enhancement.
     
-    Applies either custom adaptive linear merging or fast OpenCV enhancement methods
-    to enhance directional features (nets, ropes) before edge detection.
+    SIGNAL-STRENGTH INDEPENDENT APPROACH:
+    1. Convert to binary frame immediately (removes signal strength dependency)
+    2. Apply structural enhancement on binary data
+    3. Direct edge detection without additional Canny step
     
     Args:
         frame_u8: Input sonar frame (uint8)
         cfg: Configuration dictionary with processing parameters
         
     Returns:
-        Tuple of (raw_edges, processed_edges) from Canny edge detection
+        Tuple of (raw_edges, processed_edges) - both are binary edge maps
     """
-    # Apply enhancement based on configuration
+    
+    # STEP 1: Convert to binary frame immediately - removes signal strength dependency
+    binary_threshold = cfg.get('binary_threshold', 128)  # Default threshold
+    binary_frame = (frame_u8 > binary_threshold).astype(np.uint8) * 255
+    
+    # STEP 2: Apply structural enhancement on binary data
     if cfg.get('use_cv2_enhancement', False):
-        # Use fast OpenCV methods
-        proc = adaptive_linear_momentum_merge_fast(
-            frame_u8,
-            use_cv2_enhancement=True,
-            cv2_method=cfg.get('cv2_method', 'morphological'),
-            cv2_kernel_size=cfg.get('cv2_kernel_size', 5)
+        # Use fast OpenCV methods on binary frame
+        enhanced_binary = apply_cv2_enhancement_method(
+            binary_frame,
+            method=cfg.get('cv2_method', 'morphological'),
+            kernel_size=cfg.get('cv2_kernel_size', 5)
         )
     else:
-        # Use custom adaptive linear merging
-        proc = adaptive_linear_momentum_merge_fast(
-            frame_u8,
+        # Use custom adaptive linear merging on binary frame
+        enhanced_binary = adaptive_linear_momentum_merge_fast(
+            binary_frame,
             base_radius=cfg.get('adaptive_base_radius', 2),
             max_elongation=cfg.get('adaptive_max_elongation', 4),
             linearity_threshold=cfg.get('adaptive_linearity_threshold', 0.3),
@@ -1162,13 +1168,24 @@ def preprocess_edges(frame_u8: np.ndarray, cfg=IMAGE_PROCESSING_CONFIG) -> Tuple
             angle_steps=cfg.get('adaptive_angle_steps', 9)
         )
     
-    # Apply Canny edge detection to enhanced frame
-    edges = cv2.Canny(proc, cfg.get('canny_low_threshold', 50), cfg.get('canny_high_threshold', 150))
+    # STEP 3: Extract edges from enhanced binary frame
+    # For binary data, we can use simple edge detection or morphological operations
+    
+    # Raw edges: simple gradient-based edge detection on binary frame
+    kernel_edge = np.array([[-1, -1, -1], [-1, 8, -1], [-1, -1, -1]], dtype=np.float32)
+    raw_edges = cv2.filter2D(binary_frame, cv2.CV_32F, kernel_edge)
+    raw_edges = np.clip(raw_edges, 0, 255).astype(np.uint8)
+    raw_edges = (raw_edges > 0).astype(np.uint8) * 255
+    
+    # Enhanced edges: edge detection on enhanced binary frame  
+    enhanced_edges = cv2.filter2D(enhanced_binary, cv2.CV_32F, kernel_edge)
+    enhanced_edges = np.clip(enhanced_edges, 0, 255).astype(np.uint8)
+    enhanced_edges = (enhanced_edges > 0).astype(np.uint8) * 255
     
     # Post-process edges with morphological operations
     mks = int(cfg.get('morph_close_kernel', 0))
     dil = int(cfg.get('edge_dilation_iterations', 0))
-    out = edges
+    out = enhanced_edges
     
     if mks > 0:
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (mks, mks))
@@ -1178,7 +1195,7 @@ def preprocess_edges(frame_u8: np.ndarray, cfg=IMAGE_PROCESSING_CONFIG) -> Tuple
         kernel2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
         out = cv2.dilate(out, kernel2, iterations=dil)
     
-    return edges, out
+    return raw_edges, out
 
 # ============================ Contour features & scoring ============================
 
@@ -1238,10 +1255,16 @@ def _distance_angle_from_contour(contour, image_width: int, image_height: int) -
     if contour is None or len(contour) < 5:
         return None, None
     try:
-        (cx, cy), (minor_axis, major_axis), angle = cv2.fitEllipse(contour)
+        (cx, cy), (w, h), angle = cv2.fitEllipse(contour)
+
+        # Determine the major axis orientation correctly
+        if w >= h:
+            major_angle = angle
+        else:
+            major_angle = angle + 90.0
 
         # Calculate intersection of net's major axis with center beam (x = image_width/2)
-        ang_r = np.radians(angle + 90.0)  # Major axis direction
+        ang_r = np.radians(major_angle)  # Major axis direction
         cos_ang = np.cos(ang_r)
         sin_ang = np.sin(ang_r)
 
@@ -1273,13 +1296,19 @@ def _distance_angle_from_smoothed_center(contour, smoothed_center: Tuple[float, 
     
     try:
         # Get ellipse angle from contour, but use smoothed center for position
-        (_, _), (minor_axis, major_axis), angle = cv2.fitEllipse(contour)
+        (_, _), (w, h), angle = cv2.fitEllipse(contour)
+        
+        # Determine the major axis orientation correctly
+        if w >= h:
+            major_angle = angle
+        else:
+            major_angle = angle + 90.0
         
         # Use smoothed center position
         cx, cy = smoothed_center
         
         # Calculate intersection of net's major axis with center beam (x = image_width/2)
-        ang_r = np.radians(angle + 90.0)  # Major axis direction
+        ang_r = np.radians(major_angle)  # Major axis direction
         cos_ang = np.cos(ang_r)
         sin_ang = np.sin(ang_r)
         
@@ -1875,139 +1904,6 @@ class ComparisonEngine:
         
         return fig
 
-# ============================ UTILITY FUNCTIONS ============================
-
-def get_red_line_distance_and_angle(frame_u8: np.ndarray, prev_aoi: Optional[Tuple[int,int,int,int]] = None):
-    """Return (distance_pixels, angle_deg) for the dominant elongated contour, or (None, None).
-    
-    Uses SAME contour selection logic as process_frame_for_video to ensure consistency.
-    """
-    _, edges_proc = preprocess_edges(frame_u8, IMAGE_PROCESSING_CONFIG)
-    contours, _ = cv2.findContours(edges_proc, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-    
-    # Apply same AOI logic as video processing
-    aoi = None
-    if prev_aoi is not None:
-        ax, ay, aw, ah = prev_aoi
-        exp = int(TRACKING_CONFIG.get('aoi_expansion_pixels', 10))
-        H, W = frame_u8.shape[:2]
-        aoi = (max(0, ax-exp), max(0, ay-exp),
-               min(W - max(0, ax-exp), aw + 2*exp),
-               min(H - max(0, ay-exp), ah + 2*exp))
-    
-    # Use CORE contour selection
-    best, _, _ = select_best_contour_core(contours, None, aoi, IMAGE_PROCESSING_CONFIG)
-    H, W = frame_u8.shape[:2]
-    return _distance_angle_from_contour(best, W, H)
-
-# ============================ VIDEO PROCESSING FUNCTIONS ============================
-
-def process_frame_for_video(frame_u8: np.ndarray, prev_aoi: Optional[Tuple[int,int,int,int]] = None):
-    # edge pipeline
-    edges_raw, edges_proc = preprocess_edges(frame_u8, IMAGE_PROCESSING_CONFIG)
-    contours, _ = cv2.findContours(edges_proc, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-
-    # AOI expansion
-    aoi = None
-    if prev_aoi is not None:
-        ax, ay, aw, ah = prev_aoi
-        exp = int(TRACKING_CONFIG.get('aoi_expansion_pixels', 10))
-        H, W = frame_u8.shape[:2]
-        aoi = (max(0, ax-exp), max(0, ay-exp),
-               min(W - max(0, ax-exp), aw + 2*exp),
-               min(H - max(0, ay-exp), ah + 2*exp))
-
-    # choose contour - CORE selection
-    best, feat, stats = select_best_contour_core(contours, None, aoi, IMAGE_PROCESSING_CONFIG)
-
-    # draw
-    out = cv2.cvtColor(frame_u8, cv2.COLOR_GRAY2BGR)
-    if VIDEO_CONFIG.get('show_all_contours', True) and contours:
-        cv2.drawContours(out, contours, -1, (255, 200, 100), 1)
-
-    # draw AOI box (expanded)
-    if aoi is not None:
-        ex, ey, ew, eh = aoi
-        cv2.rectangle(out, (ex, ey), (ex+ew, ey+eh), (0, 255, 255), 1)
-        cv2.putText(out, 'AOI', (ex + 5, ey + 20),
-                    cv2.FONT_HERSHEY_SIMPLEX, VIDEO_CONFIG['text_scale'], (0,255,255), 1)
-
-    next_aoi, status = prev_aoi, "LOST"
-    if best is not None:
-        cv2.drawContours(out, [best], -1, (0, 255, 0), 2)
-        x, y, w, h = feat['rect']
-        if VIDEO_CONFIG.get('show_bounding_box', True):
-            cv2.rectangle(out, (x,y), (x+w, y+h), (0,0,255), 1)
-        next_aoi = (x, y, w, h)
-        if VIDEO_CONFIG.get('show_ellipse', True) and len(best) >= 5:
-            try:
-                # Fit ellipse on the detected contour
-                ellipse = cv2.fitEllipse(best)
-                (cx, cy), (minor, major), ang = ellipse
-                
-                # Draw the ellipse
-                cv2.ellipse(out, ellipse, (255, 0, 255), 1)
-                
-                # 90°-rotated major-axis line (red)
-                ang_r = np.radians(ang + 90.0)
-                half = major * 0.5
-                p1 = (int(cx + half*np.cos(ang_r)), int(cy + half*np.sin(ang_r)))
-                p2 = (int(cx - half*np.cos(ang_r)), int(cy - half*np.sin(ang_r)))
-                cv2.line(out, p1, p2, (0,0,255), 2)
-                
-                # Calculate and draw intersection point with center beam
-                H_img, W_img = frame_u8.shape[:2]
-                center_x = W_img / 2
-                cos_ang = np.cos(ang_r)
-                sin_ang = np.sin(ang_r)
-                
-                if abs(cos_ang) > 1e-6:  # Avoid division by zero
-                    t = (center_x - cx) / cos_ang
-                    intersect_y = cy + t * sin_ang
-                    intersect_x = center_x
-                else:  # Line is nearly vertical
-                    intersect_x = cx
-                    intersect_y = cy
-                
-                # Draw intersection point (blue circle)
-                cv2.circle(out, (int(intersect_x), int(intersect_y)), 2, (255, 0, 0), -1)  # Filled blue circle
-                cv2.circle(out, (int(intersect_x), int(intersect_y)), 5, (255, 0, 0), 2)  # Blue ring
-                
-            except Exception:
-                pass
-        # text & status
-        cv2.putText(out, f'Area: {feat.get("area",0):.0f}', (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, VIDEO_CONFIG['text_scale'], (255,255,255), 2)
-        cv2.putText(out, f'Score: {stats.get("best_score",0):.0f}', (10, 50),
-                    cv2.FONT_HERSHEY_SIMPLEX, VIDEO_CONFIG['text_scale'], (255,255,255), 2)
-        status = "TRACKED" if (aoi and rects_overlap(feat['rect'], aoi)) else "NEW"
-    else:
-        # dashed "searching" box if we had a previous AOI
-        if prev_aoi is not None:
-            ax, ay, aw, ah = prev_aoi
-            dash, gap = 10, 5
-            for X in range(ax, ax+aw, dash+gap):
-                cv2.line(out, (X, ay), (min(X+dash, ax+aw), ay), (0, 100, 255), 2)
-                cv2.line(out, (X, ay+ah), (min(X+dash, ax+aw), ay+ah), (0, 100, 255), 2)
-            for Y in range(ay, ay+ah, dash+gap):
-                cv2.line(out, (ax, Y), (ax, min(Y+dash, ay+ah)), (0, 100, 255), 2)
-                cv2.line(out, (ax+aw, Y), (ax+aw, min(Y+dash, ay+ah)), (0, 100, 255), 2)
-            cv2.putText(out, 'SEARCHING', (ax+5, ay+ah-10),
-                        cv2.FONT_HERSHEY_SIMPLEX, VIDEO_CONFIG['text_scale'], (0,100,255), 2)
-
-    status_colors = {"TRACKED": (0,255,0), "NEW": (0,165,255), "LOST": (0,100,255)}
-    cv2.putText(out, status, (10, 70),
-                cv2.FONT_HERSHEY_SIMPLEX, VIDEO_CONFIG['text_scale'], status_colors[status], 2)
-
-    info_y = out.shape[0] - 40
-    s = VIDEO_CONFIG['text_scale'] * 0.8
-    cv2.putText(out, f'Total: {stats.get("total_contours",0)}', (10, info_y),
-                cv2.FONT_HERSHEY_SIMPLEX, s, (255,255,255), 1)
-    cv2.putText(out, f'In AOI: {stats.get("aoi_contours",0)}', (10, info_y+15),
-                cv2.FONT_HERSHEY_SIMPLEX, s, (255,255,255), 1)
-
-    return out, next_aoi
-
 # ============================ Frame export & video ============================
 
 def pick_and_save_frame(npz_file_index: int = 0, frame_position: str | float = 'middle',
@@ -2332,10 +2228,3 @@ def create_enhanced_contour_detection_video_with_processor(npz_file_index=0, fra
         print(f"  - Detection success rate: {total_det/actual*100:.1f}%")
     
     return output_path
-
-def load_saved_frame(image_path: str) -> np.ndarray:
-    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
-    if img is None:
-        raise FileNotFoundError(f"Could not load image from {image_path}")
-    return img
-
