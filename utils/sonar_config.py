@@ -22,7 +22,7 @@ CONE_FLIP_VERTICAL_DEFAULT: bool = True
 
 CMAP_NAME_DEFAULT: str = "viridis"
 
-# A small dict used by visualizer classes
+# A dict used by visualizer classes
 SONAR_VIS_DEFAULTS: Dict = {
     "fov_deg": FOV_DEG_DEFAULT,
     "range_min_m": RANGE_MIN_M_DEFAULT,
@@ -74,7 +74,6 @@ class ConeGridSpec:
     img_h: int = CONE_H_DEFAULT
 
 # --- Image-analysis / contour-detection defaults (moved from sonar_image_analysis) ---
-# Core image processing configuration using binary preprocessing and adaptive linear merging
 IMAGE_PROCESSING_CONFIG: Dict = {
     
     # === BINARY CONVERSION (NEW: SIGNAL-STRENGTH INDEPENDENT) ===
@@ -90,8 +89,6 @@ IMAGE_PROCESSING_CONFIG: Dict = {
     'cv2_kernel_size': 3,               # Kernel/filter size (3, 5, 7)
 
     # === ADAPTIVE LINEAR MERGING ===
-    # Revolutionary approach: adapts merging kernel from circular to elliptical based on detected linearity
-    # This is the core enhancement system for detecting nets, ropes, and other linear structures
 
     'adaptive_base_radius': 2,          # Base circular merging radius 
                                         # Starting radius for circular kernel before elongation
@@ -134,7 +131,10 @@ IMAGE_PROCESSING_CONFIG: Dict = {
 TRACKING_CONFIG: Dict = {
     'aoi_boost_factor': 2.0,  # Reasonable boost for contours inside AOI
     'aoi_expansion_pixels': 1,
-    'ellipse_smoothing_alpha': 0.2,  # Smoothing factor (0.0 = no smoothing, 1.0 = instant jump)
+    'ellipse_smoothing_alpha': 0.2,  # Ellipse temporal smoothing: 0.0=no smoothing (jittery), 0.2=gentle smoothing, 1.0=no updates (frozen)
+                                     # Controls how much the ellipse parameters (size, orientation) change between frames
+                                     # Lower values = more responsive to new detections but potentially jittery
+                                     # Higher values = smoother tracking but slower adaptation to real changes
     'ellipse_max_movement_pixels': 4.0,  # Maximum pixels ellipse center can move per frame
     'max_frames_outside_aoi': 5,  # Max consecutive frames to allow best contour outside ellipse AOI
     'ellipse_expansion_factor': 0.2,  # Factor to expand detected contour ellipse for AOI 
@@ -144,11 +144,30 @@ TRACKING_CONFIG: Dict = {
 
 # Video output configuration
 VIDEO_CONFIG: Dict = {
+    # === VIDEO GENERATION TOGGLE ===
+    'enable_video_overlay': True,      # Auto-find and overlay camera video with sonar analysis
+                                        # True = automatically locate video files based on bag name
+                                        # False = skip video overlay functionality
+                                        # Requires both CSV (sonar data) and MP4 (camera video) files
+    
+    'video_topic_preference': [         # Preferred video topics (in order of preference)
+        'image_compressed_image_data',  # Main camera feed (most common)
+        'ted_image',                    # Auxiliary camera
+        'camera_image',                 # Generic camera topic
+    ],
+    
+    # === VIDEO OUTPUT SETTINGS ===
     'fps': 15,
     'show_all_contours': True,
     'show_ellipse': True,
     'show_bounding_box': False,
     'text_scale': 0.6,
+    
+    # === VIDEO SYNCHRONIZATION ===
+    'max_sync_tolerance_seconds': 5.0,     # Maximum time difference for camera/sonar sync
+                                            # If camera is more than this many seconds away from
+                                            # sonar timestamp, fall back to sonar-only frame
+                                            # Prevents frozen camera frames when video ends early
 }
 
 # --- Navigation analysis defaults ---
@@ -163,7 +182,6 @@ NAVIGATION_ANALYSIS_CONFIG: Dict = {
 # --- Repository / on-disk layout defaults ---
 # Centralize the default exports directory name so all tools use the same
 # path (can be overridden by CLI args or environment-specific settings).
-# Default set to the external Lacie disk exports folder per user request
 EXPORTS_DIR_DEFAULT: str = "/Volumes/LaCie/SOLAQUA/exports"
 
 # Standard subfolders created/used under the exports dir. Tools should join

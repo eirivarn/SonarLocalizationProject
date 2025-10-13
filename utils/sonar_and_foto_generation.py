@@ -10,7 +10,8 @@ from datetime import datetime, timezone
 
 from utils.sonar_utils import (
     load_df, get_sonoptix_frame,
-    enhance_intensity, read_video_index, apply_flips, cone_raster_like_display_cell
+    enhance_intensity, read_video_index, apply_flips, cone_raster_like_display_cell,
+    get_video_overlay_info
 )
 from utils.sonar_config import (
     SONAR_VIS_DEFAULTS, ENHANCE_DEFAULTS,
@@ -46,8 +47,9 @@ def export_optimized_sonar_video(
     START_IDX: int = 0,
     END_IDX: int | None = 600,
     STRIDE: int = 1,
-    # --- camera (optional) ---
-    VIDEO_SEQ_DIR: Path | None = None,   # if provided, we add the camera panel
+    # --- camera (automated or manual) ---
+    VIDEO_SEQ_DIR: Path | None = None,   # if provided, overrides auto-detection
+    AUTO_DETECT_VIDEO: bool = True,      # if True, automatically find video files based on bag name
     VIDEO_HEIGHT: int = 700,
     PAD_BETWEEN: int = 8,
     FONT_SCALE: float = 0.55,
@@ -99,6 +101,26 @@ def export_optimized_sonar_video(
     print(f"🎯 Target Bag: {TARGET_BAG}")
     print(f"   Cone Size: {CONE_W}x{CONE_H}")
     print(f"   Range: {RANGE_MIN_M}-{DISPLAY_RANGE_MAX_M}m | FOV: {FOV_DEG}°")
+    
+    # --- Auto-detect video files if enabled ---
+    if VIDEO_SEQ_DIR is None and AUTO_DETECT_VIDEO:
+        from utils.sonar_config import VIDEO_CONFIG
+        
+        # Check if video overlay is globally enabled
+        if VIDEO_CONFIG.get('enable_video_overlay', False):
+            print(f"   🔍 Auto-detecting video files for bag: {TARGET_BAG}")
+            video_info = get_video_overlay_info(TARGET_BAG)
+            if video_info:
+                # Use the PNG frames directory
+                frames_dir = video_info['video_frames_dir']
+                print(f"   ✅ Found video frames: {frames_dir.name}")
+                VIDEO_SEQ_DIR = frames_dir  # Set the frames directory
+                print(f"   📁 Using frames directory: {VIDEO_SEQ_DIR}")
+            else:
+                print(f"   ❌ No video files found for bag {TARGET_BAG}")
+        else:
+            print(f"   ℹ️  Video overlay disabled in configuration (enable_video_overlay=False)")
+    
     print(f"   🎥 Camera: {'enabled' if VIDEO_SEQ_DIR is not None else 'disabled'}")
     print(f"   🕸  Net-line: {'enabled' if INCLUDE_NET else 'disabled'}"
           + (f" (dist tol={NET_DISTANCE_TOLERANCE}s, pitch tol={NET_PITCH_TOLERANCE}s)" if INCLUDE_NET else ""))
@@ -441,23 +463,42 @@ def export_optimized_sonar_video(
         # compose (camera optional)
         if VIDEO_SEQ_DIR is not None and dfv is not None and video_idx is not None:
             ts_target = pd.to_datetime(df.loc[frame_idx, "ts_utc"], utc=True, errors="coerce")
-            idx_near = video_idx.get_indexer([ts_target], method="nearest")[0]
-            ts_cam = dfv.loc[idx_near, "ts_utc"]
-            dt = abs(ts_cam - ts_target)
-            cam_file = VIDEO_SEQ_DIR / dfv.loc[idx_near, "file"]
+            
+            # Check if we're beyond the camera video time range
+            if ts_target < video_idx.min() or ts_target > video_idx.max():
+                # Outside camera time range - use sonar-only mode for this frame
+                composite = cone_frame
+                print(f"   Frame {frame_idx}: Outside camera time range, using sonar-only")
+            else:
+                # Find nearest camera frame within reasonable tolerance
+                idx_near = video_idx.get_indexer([ts_target], method="nearest")[0]
+                ts_cam = dfv.loc[idx_near, "ts_utc"]
+                dt = abs(ts_cam - ts_target)
+                
+                # Check if the time difference is reasonable (configurable tolerance)
+                from utils.sonar_config import VIDEO_CONFIG
+                max_sync_tolerance_s = VIDEO_CONFIG.get('max_sync_tolerance_seconds', 5.0)
+                max_sync_tolerance = pd.Timedelta(seconds=max_sync_tolerance_s)
+                if dt > max_sync_tolerance:
+                    # Time difference too large - camera video probably ended
+                    composite = cone_frame
+                    print(f"   Frame {frame_idx}: Sync tolerance exceeded ({dt.total_seconds():.1f}s), using sonar-only")
+                else:
+                    # Good sync - compose with camera
+                    cam_file = VIDEO_SEQ_DIR / dfv.loc[idx_near, "file"]
+                    
+                    cam_bgr = load_png_bgr(cam_file)
+                    vh, vw0 = cam_bgr.shape[:2]
+                    scale = VIDEO_HEIGHT / vh
+                    cam_resized = cv2.resize(cam_bgr, (int(round(vw0 * scale)), VIDEO_HEIGHT), interpolation=cv2.INTER_AREA)
 
-            cam_bgr = load_png_bgr(cam_file)
-            vh, vw0 = cam_bgr.shape[:2]
-            scale = VIDEO_HEIGHT / vh
-            cam_resized = cv2.resize(cam_bgr, (int(round(vw0 * scale)), VIDEO_HEIGHT), interpolation=cv2.INTER_AREA)
+                    pad = np.zeros((CONE_H, PAD_BETWEEN, 3), dtype=np.uint8)
+                    composite = np.hstack([cam_resized, pad, cone_frame])
 
-            pad = np.zeros((CONE_H, PAD_BETWEEN, 3), dtype=np.uint8)
-            composite = np.hstack([cam_resized, pad, cone_frame])
-
-            ts_cam_loc   = to_local(ts_cam,   "Europe/Oslo")
-            ts_sonar_loc = to_local(ts_target,"Europe/Oslo")
-            put_text(composite, f"VIDEO  @ {ts_cam_loc:%Y-%m-%d %H:%M:%S.%f %Z}", 24, scale=FONT_SCALE)
-            put_text(composite, f"SONAR  @ {ts_sonar_loc:%Y-%m-%d %H:%M:%S.%f %Z}   Δt={dt.total_seconds():.3f}s", 48, scale=FONT_SCALE)
+                    ts_cam_loc   = to_local(ts_cam,   "Europe/Oslo")
+                    ts_sonar_loc = to_local(ts_target,"Europe/Oslo")
+                    put_text(composite, f"VIDEO  @ {ts_cam_loc:%Y-%m-%d %H:%M:%S.%f %Z}", 24, scale=FONT_SCALE)
+                    put_text(composite, f"SONAR  @ {ts_sonar_loc:%Y-%m-%d %H:%M:%S.%f %Z}   Δt={dt.total_seconds():.3f}s", 48, scale=FONT_SCALE)
 
         else:
             # sonar-only output canvas

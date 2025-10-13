@@ -1,34 +1,5 @@
 # Copyright (c) 2025 Eirik Varnes
 # Licensed under the MIT License. See LICENSE file for details.
-
-# uuv_sonar_viz.py
-"""
-Utilities for loading Sonoptix-style multibeam sonar frames, matching video frames by
-timestamp, enhancing/rasterizing sonar intensity, and producing ready-made plots.
-
-Usage (in a notebook):
-    import uuv_sonar_viz as usv
-
-    dfs = usv.load_df(SONAR_FILE)
-    dfv = usv.read_video_index(VIDEO_SEQ_DIR)
-
-    # pick sonar frame
-    M = usv.get_sonoptix_frame(dfs, frame_index)
-    M = usv.apply_flips(M, flip_range=False, flip_beams=False)
-
-    # enhance for display
-    Z_enh = usv.enhance_intensity(M, range_min, range_max)
-
-    # match video frame
-    ts_target = usv.ensure_ts_col(dfs).loc[frame_index, "ts_utc"]
-    j_best, dt_best = usv.nearest_video_index(dfv, ts_target, tolerance=pd.Timedelta("75ms"))
-    img_rgb = usv.load_png_rgb(VIDEO_SEQ_DIR / dfv.loc[j_best, "file"])
-
-    # quick plots
-    usv.plot_video_and_sonar(img_rgb, Z_enh, fov_deg=120, rmin=0, rmax=30, y_zoom=10)
-    usv.plot_video_and_cone(img_rgb, Z_enh, fov_deg=120, rmin=0, rmax=30, y_zoom=10)
-"""
-
 from __future__ import annotations
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 
@@ -951,3 +922,113 @@ def put_text_overlay(bgr, text, y, x=10, scale=0.55):
     """Add text overlay with white text and black outline."""
     cv2.putText(bgr, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, (255,255,255), 2, cv2.LINE_AA)
     cv2.putText(bgr, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, (0,0,0), 1, cv2.LINE_AA)
+
+
+def find_video_files_for_bag(bag_name: str, exports_dir: Optional[Path] = None) -> Dict[str, Optional[Path]]:
+    """
+    Automatically find video CSV and PNG frame directories for a given bag name.
+    
+    Args:
+        bag_name: Bag name (e.g., "2024-08-20_13-39-34")
+        exports_dir: Path to exports directory (uses default if None)
+        
+    Returns:
+        Dictionary with keys:
+        - 'sonar_csv': Path to sonar CSV file or None
+        - 'video_frames_dir': Path to best matching PNG frames directory or None
+        - 'available_frame_dirs': List of all available frame directories for this bag
+    """
+    from utils.sonar_config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS, VIDEO_CONFIG
+    
+    if exports_dir is None:
+        exports_dir = Path(EXPORTS_DIR_DEFAULT)
+    
+    # Clean bag name (remove _data or _video suffix if present)
+    clean_bag_name = bag_name.replace('_data', '').replace('_video', '')
+    
+    result = {
+        'sonar_csv': None,
+        'video_frames_dir': None,
+        'available_frame_dirs': []
+    }
+    
+    # Find sonar CSV file
+    csv_dir = exports_dir / EXPORTS_SUBDIRS.get('by_bag', 'by_bag')
+    csv_pattern = f"sensor_sonoptix_echo_image__{clean_bag_name}_video.csv"
+    csv_file = csv_dir / csv_pattern
+    
+    if csv_file.exists():
+        result['sonar_csv'] = csv_file
+    else:
+        # Try alternative patterns
+        for csv_candidate in csv_dir.glob(f"*{clean_bag_name}*video*.csv"):
+            if 'sonoptix' in csv_candidate.name:
+                result['sonar_csv'] = csv_candidate
+                break
+    
+    # Find PNG frame directories
+    frames_dir = exports_dir / EXPORTS_SUBDIRS.get('frames', 'frames')
+    if frames_dir.exists():
+        # Look for frame directories matching this bag
+        for frame_dir in frames_dir.iterdir():
+            if frame_dir.is_dir() and clean_bag_name in frame_dir.name:
+                # Verify it has PNG frames and index.csv
+                if (frame_dir / 'index.csv').exists() or list(frame_dir.glob('*.png')):
+                    result['available_frame_dirs'].append(frame_dir)
+        
+        # Select best frame directory based on topic preference
+        if result['available_frame_dirs']:
+            topic_preferences = VIDEO_CONFIG.get('video_topic_preference', [
+                'image_compressed_image_data',
+                'ted_image', 
+                'camera_image'
+            ])
+            
+            # Try to find preferred topic
+            for preferred_topic in topic_preferences:
+                for frame_dir in result['available_frame_dirs']:
+                    if preferred_topic in frame_dir.name:
+                        result['video_frames_dir'] = frame_dir
+                        break
+                if result['video_frames_dir']:
+                    break
+            
+            # If no preferred topic found, use the first available
+            if not result['video_frames_dir'] and result['available_frame_dirs']:
+                result['video_frames_dir'] = result['available_frame_dirs'][0]
+    
+    return result
+
+
+def get_video_overlay_info(bag_name: str) -> Optional[Dict[str, Path]]:
+    """
+    Get video overlay information if enabled in configuration.
+    
+    Args:
+        bag_name: Bag name to find video files for
+        
+    Returns:
+        Dictionary with 'sonar_csv' and 'video_frames_dir' paths if video overlay
+        is enabled and files are found, None otherwise.
+    """
+    from utils.sonar_config import VIDEO_CONFIG
+    
+    if not VIDEO_CONFIG.get('enable_video_overlay', False):
+        return None
+    
+    video_files = find_video_files_for_bag(bag_name)
+    
+    if video_files['sonar_csv'] and video_files['video_frames_dir']:
+        return {
+            'sonar_csv': video_files['sonar_csv'],
+            'video_frames_dir': video_files['video_frames_dir']
+        }
+    else:
+        print(f"Warning: Video overlay enabled but files not found for bag '{bag_name}'")
+        if not video_files['sonar_csv']:
+            print(f"  Missing sonar CSV file")
+        if not video_files['video_frames_dir']:
+            print(f"  Missing video frames directory")
+            if video_files['available_frame_dirs']:
+                print(f"  Available frame dirs: {[v.name for v in video_files['available_frame_dirs']]}")
+        return None

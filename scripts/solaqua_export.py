@@ -13,11 +13,12 @@ This single script handles all SOLAQUA data export operations:
 - Cone NPZ creation from sonar data
 
 Usage:
-    python3 solaqua_export.py --help
-    python3 solaqua_export.py --data-dir /Volumes/LaCie/SOLAQUA/raw_data --exports-dir /Volumes/LaCie/SOLAQUA/exports
-    python3 solaqua_export.py --data-dir /Volumes/LaCie/SOLAQUA/raw_data --exports-dir /Volumes/LaCie/SOLAQUA/exports --all
-    python3 solaqua_export.py --data-dir /Volumes/LaCie/SOLAQUA/raw_data --exports-dir /Volumes/LaCie/SOLAQUA/exports --csv-only
-    python3 solaqua_export.py --data-dir /Volumes/LaCie/SOLAQUA/raw_data --exports-dir /Volumes/LaCie/SOLAQUA/exports --video-only
+    python3 scripts/solaqua_export.py --help
+    python3 scripts/solaqua_export.py --data-dir /Volumes/LaCie/SOLAQUA/raw_data --exports-dir /Volumes/LaCie/SOLAQUA/exports
+    python3 scripts/solaqua_export.py --data-dir /Volumes/LaCie/SOLAQUA/raw_data --exports-dir /Volumes/LaCie/SOLAQUA/exports --all
+    python3 scripts/solaqua_export.py --data-dir /Volumes/LaCie/SOLAQUA/raw_data --exports-dir /Volumes/LaCie/SOLAQUA/exports --csv-only
+    python3 scripts/solaqua_export.py --data-dir /Volumes/LaCie/SOLAQUA/raw_data --exports-dir /Volumes/LaCie/SOLAQUA/exports --video-only
+    python3 scripts/solaqua_export.py --data-dir /Volumes/LaCie/SOLAQUA/raw_data --exports-dir /Volumes/LaCie/SOLAQUA/exports --frames-from-mp4 --frame-stride 2 --limit-frames 1000
 """
 
 import argparse
@@ -27,7 +28,9 @@ from typing import Dict, List, Optional, Union
 
 import pandas as pd
 
-# Import our consolidated utility module
+# Add parent directory to path for utils imports
+sys.path.append(str(Path(__file__).parent.parent))
+
 from utils.dataset_export_utils import (
     save_all_topics_from_data_bags,
     list_topics_in_bag,
@@ -246,8 +249,8 @@ class SOLAQUACompleteExporter:
     
     def export_frames(
         self,
-        stride: int = 10,
-        limit_per_bag: Optional[int] = 100,
+        stride: int = 1,
+        limit_per_bag: Optional[int] = 1500,
         resize_to: Optional[tuple] = None
     ) -> bool:
         """
@@ -286,6 +289,161 @@ class SOLAQUACompleteExporter:
             
         except Exception as e:
             error_msg = f"Error during frame export: {e}"
+            self.results['frame_export']['errors'].append(error_msg)
+            print(f"❌ {error_msg}")
+            return False
+
+    def extract_frames_from_mp4(
+        self,
+        stride: int = 1,
+        limit_per_video: Optional[int] = None,
+        resize_to: Optional[tuple] = None,
+        overwrite: bool = False
+    ) -> bool:
+        """
+        Extract PNG frames from existing MP4 files, with fallback to bag export.
+        
+        Args:
+            stride: Take every Nth frame from MP4
+            limit_per_video: Maximum frames per MP4 video  
+            resize_to: Resize frames to (width, height) or None
+            overwrite: Overwrite existing PNG directories
+            
+        Returns:
+            True if successful
+        """
+        print(f"\n🎬 Extracting PNG frames from MP4 videos...")
+        print(f"   Frame stride: {stride} (every {stride}th frame)")
+        print(f"   Limit per video: {limit_per_video or 'no limit'}")
+        print(f"   Resize to: {resize_to or 'original size'}")
+        print(f"   Overwrite existing: {overwrite}")
+        
+        try:
+            import cv2
+            
+            # Find existing MP4 files
+            videos_dir = self.exports_dir / EXPORTS_SUBDIRS.get('videos', 'videos')
+            mp4_files = list(videos_dir.glob("*.mp4")) if videos_dir.exists() else []
+            
+            # Filter out macOS hidden files
+            mp4_files = [f for f in mp4_files if not f.name.startswith('._')]
+            
+            if not mp4_files:
+                print(f"⚠️  No MP4 files found in {videos_dir}")
+                print(f"   Falling back to bag export...")
+                return self.export_frames(stride=stride, limit_per_bag=limit_per_video, resize_to=resize_to)
+            
+            print(f"   Found {len(mp4_files)} MP4 files")
+            
+            # Prepare output directory
+            frames_dir = self.exports_dir / EXPORTS_SUBDIRS.get('frames', 'frames')
+            frames_dir.mkdir(parents=True, exist_ok=True)
+            
+            total_sequences = 0
+            successful_extractions = 0
+            
+            for mp4_file in mp4_files:
+                print(f"\n   Processing: {mp4_file.name}")
+                
+                # Create output directory for this video
+                video_stem = mp4_file.stem
+                output_dir = frames_dir / f"{video_stem}_frames"
+                
+                if output_dir.exists() and not overwrite:
+                    print(f"     ⏭️  Skipping (directory exists): {output_dir.name}")
+                    total_sequences += 1
+                    continue
+                
+                output_dir.mkdir(exist_ok=True)
+                
+                try:
+                    # Open video file
+                    cap = cv2.VideoCapture(str(mp4_file))
+                    if not cap.isOpened():
+                        print(f"     ❌ Could not open video: {mp4_file.name}")
+                        continue
+                    
+                    # Get video properties
+                    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                    fps = cap.get(cv2.CAP_PROP_FPS)
+                    duration = total_frames / fps if fps > 0 else 0
+                    
+                    print(f"     📹 Video info: {total_frames} frames, {fps:.1f} FPS, {duration:.1f}s")
+                    
+                    # Extract frames
+                    frame_count = 0
+                    extracted_count = 0
+                    index_rows = []
+                    
+                    while True:
+                        ret, frame = cap.read()
+                        if not ret:
+                            break
+                            
+                        # Check stride
+                        if frame_count % stride == 0:
+                            # Check limit
+                            if limit_per_video is not None and extracted_count >= limit_per_video:
+                                break
+                                
+                            # Resize if requested
+                            if resize_to:
+                                W, H = resize_to
+                                if frame.shape[1] != W or frame.shape[0] != H:
+                                    frame = cv2.resize(frame, (W, H), interpolation=cv2.INTER_AREA)
+                            
+                            # Generate filename with frame number and timestamp
+                            timestamp_sec = frame_count / fps if fps > 0 else frame_count
+                            frame_filename = f"frame_{frame_count:06d}_{timestamp_sec:.3f}s.png"
+                            frame_path = output_dir / frame_filename
+                            
+                            # Save frame
+                            cv2.imwrite(str(frame_path), frame)
+                            extracted_count += 1
+                            
+                            # Add to index
+                            index_rows.append({
+                                "video": mp4_file.name,
+                                "frame_number": frame_count,
+                                "timestamp_sec": timestamp_sec,
+                                "file": frame_filename,
+                                "extracted_count": extracted_count
+                            })
+                        
+                        frame_count += 1
+                    
+                    cap.release()
+                    
+                    # Save index CSV
+                    if index_rows:
+                        index_path = output_dir / "index.csv"
+                        pd.DataFrame(index_rows).to_csv(index_path, index=False)
+                        print(f"     ✅ Extracted {extracted_count} frames (every {stride}th of {total_frames})")
+                        print(f"        Output: {output_dir.name}/")
+                        successful_extractions += 1
+                    else:
+                        print(f"     ⚠️  No frames extracted")
+                    
+                    total_sequences += 1
+                    
+                except Exception as e:
+                    print(f"     ❌ Error extracting from {mp4_file.name}: {e}")
+                    continue
+            
+            self.results['frame_export']['success'] = successful_extractions > 0
+            self.results['frame_export']['files'] = total_sequences
+            
+            print(f"\n✅ MP4 frame extraction completed!")
+            print(f"   Processed {total_sequences} videos")
+            print(f"   Successfully extracted: {successful_extractions} frame sequences")
+            
+            return successful_extractions > 0
+            
+        except ImportError:
+            print(f"❌ OpenCV (cv2) not available. Install with: pip install opencv-python")
+            return False
+        except Exception as e:
+            error_msg = f"Error during MP4 frame extraction: {e}"
             self.results['frame_export']['errors'].append(error_msg)
             print(f"❌ {error_msg}")
             return False
@@ -538,19 +696,25 @@ def main():
         epilog="""
 Examples:
   # Export everything
-  python solaqua_export.py --data-dir data --exports-dir exports --all
+  python scripts/solaqua_export.py --data-dir data --exports-dir exports --all
 
   # Just CSV export
-  python solaqua_export.py --data-dir data --exports-dir exports --csv-only
+  python scripts/solaqua_export.py --data-dir data --exports-dir exports --csv-only
 
   # Just video export
-  python solaqua_export.py --data-dir data --exports-dir exports --video-only
+  python scripts/solaqua_export.py --data-dir data --exports-dir exports --video-only
   
+  # Extract frames from existing MP4 files (faster)
+  python scripts/solaqua_export.py --data-dir data --exports-dir exports --frames-from-mp4 --frame-stride 5 --limit-frames 1000
+  
+  # Extract frames from bags (if no MP4s exist)
+  python scripts/solaqua_export.py --data-dir data --exports-dir exports --frames-only --frame-stride 5 --limit-frames 1000
+
   # CSV + quick frame sampling
-  python solaqua_export.py --data-dir data --exports-dir exports --csv --frames --frame-stride 30
+  python scripts/solaqua_export.py --data-dir data --exports-dir exports --csv --frames --frame-stride 30
 
   # Custom video settings
-  python solaqua_export.py --data-dir data --exports-dir exports --video --fps 10 --limit-videos 5
+  python scripts/solaqua_export.py --data-dir data --exports-dir exports --video --fps 10 --limit-videos 5
         """
     )
     
@@ -567,6 +731,10 @@ Examples:
                        help="Only export CSV data")
     parser.add_argument("--video-only", action="store_true",
                        help="Only export videos")
+    parser.add_argument("--frames-only", action="store_true",
+                       help="Only extract frames from bags")
+    parser.add_argument("--frames-from-mp4", action="store_true",
+                       help="Extract frames from existing MP4 files (with bag fallback)")
     parser.add_argument("--inspect-only", action="store_true",
                        help="Only inspect bags without exporting")
     
@@ -598,9 +766,11 @@ Examples:
     parser.add_argument("--frame-stride", type=int, default=10,
                        help="Take every Nth frame (default: 10)")
     parser.add_argument("--limit-frames", type=int, default=100,
-                       help="Max frames per bag (default: 100)")
+                       help="Max frames per bag/video (default: 100)")
     parser.add_argument("--resize", type=str,
                        help="Resize frames to WIDTHxHEIGHT (e.g., 640x480)")
+    parser.add_argument("--overwrite-frames", action="store_true",
+                       help="Overwrite existing frame directories")
     
     # NPZ options
     parser.add_argument("--max-npz-bags", type=int,
@@ -621,20 +791,9 @@ Examples:
     # Initialize exporter
     exporter = SOLAQUACompleteExporter(args.data_dir, args.exports_dir)
     
-    # Discover bags
-    bags = exporter.discover_bags()
-    if not bags['data_bags'] and not bags['video_bags']:
-        print("❌ No bag files found. Check your data directory.")
-        return 1
-    
-    # Inspect bags
-    exporter.inspect_bags(bags)
-    
-    if args.inspect_only:
-        return 0
-    
     # Determine operations to run
     operations = []
+    use_mp4_extraction = False
     
     if args.all:
         operations = ['csv', 'video', 'frames', 'camera_info', 'npz']
@@ -642,6 +801,11 @@ Examples:
         operations = ['csv']
     elif args.video_only:
         operations = ['video', 'camera_info']
+    elif args.frames_only:
+        operations = ['frames']
+    elif args.frames_from_mp4:
+        operations = ['frames']
+        use_mp4_extraction = True
     else:
         if args.csv: operations.append('csv')
         if args.video: operations.append('video')
@@ -654,7 +818,24 @@ Examples:
         operations = ['csv']
         print("ℹ️  No operations specified, defaulting to CSV export")
     
-    print(f"\n🚀 Starting export operations: {', '.join(operations)}")
+    # Skip bag discovery and validation for MP4-only operations
+    if use_mp4_extraction:
+        print(f"\n🚀 Starting MP4 frame extraction: {', '.join(operations)}")
+        print("ℹ️  Skipping bag discovery for MP4 extraction mode")
+    else:
+        # Discover bags only when needed
+        bags = exporter.discover_bags()
+        if not bags['data_bags'] and not bags['video_bags']:
+            print("❌ No bag files found. Check your data directory.")
+            return 1
+        
+        # Inspect bags
+        exporter.inspect_bags(bags)
+        
+        if args.inspect_only:
+            return 0
+        
+        print(f"\n🚀 Starting export operations: {', '.join(operations)}")
     
     # Run operations
     try:
@@ -671,11 +852,19 @@ Examples:
             )
         
         if 'frames' in operations:
-            exporter.export_frames(
-                stride=args.frame_stride,
-                limit_per_bag=args.limit_frames,
-                resize_to=resize_to
-            )
+            if use_mp4_extraction:
+                exporter.extract_frames_from_mp4(
+                    stride=args.frame_stride,
+                    limit_per_video=args.limit_frames,
+                    resize_to=resize_to,
+                    overwrite=args.overwrite_frames
+                )
+            else:
+                exporter.export_frames(
+                    stride=args.frame_stride,
+                    limit_per_bag=args.limit_frames,
+                    resize_to=resize_to
+                )
         
         if 'camera_info' in operations:
             exporter.export_camera_info()
