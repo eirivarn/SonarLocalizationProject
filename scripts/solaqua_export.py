@@ -321,19 +321,21 @@ class SOLAQUACompleteExporter:
         try:
             import cv2
             
-            # Find existing MP4 files
+            # Find existing MP4 files - only compressed image videos, not ted (camera) videos
             videos_dir = self.exports_dir / EXPORTS_SUBDIRS.get('videos', 'videos')
             mp4_files = list(videos_dir.glob("*.mp4")) if videos_dir.exists() else []
             
-            # Filter out macOS hidden files
+            # Filter out macOS hidden files and ted (camera) MP4 files
             mp4_files = [f for f in mp4_files if not f.name.startswith('._')]
+            mp4_files = [f for f in mp4_files if 'compressed_image' in f.name and 'ted' not in f.name]
             
             if not mp4_files:
-                print(f"⚠️  No MP4 files found in {videos_dir}")
+                print(f"⚠️  No compressed_image MP4 files found in {videos_dir}")
+                print(f"   (Only processing compressed_image videos, not ted camera videos)")
                 print(f"   Falling back to bag export...")
                 return self.export_frames(stride=stride, limit_per_bag=limit_per_video, resize_to=resize_to)
             
-            print(f"   Found {len(mp4_files)} MP4 files")
+            print(f"   Found {len(mp4_files)} compressed_image MP4 files (excluding ted camera videos)")
             
             # Prepare output directory
             frames_dir = self.exports_dir / EXPORTS_SUBDIRS.get('frames', 'frames')
@@ -414,10 +416,47 @@ class SOLAQUACompleteExporter:
                     
                     cap.release()
                     
-                    # Save index CSV
+                    # Save index CSV with absolute timestamps for synchronization compatibility
                     if index_rows:
+                        index_df = pd.DataFrame(index_rows)
+                        
+                        # Convert relative video timestamps to absolute UTC timestamps
+                        # This ensures compatibility with the synchronization system
+                        try:
+                            # Extract bag name from MP4 filename
+                            # Format: YYYY-MM-DD_HH-MM-SS_video__topic_name.mp4
+                            bag_name = mp4_file.stem.split('_video__')[0] if '_video__' in mp4_file.stem else mp4_file.stem
+                            
+                            # Load bag CSV to get absolute start time
+                            bag_csv_path = self.exports_dir / EXPORTS_SUBDIRS.get('by_bag', 'by_bag') / f"sensor_sonoptix_echo_image__{bag_name}_video.csv"
+                            
+                            if bag_csv_path.exists():
+                                print(f"     🕐 Converting to absolute timestamps using {bag_csv_path.name}")
+                                bag_df = sonar_utils.load_df(bag_csv_path)
+                                
+                                # Get bag start time
+                                if "ts_utc" not in bag_df.columns and "t" in bag_df.columns:
+                                    bag_df["ts_utc"] = pd.to_datetime(bag_df["t"], unit="s", utc=True)
+                                elif "ts_utc" in bag_df.columns:
+                                    bag_df["ts_utc"] = pd.to_datetime(bag_df["ts_utc"], utc=True)
+                                
+                                if "ts_utc" in bag_df.columns:
+                                    bag_start_time = bag_df["ts_utc"].min()
+                                    index_df['ts_utc'] = bag_start_time + pd.to_timedelta(index_df['timestamp_sec'], unit='s')
+                                    print(f"        ✅ Added absolute timestamps (start: {bag_start_time})")
+                                else:
+                                    print(f"        ⚠️  Could not find timestamp columns in bag CSV")
+                            else:
+                                print(f"        ⚠️  Bag CSV not found: {bag_csv_path.name}")
+                                print(f"        📝 Using relative timestamps only")
+                        
+                        except Exception as e:
+                            print(f"        ⚠️  Timestamp conversion failed: {e}")
+                            print(f"        📝 Using relative timestamps only")
+                        
+                        # Save the index
                         index_path = output_dir / "index.csv"
-                        pd.DataFrame(index_rows).to_csv(index_path, index=False)
+                        index_df.to_csv(index_path, index=False)
                         print(f"     ✅ Extracted {extracted_count} frames (every {stride}th of {total_frames})")
                         print(f"        Output: {output_dir.name}/")
                         successful_extractions += 1
