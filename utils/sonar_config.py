@@ -82,12 +82,6 @@ IMAGE_PROCESSING_CONFIG: Dict = {
                                         # Makes pipeline completely signal-strength independent
                                         # Focus on structural patterns only
     
-    # === CV2 ENHANCEMENT ===
-    # Fast OpenCV enhancement methods as alternative to custom adaptive kernels
-    'use_cv2_enhancement': False,       # Toggle: False=custom adaptive, True=OpenCV methods
-    'cv2_method': 'morphological',      # Method: 'morphological', 'bilateral', 'gabor'
-    'cv2_kernel_size': 3,               # Kernel/filter size (3, 5, 7)
-
     # === ADAPTIVE LINEAR MERGING ===
 
     'adaptive_base_radius':2,           # Base circular merging radius 
