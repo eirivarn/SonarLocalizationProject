@@ -504,379 +504,327 @@ else:
 
 ## 5. Image Analysis & Net Detection
 
-### 5.1 Net Structure Characteristics
+### 5.1 Overview
 
-Underwater fishing nets in sonar imagery typically exhibit:
-- **Elongated shape:** High aspect ratio contours
-- **Consistent orientation:** Major axis approximately horisontal
-- **Elliptical AOI tracking:** Improved net tracking with smoothed center positioning
-- **Area of Interest (AOI):** Tracking previous detections improves robustness
+The image analysis pipeline processes Cartesian sonar frames to detect and track underwater net structures. The system uses a **signal-strength independent approach** that focuses on geometric patterns rather than intensity variations, making it robust across different sonar conditions.
 
-### 5.2 Signal-Strength Independent Binary Pipeline
+**Key Components:**
+1. **Binary preprocessing** with adaptive enhancement
+2. **Contour detection** and feature extraction
+3. **Elliptical AOI tracking** with temporal smoothing
+4. **Distance measurement** with stability constraints
+
+### 5.2 Binary Preprocessing Pipeline
 
 **Implementation:** `utils/sonar_image_analysis.py::preprocess_edges()`
 
-The pipeline has been redesigned to be **completely signal-strength independent** by converting to binary frames immediately. This fundamental architectural change ensures the algorithm focuses purely on structural patterns regardless of sonar signal intensity.
+The pipeline begins with **signal-strength independent processing** that converts intensity-based sonar data to binary structural information.
 
 #### Step 1: Binary Conversion
 
-**Signal-Strength Independence:**
-The first and most critical step is converting the input frame to binary format, eliminating all signal strength dependencies:
-
 ```python
-# Convert to binary frame immediately - removes signal strength dependency
-binary_threshold = cfg.get('binary_threshold', 128)  # Default threshold
+# Convert to binary immediately - eliminates signal strength dependency
+binary_threshold = cfg.get('binary_threshold', 128)
 binary_frame = (frame_u8 > binary_threshold).astype(np.uint8) * 255
 ```
 
-**Benefits:**
-- **Structural Focus:** Algorithm analyzes only geometric patterns, not intensity variations
-- **Robust Detection:** Net detection works equally well in high/low signal strength areas
-- **Simplified Processing:** Binary data enables faster, more reliable edge detection
-- **Consistent Results:** Eliminates signal-strength-based detection variability
+**Purpose:** Removes all intensity-based variability, focusing purely on geometric structure.
 
-#### Step 2: Binary Enhancement Pipeline
+#### Step 2: Adaptive Linear Enhancement
 
-The preprocessing pipeline then applies **Adaptive Linear Merging** to the binary frame - a revolutionary approach that dynamically adapts merging kernels from circular to elliptical based on detected linear patterns in the binary structural data.
+**Implementation:** `adaptive_linear_momentum_merge_fast()`
 
-#### Step 3: Adaptive Linear Momentum Merging on Binary Data
-
-**Implementation:** `utils/sonar_image_analysis.py::adaptive_linear_momentum_merge_fast()`
-
-The core innovation replaces fixed directional kernels with adaptive elliptical kernels that elongate based on local linearity detection in the binary structural data:
+Applies **adaptive morphological operations** that dynamically adjust kernel shapes based on detected linear structures:
 
 ```python
 enhanced_binary = adaptive_linear_momentum_merge_fast(
-    binary_frame,            # Binary frame input
-    base_radius=2,           # Base circular kernel radius
-    max_elongation=4,        # Maximum ellipse elongation factor
-    linearity_threshold=0.3, # Sensitivity to linear patterns
-    momentum_boost=10.0,     # Enhancement strength
-    angle_steps=9            # Angular resolution
+    binary_frame,
+    base_radius=cfg.get('adaptive_base_radius', 2),
+    max_elongation=cfg.get('adaptive_max_elongation', 4),
+    linearity_threshold=cfg.get('adaptive_linearity_threshold', 0.3),
+    momentum_boost=cfg.get('momentum_boost', 1.5),
+    angle_steps=cfg.get('adaptive_angle_steps', 9)
 )
 ```
 
-#### Mathematical Theory: Binary Linearity Detection
+**Algorithm:**
+1. **Gradient Analysis:** Computes oriented gradients to detect linear patterns
+2. **Linearity Detection:** Measures directional consistency using gradient variance
+3. **Kernel Adaptation:** Morphs from circular to elliptical kernels based on linearity strength
+4. **Selective Enhancement:** Boosts confirmed linear structures while preserving isotropic regions
 
-The algorithm detects linear structures in binary data using **oriented gradient kernels** that measure directional consistency:
-
-**1. Binary Gradient Field Analysis:**
-```python
-# Compute binary image gradients
-grad_x = cv2.Sobel(binary_frame, cv2.CV_64F, 1, 0, ksize=3)
-grad_y = cv2.Sobel(binary_frame, cv2.CV_64F, 0, 1, ksize=3)
-
-# Gradient magnitude and orientation
-grad_mag = np.sqrt(grad_x**2 + grad_y**2)
-grad_angle = np.arctan2(grad_y, grad_x)
-grad_angle = np.arctan2(grad_y, grad_x)
-```
-
-**2. Oriented Gradient Kernels:**
-For each angle θ, create a gradient detection kernel aligned with that direction:
-```python
-# Kernel oriented at angle θ
-kernel = create_oriented_gradient_kernel_fast(base_radius, angle)
-
-# Apply kernel to detect gradients perpendicular to the angle
-response = cv2.filter2D(grad_mag, cv2.CV_64F, kernel)
-```
-
-**3. Linearity Measurement:**
-The linearity at each pixel is computed as the **variance** of responses across all angles:
-```python
-# Stack all angle responses
-responses = np.stack([response_0, response_45, ..., response_315])
-
-# Compute variance across angles - high variance indicates strong directionality
-linearity = np.var(responses, axis=0)
-```
-
-**Mathematical Intuition:** 
-- **Isotropic regions** (noise, uniform areas): Similar responses across all angles → low variance
-- **Linear structures** (net strands): Strong response in perpendicular direction, weak in parallel → high variance
-
-#### Kernel Adaptation Algorithm
-
-The key innovation is **dynamic kernel morphing**:
-
-**1. Circular Base Kernel:**
-```python
-# Start with circular kernel for isotropic merging
-circular_kernel = create_circular_kernel(base_radius)
-```
-
-**2. Linearity-Based Elongation:**
-```python
-# Normalize linearity to [0,1] range
-normalized_linearity = linearity / (linearity.max() + 1e-8)
-
-# Compute elongation factor based on linearity strength
-elongation = 1.0 + (max_elongation - 1.0) * (normalized_linearity > linearity_threshold)
-
-# Elongation ranges from 1.0 (circular) to max_elongation (highly elliptical)
-```
-
-**3. Elliptical Kernel Generation:**
-For regions with detected linearity, create elliptical kernels aligned with the dominant gradient direction:
-```python
-# Determine dominant angle from gradient field
-dominant_angle = compute_dominant_angle(grad_x, grad_y, mask)
-
-# Create elliptical kernel with computed elongation
-elliptical_kernel = create_elliptical_kernel_fast(
-    base_radius, 
-    elongation_factor, 
-    dominant_angle
-)
-```
-
-#### Fast Implementation Optimizations
-
-**Performance Enhancements:**
-1. **Downsampling:** Process at 1/4 resolution, then upsample results
-2. **Pre-computed Kernels:** Cache kernels for standard angles
-3. **Vectorized Operations:** Use NumPy broadcasting for pixel-wise computations
-4. **Reduced Angular Resolution:** 9 angles instead of 18 for 2x speedup
+#### Step 3: Edge Detection & Morphological Processing
 
 ```python
-# Downsample for processing
-small_frame = cv2.resize(frame, (frame.shape[1]//4, frame.shape[0]//4))
-
-# Process at reduced resolution
-enhanced_small = adaptive_process(small_frame)
-
-# Upsample result back to original size
-enhanced = cv2.resize(enhanced_small, (frame.shape[1], frame.shape[0]))
-```
-
-**Speed Improvement:** 5-10x faster than full-resolution processing while maintaining detection quality.
-
-#### Step 4: Binary Edge Detection
-
-**Simplified Binary Edge Detection:**
-Unlike traditional Canny edge detection, binary frames enable direct gradient-based edge detection:
-
-```python
-# Simple gradient-based edge detection on binary frame
+# Direct gradient-based edge detection on binary data
 kernel_edge = np.array([[-1, -1, -1], [-1, 8, -1], [-1, -1, -1]], dtype=np.float32)
-edges = cv2.filter2D(binary_frame, cv2.CV_32F, kernel_edge)
+edges = cv2.filter2D(enhanced_binary, cv2.CV_32F, kernel_edge)
 edges = (edges > 0).astype(np.uint8) * 255
+
+# Morphological operations for contour connectivity
+if cfg.get('morph_close_kernel', 0) > 0:
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (mks, mks))
+    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
+
+if cfg.get('edge_dilation_iterations', 0) > 0:
+    edges = cv2.dilate(edges, kernel, iterations=dil)
 ```
 
-**Benefits of Binary Edge Detection:**
-- **No Gaussian Smoothing:** Binary data doesn't need noise reduction
-- **No Hysteresis Thresholding:** Single threshold sufficient for binary data
-- **Faster Processing:** Direct gradient operators without multi-stage Canny pipeline
-- **Cleaner Edges:** Binary structure creates sharper, more consistent edges
+**Benefits of Binary Processing:**
+- **Signal Independence:** Works consistently across different sonar power levels
+- **Structural Focus:** Emphasizes geometric patterns over intensity variations
+- **Simplified Edge Detection:** No multi-stage Canny pipeline needed
+- **Performance:** Faster processing with direct binary operations
 
-#### Step 5: Morphological Closing
+### 5.3 Contour Detection and Selection
+
+**Implementation:** `utils/sonar_image_analysis.py::SonarDataProcessor.analyze_frame()`
+
+#### Step 1: Contour Extraction
 
 ```python
-kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-edges_closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
+contours, _ = cv2.findContours(edges_processed, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
 ```
 
-Connects nearby edge fragments enhanced by adaptive merging on binary structures.
+#### Step 2: Contour Scoring and Selection
 
-#### Step 6: Edge Dilation
+**Implementation:** `select_best_contour_core()`
+
+Ranks contours using a **simplified scoring system** optimized for net detection:
 
 ```python
-edges_dilated = cv2.dilate(edges_closed, kernel, iterations=1)
+# Core scoring: area × elongation
+elongation = max(feat['aspect_ratio'], feat['ellipse_elongation'])
+base_score = area * elongation
+
+# AOI boost for temporal consistency
+if contour_overlap_with_aoi(contour, aoi, min_overlap_percent=0.7):
+    base_score *= aoi_boost  # Typically 2.0x boost
+
+# Distance penalty for spatial consistency
+if last_center is not None:
+    distance = np.sqrt((cx - last_center[0])**2 + (cy - last_center[1])**2)
+    distance_factor = max(0.01, 1.0 - distance / 50.0)  # Strong penalty beyond 50px
+    final_score *= distance_factor
 ```
 
-Final thickening for robust contour extraction from binary edge data.
+**Contour Features Computed:**
+- **Area:** Contour area in pixels
+- **Aspect Ratio:** Width/height ratio of bounding rectangle
+- **Ellipse Elongation:** Major/minor axis ratio from ellipse fit
+- **Centroid:** Center of mass coordinates
+- **Bounding Rectangle:** Position and dimensions
 
-#### Algorithm Advantages
+**Selection Criteria:**
+1. **Minimum Area:** Filter out noise (configurable, default 100px)
+2. **AOI Overlap:** 70% of contour points must be inside elliptical AOI
+3. **Spatial Consistency:** Penalize contours far from previous detection
+4. **Geometric Fit:** Prefer elongated contours typical of net structures
 
-**1. Signal-Strength Independence:**
-- **Binary conversion** eliminates signal strength variability
-- **Structural focus** ensures consistent detection regardless of sonar power/distance
-- **Robust results** across different signal conditions and environments
+### 5.4 Elliptical Area of Interest (AOI) Tracking
 
-**2. Adaptive Behavior:**
-- **Circular kernels** in noisy/uniform regions → preserves detail without over-enhancement
-- **Elliptical kernels** along net strands → significantly amplifies linear structures in binary data
+**Implementation:** `create_smooth_elliptical_aoi()`
 
-**3. Orientation Independence:**
-- Automatically detects net orientation from binary gradient field
-- No assumption about horizontal/vertical alignment
+The system maintains **temporal continuity** through smoothed elliptical tracking regions.
 
-**4. Binary Processing Benefits:**
-- **Simplified edge detection** without multi-stage Canny pipeline
-- **Faster processing** with direct gradient operators
-- **Cleaner contours** from binary structural data
-- **Consistent thresholding** without signal-dependent parameters
-
-**5. Noise Robustness:**
-- Linearity threshold prevents false elongation in noisy regions
-- Momentum boost selectively enhances only confirmed linear patterns
-- Binary conversion removes intensity-based noise artifacts
-
-**6. Performance Optimized:**
-- Fast implementation suitable for real-time processing
-- Maintains detection quality at reduced computational cost
-- Binary operations are computationally efficient
-
-**Configuration:** `IMAGE_PROCESSING_CONFIG` in `utils/sonar_config.py`
+#### Ellipse Fitting
 
 ```python
-'adaptive_base_radius': 2,           # Base circular kernel radius (1-5)
-'adaptive_max_elongation': 4,        # Maximum ellipse elongation (2-8)
-'adaptive_linearity_threshold': 0.3, # Linearity detection sensitivity (0.1-0.5)
-'adaptive_momentum_boost': 10.0,     # Enhancement strength (1-20)
-'adaptive_angle_steps': 9,           # Angular resolution (9-18)
-'adaptive_downsample_factor': 4,     # Processing resolution reduction (2-8)
-```
-
-### 5.3 Contour Scoring
-
-**Objective:** Rank detected contours by likelihood of representing the net structure.
-
-**Implementation:** `utils/sonar_image_analysis.py::select_best_contour()`
-
-```python
-contours, _ = cv2.findContours(edges_dilated, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-```
-
-For each contour:
-
-#### Geometric Features
-
-Computed by `compute_contour_features()`:
-
-```python
-area = cv2.contourArea(cnt)
-x, y, w, h = cv2.boundingRect(cnt)
-aspect_ratio = max(w, h) / (min(w, h) + 1e-6)
-
-hull = cv2.convexHull(cnt)
-hull_area = cv2.contourArea(hull)
-solidity = area / hull_area if hull_area > 0 else 0.0
-
-rect_area = w * h
-extent = area / rect_area if rect_area > 0 else 0.0
-
-# Ellipse fit
-if len(cnt) >= 5:
-    (cx, cy), (MA, ma), angle = cv2.fitEllipse(cnt)
-    ellipse_elongation = max(MA, ma) / (min(MA, ma) + 1e-6)
+if len(contour) >= 5:  # Minimum points for ellipse fitting
+    current_ellipse = cv2.fitEllipse(contour)
+    (center_x, center_y), (width, height), angle = current_ellipse
 else:
-    ellipse_elongation = aspect_ratio
-
-# Straightness via line fit
-pts = cnt.reshape(-1, 2)
-vx, vy, x0, y0 = cv2.fitLine(pts, cv2.DIST_L2, 0, 0.01, 0.01)
-# Compute average distance to fitted line
-straightness = max(0.1, 1.0 - (avg_distance / max(w, h) * 0.1))
+    # Fallback to centroid-based circular region
+    moments = cv2.moments(contour)
+    center_x = moments['m10'] / moments['m00']
+    center_y = moments['m01'] / moments['m00']
 ```
 
-#### Composite Score
+#### Temporal Smoothing
 
-Computed by `score_contour()`:
+**Purpose:** Prevents erratic ellipse movements between frames.
 
 ```python
-base_score = (
-    aspect_ratio * w_aspect +
-    ellipse_elongation * w_ellipse +
-    (1 - solidity) * w_solidity +
-    extent * w_extent +
-    min(aspect_ratio / 10.0, 0.5) * w_perimeter
-)
+# Smooth center position with movement limiting
+center_distance = np.sqrt((curr_center_x - prev_center_x)**2 + (curr_center_y - prev_center_y)**2)
+if center_distance > max_movement_pixels:  # Configurable limit, default 2.0px
+    scale = max_movement_pixels / center_distance
+    center_dx *= scale
+    center_dy *= scale
 
-straightness_boost = 0.5 + 1.5 * straightness
-score = area * base_score * straightness_boost
+smoothed_center_x = prev_center_x + smoothing_alpha * center_dx
+smoothed_center_y = prev_center_y + smoothing_alpha * center_dy
+
+# Smooth ellipse parameters
+smoothed_width = prev_width + smoothing_alpha * (curr_width - prev_width)
+smoothed_height = prev_height + smoothing_alpha * (curr_height - prev_height)
+
+# Smooth angle with wraparound handling
+angle_diff = ((curr_angle - prev_angle + 180) % 360) - 180
+smoothed_angle = prev_angle + smoothing_alpha * angle_diff
 ```
 
-**Weights:** Configured in `utils/sonar_config.py::ELONGATION_CONFIG`
+#### AOI Expansion
 
 ```python
-ELONGATION_CONFIG = {
-    'aspect_ratio_weight': 0.4,
-    'ellipse_elongation_weight': 0.7,
-    'solidity_weight': 0.1,
-    'extent_weight': 0.0,
-    'perimeter_weight': 0.0,
+expansion_factor = TRACKING_CONFIG.get('ellipse_expansion_factor', 0.3)  # 30% expansion
+expanded_width = smoothed_width * (1 + expansion_factor)
+expanded_height = smoothed_height * (1 + expansion_factor)
+```
+
+**Purpose:** Creates a search region larger than the detected contour to handle:
+- Minor object movement between frames
+- Partial occlusions
+- Detection variability
+
+### 5.5 Distance and Angle Measurement
+
+**Implementation:** `_distance_angle_from_smoothed_center()`
+
+#### Distance Calculation
+
+```python
+# Use smoothed center for stable measurements
+smoothed_center_x, smoothed_center_y = self.smoothed_center
+
+# Project contour points onto major axis
+major_axis_vector = np.array([np.cos(angle_rad), np.sin(angle_rad)])
+distances = []
+for point in contour:
+    point_vector = np.array([point[0][0] - smoothed_center_x, point[0][1] - smoothed_center_y])
+    projection = np.dot(point_vector, major_axis_vector)
+    distances.append(projection)
+
+# Distance = position along major axis (from center to farthest point)
+distance_pixels = np.max(np.abs(distances))
+```
+
+#### Angle Calculation
+
+```python
+# Angle of major axis relative to horizontal
+angle_degrees = np.degrees(np.arctan2(major_axis_vector[1], major_axis_vector[0]))
+```
+
+#### Stability Constraints
+
+**Distance Change Limiting:**
+```python
+max_change = cfg.get('max_distance_change_pixels', 20)
+if abs(distance_pixels - previous_distance_pixels) > max_change:
+    # Clamp to maximum allowed change
+    direction = 1 if distance_pixels > previous_distance_pixels else -1
+    distance_pixels = previous_distance_pixels + (direction * max_change)
+```
+
+**Purpose:** Prevents sudden jumps due to:
+- Contour detection noise
+- Partial occlusions
+- Temporary tracking loss
+
+### 5.6 Tracking State Management
+
+**Implementation:** `SonarDataProcessor.reset_tracking()` and state variables
+
+The processor maintains **temporal state** for consistent tracking:
+
+```python
+class SonarDataProcessor:
+    def __init__(self):
+        self.smoothed_center = None          # Smoothed ellipse center
+        self.current_aoi = None              # Current AOI definition
+        self.previous_ellipse = None         # Previous ellipse parameters
+        self.previous_distance_pixels = None # Previous distance measurement
+        self.last_center = None              # Last detected center
+```
+
+**State Updates:**
+1. **Center Smoothing:** Exponential moving average of ellipse centers
+2. **AOI Evolution:** Elliptical regions adapt to object movement
+3. **Distance Stability:** Change limiting prevents measurement jumps
+4. **Temporal Memory:** Previous frame information guides current detection
+
+### 5.7 Configuration Parameters
+
+**Image Processing:** `utils/sonar_config.py::IMAGE_PROCESSING_CONFIG`
+
+```python
+IMAGE_PROCESSING_CONFIG = {
+    'binary_threshold': 128,              # Binary conversion threshold
+    'adaptive_base_radius': 2,            # Base kernel radius
+    'adaptive_max_elongation': 4,         # Maximum kernel elongation
+    'adaptive_linearity_threshold': 0.3,  # Linearity detection sensitivity
+    'momentum_boost': 1.5,                # Enhancement strength
+    'adaptive_angle_steps': 9,            # Angular resolution
+    'min_contour_area': 100,              # Minimum contour size
+    'morph_close_kernel': 3,              # Morphological closing size
+    'edge_dilation_iterations': 1,        # Edge thickening
+    'max_distance_change_pixels': 20,     # Distance stability limit
 }
 ```
 
-#### AOI Boost
-
-If a previous Area of Interest (AOI) exists, contours overlapping the elliptical AOI receive a score multiplier:
-
-```python
-if point_in_aoi(contour_center_x, contour_center_y, elliptical_aoi):
-    score *= aoi_boost_factor  # 2.0 by default
-```
-
-#### Selection
-
-```python
-best_contour = max(scored_contours, key=lambda x: x['score'])
-```
-
-### 5.4 Elliptical AOI Tracking with Smoothed Center
-
-**SOLAQUA now uses advanced elliptical Area of Interest (AOI) tracking** for improved net detection consistency:
-
-#### 1. Elliptical AOI Generation
-Instead of rectangular bounding boxes, the system:
-1. **Fits an ellipse** to the detected contour using `cv2.fitEllipse()`
-2. **Expands the ellipse** by a configurable factor (e.g., 30% larger)
-3. **Creates a mask** defining the elliptical search region
-
-```python
-# Ellipse expansion
-expanded_width = ellipse_width * (1 + expansion_factor)  # default: 30% larger
-expanded_height = ellipse_height * (1 + expansion_factor)
-
-# Create elliptical mask for AOI
-mask = np.zeros((H, W), dtype=np.uint8)
-cv2.ellipse(mask, expanded_ellipse, 255, -1)
-```
-
-#### 2. Smoothed Center Tracking
-The system maintains **two tracking points**:
-- **Yellow dot:** Current detection center (raw ellipse center)
-- **Red dot:** Smoothed tracking center (gradual movement)
-
-```python
-# Exponential moving average for smooth tracking
-smoothed_center = current_center + α * (new_center - current_center)
-# where α is the smoothing factor (0.0 = no movement, 1.0 = instant jump)
-```
-
-#### 3. Distance/Angle from Smoothed Center
-**Key improvement:** Distance and pitch measurements now use the **smoothed center** instead of jumping with each new detection:
-
-```python
-# Distance calculated from smoothed position
-distance_pixels = smoothed_center[1]  # Y-coordinate in image
-distance_meters = y_min + distance_pixels * pixels_per_meter_y
-
-# Angle calculated from smoothed position  
-angle_radians = math.atan2(smoothed_center[0] - W/2, H - smoothed_center[1])
-angle_degrees = math.degrees(angle_radians)
-```
-
-#### 4. AOI Boost for Contour Selection
-Contours inside the elliptical AOI receive scoring boost:
-
-```python
-# Check if contour center is inside elliptical mask
-if ellipse_mask[int(contour_center_y), int(contour_center_x)] > 0:
-    score *= aoi_boost_factor  # 2.0 by default
-```
-
-**Configuration:** `utils/sonar_config.py::TRACKING_CONFIG`
+**Tracking:** `utils/sonar_config.py::TRACKING_CONFIG`
 
 ```python
 TRACKING_CONFIG = {
-    'use_elliptical_aoi': True,           # Enable elliptical AOI (vs rectangular)
-    'ellipse_expansion_factor': 0.2,      # 20% larger ellipse for AOI
-    'center_smoothing_alpha': 0.2,        # Smoothing factor for center tracking
-    'aoi_boost_factor': 2.0,              # Score multiplier for contours in AOI
+    'use_elliptical_aoi': True,           # Enable elliptical tracking
+    'ellipse_expansion_factor': 0.3,      # AOI expansion (30%)
+    'center_smoothing_alpha': 0.1,        # Center smoothing (lower = smoother)
+    'ellipse_smoothing_alpha': 0.8,       # Ellipse parameter smoothing
+    'ellipse_max_movement_pixels': 2.0,   # Maximum center movement per frame
+    'max_frames_outside_aoi': 5,          # Frames allowed outside AOI
 }
+```
+
+### 5.8 Algorithm Advantages
+
+**1. Signal-Strength Independence:**
+- Binary conversion eliminates intensity-based variability
+- Consistent performance across different sonar conditions
+- Focus on geometric structure rather than signal strength
+
+**2. Temporal Stability:**
+- Elliptical AOI provides smooth tracking regions
+- Exponential smoothing prevents erratic movements
+- Distance change limiting avoids measurement jumps
+
+**3. Adaptive Enhancement:**
+- Dynamic kernel shapes based on local structure
+- Selective enhancement of linear features
+- Preserves detail in isotropic regions
+
+**4. Robust Contour Selection:**
+- Multi-criteria scoring favors net-like structures
+- AOI overlap ensures temporal consistency
+- Spatial penalties prevent false detections
+
+**5. Performance Optimized:**
+- Binary operations are computationally efficient
+- Cached kernels reduce computation
+- Downsampled processing where appropriate
+
+### 5.9 Processing Workflow Summary
+
+```
+Input Frame (uint8)
+    ↓
+Binary Conversion (signal-independent)
+    ↓
+Adaptive Enhancement (linear structure detection)
+    ↓
+Edge Detection & Morphological Processing
+    ↓
+Contour Extraction
+    ↓
+Contour Scoring & AOI Overlap Check
+    ↓
+Elliptical AOI Creation with Temporal Smoothing
+    ↓
+Distance/Angle Measurement with Stability Constraints
+    ↓
+State Update for Next Frame
+    ↓
+Output: FrameAnalysisResult
 ```
 
 ---
