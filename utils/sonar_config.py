@@ -132,15 +132,14 @@ IMAGE_PROCESSING_CONFIG: Dict = {
 }# Tracking and AOI configuration
 TRACKING_CONFIG: Dict = {
     'aoi_boost_factor': 2.0,  # Reasonable boost for contours inside AOI
-    'aoi_expansion_pixels': 1,
-    'ellipse_smoothing_alpha': 0.2,  # Ellipse temporal smoothing: 0.0=no smoothing (jittery), 0.2=gentle smoothing, 1.0=no updates (frozen)
+    'aoi_expansion_pixels': 1, # Expand AOI by this many pixels (was 2)
+    'ellipse_smoothing_alpha': 0.8,  # Ellipse temporal smoothing: 0.0=no smoothing (jittery), 0.8=very smooth, 1.0=no updates (frozen)
                                      # Controls how much the ellipse parameters (size, orientation) change between frames
-                                     # Lower values = more responsive to new detections but potentially jittery
                                      # Higher values = smoother tracking but slower adaptation to real changes
-    'ellipse_max_movement_pixels': 4.0,  # Maximum pixels ellipse center can move per frame
+    'ellipse_max_movement_pixels': 2.0,  # Maximum pixels ellipse center can move per frame (was 4.0)
     'max_frames_outside_aoi': 5,  # Max consecutive frames to allow best contour outside ellipse AOI
-    'ellipse_expansion_factor': 0.2,  # Factor to expand detected contour ellipse for AOI 
-    'center_smoothing_alpha': 0.2,  # Smoothing factor for center tracking (0.0 = no smoothing, 1.0 = instant jump)
+    'ellipse_expansion_factor': 0.3,  # Factor to expand detected contour ellipse for AOI (was 0.2)
+    'center_smoothing_alpha': 0.1,  #Smoothing factor for center tracking (was 0.2, lower = smoother)
     'use_elliptical_aoi': True,  # Use elliptical AOI instead of rectangular
 }
 

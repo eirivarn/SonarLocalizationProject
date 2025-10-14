@@ -63,15 +63,15 @@ class SonarDataProcessor:
         self.previous_distance_pixels = None
         self.previous_center = None
         self.previous_angle_degrees = None
-        self.previous_distance_pixels = None
-        self.previous_center = None
-        self.previous_angle_degrees = None
+        # Add ellipse state for temporal smoothing
+        self.previous_ellipse = None  # Store previous ellipse parameters
         
     def reset_tracking(self):
         """Reset tracking state."""
         self.last_center = None
         self.current_aoi = None
         self.smoothed_center = None
+        self.previous_ellipse = None
         
     def preprocess_frame(self, frame_u8: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """Simple preprocessing without object separation."""
@@ -112,9 +112,15 @@ class SonarDataProcessor:
                 smoothing_alpha = TRACKING_CONFIG.get('center_smoothing_alpha', 0.3)
                 self.smoothed_center = smooth_center_position(self.smoothed_center, new_center, smoothing_alpha)
                 
-                # Create elliptical AOI
+                # Create elliptical AOI with temporal smoothing
                 expansion_factor = TRACKING_CONFIG.get('ellipse_expansion_factor', 0.3)
-                aoi_mask, ellipse_center = create_elliptical_aoi(best_contour, expansion_factor, (H, W))
+                ellipse_smoothing_alpha = TRACKING_CONFIG.get('ellipse_smoothing_alpha', 0.2)
+                max_movement = TRACKING_CONFIG.get('ellipse_max_movement_pixels', 4.0)
+                
+                aoi_mask, ellipse_center, self.previous_ellipse = create_smooth_elliptical_aoi(
+                    best_contour, expansion_factor, (H, W), 
+                    self.previous_ellipse, ellipse_smoothing_alpha, max_movement
+                )
                 
                 # Store AOI as mask and ellipse center for visualization
                 self.current_aoi = {
@@ -318,6 +324,99 @@ def rects_overlap(a: Tuple[int,int,int,int], b: Tuple[int,int,int,int]) -> bool:
     ax, ay, aw, ah = a
     bx, by, bw, bh = b
     return not (ax+aw < bx or bx+bw < ax or ay+ah < by or by+bh < ay)
+
+def create_smooth_elliptical_aoi(contour: np.ndarray, expansion_factor: float, image_shape: Tuple[int, int], 
+                                previous_ellipse: Optional[Tuple] = None, smoothing_alpha: float = 0.2,
+                                max_movement_pixels: float = 4.0) -> Tuple[np.ndarray, Tuple[float, float], Tuple]:
+    """Create an elliptical AOI with temporal smoothing.
+    
+    Args:
+        contour: Input contour
+        expansion_factor: Factor to expand the ellipse (e.g., 0.3 = 30% larger)
+        image_shape: (height, width) of the image
+        previous_ellipse: Previous ellipse parameters ((center), (axes), angle) or None
+        smoothing_alpha: Smoothing factor for ellipse parameters (0.0 = no smoothing, 1.0 = use previous only)
+        max_movement_pixels: Maximum pixels center can move per frame
+        
+    Returns:
+        Tuple of (ellipse_mask, (center_x, center_y), ellipse_params)
+    """
+    H, W = image_shape
+    
+    # Fit ellipse to current contour
+    if len(contour) >= 5:  # Need at least 5 points to fit ellipse
+        current_ellipse = cv2.fitEllipse(contour)
+        (curr_center_x, curr_center_y), (curr_width, curr_height), curr_angle = current_ellipse
+    else:
+        # Fallback to circular AOI if we can't fit ellipse
+        moments = cv2.moments(contour)
+        if moments['m00'] != 0:
+            curr_center_x = int(moments['m10'] / moments['m00'])
+            curr_center_y = int(moments['m01'] / moments['m00'])
+        else:
+            curr_center_x, curr_center_y = W//2, H//2
+        
+        # Estimate size from contour area
+        area = cv2.contourArea(contour)
+        radius = max(10, np.sqrt(area) * 2)  # Conservative estimate
+        curr_width = curr_height = radius * 2
+        curr_angle = 0
+    
+    # Apply temporal smoothing if we have previous ellipse
+    if previous_ellipse is not None:
+        (prev_center, prev_axes, prev_angle) = previous_ellipse
+        prev_center_x, prev_center_y = prev_center
+        prev_width, prev_height = prev_axes
+        
+        # Smooth center position with movement limit
+        center_dx = curr_center_x - prev_center_x
+        center_dy = curr_center_y - prev_center_y
+        center_distance = np.sqrt(center_dx**2 + center_dy**2)
+        
+        if center_distance > max_movement_pixels:
+            # Limit movement to maximum allowed
+            scale = max_movement_pixels / center_distance
+            center_dx *= scale
+            center_dy *= scale
+        
+        smoothed_center_x = prev_center_x + smoothing_alpha * center_dx
+        smoothed_center_y = prev_center_y + smoothing_alpha * center_dy
+        
+        # Smooth ellipse parameters
+        smoothed_width = prev_width + smoothing_alpha * (curr_width - prev_width)
+        smoothed_height = prev_height + smoothing_alpha * (curr_height - prev_height)
+        
+        # Smooth angle (handle angle wraparound)
+        angle_diff = curr_angle - prev_angle
+        # Normalize angle difference to [-180, 180]
+        while angle_diff > 180:
+            angle_diff -= 360
+        while angle_diff < -180:
+            angle_diff += 360
+        smoothed_angle = prev_angle + smoothing_alpha * angle_diff
+        
+        center_x, center_y = smoothed_center_x, smoothed_center_y
+        width, height = smoothed_width, smoothed_height
+        angle = smoothed_angle
+    else:
+        # First frame - use current ellipse as-is
+        center_x, center_y = curr_center_x, curr_center_y
+        width, height = curr_width, curr_height
+        angle = curr_angle
+    
+    # Expand the ellipse
+    expanded_width = width * (1 + expansion_factor)
+    expanded_height = height * (1 + expansion_factor)
+    expanded_ellipse = ((center_x, center_y), (expanded_width, expanded_height), angle)
+    
+    # Create mask
+    mask = np.zeros((H, W), dtype=np.uint8)
+    cv2.ellipse(mask, expanded_ellipse, 255, -1)
+    
+    # Return ellipse parameters for next frame
+    ellipse_params = ((center_x, center_y), (width, height), angle)
+    
+    return mask, (center_x, center_y), ellipse_params
 
 def create_elliptical_aoi(contour: np.ndarray, expansion_factor: float, image_shape: Tuple[int, int]) -> Tuple[np.ndarray, Tuple[float, float]]:
     """Create an elliptical AOI from a contour.
