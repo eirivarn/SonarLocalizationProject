@@ -542,19 +542,22 @@ def select_best_contour_core(contours, last_center=None, aoi=None, cfg_img=IMAGE
         elongation = max(feat['aspect_ratio'], feat['ellipse_elongation'])
         base_score = area * elongation
         
-        # AOI boost: simple 2x boost if center is inside AOI
+        # AOI boost: only boost contours that significantly overlap with AOI
         if aoi is not None:
-            cx, cy = feat['centroid_x'], feat['centroid_y']
-            if point_in_aoi(cx, cy, aoi):
+            overlap_ok = contour_overlap_with_aoi(c, aoi, min_overlap_percent=0.7)  # 70% of contour must be inside AOI
+            if overlap_ok:
                 base_score *= aoi_boost
+                # Debug: print when we find a good overlap
+                # print(f"  Contour {len(c)} points, {overlap_ok*100:.0f}% overlap - BOOSTED")
         
-        # Distance penalty if we have last position
+        # Distance penalty if we have last position - make it more restrictive
         final_score = base_score
         if last_center is not None:
             cx, cy = feat['centroid_x'], feat['centroid_y']
             distance = np.sqrt((cx - last_center[0])**2 + (cy - last_center[1])**2)
-            # Penalty: max 50% reduction if very far (100+ pixels)
-            distance_factor = max(0.5, 1.0 - distance / 200.0)
+            # Stronger penalty: reduce score to near zero if very far (50+ pixels)
+            # At 50 pixels: score *= 0.1, at 100+ pixels: score *= 0.01
+            distance_factor = max(0.01, 1.0 - distance / 50.0)
             final_score *= distance_factor
         
         if final_score > best_score:
@@ -2010,3 +2013,34 @@ def create_enhanced_contour_detection_video_with_processor(npz_file_index=0, fra
         print(f"  - Detection success rate: {total_det/actual*100:.1f}%")
     
     return output_path
+
+def contour_overlap_with_aoi(contour: np.ndarray, aoi, min_overlap_percent: float = 0.7) -> bool:
+    """Check if a significant portion of the contour overlaps with the AOI.
+    
+    Args:
+        contour: Input contour
+        aoi: AOI definition (dict with 'mask' for elliptical)
+        min_overlap_percent: Minimum percentage of contour points that must be inside AOI
+        
+    Returns:
+        True if enough of the contour is inside the AOI
+    """
+    if aoi is None or not isinstance(aoi, dict) or 'mask' not in aoi:
+        return False
+    
+    mask = aoi['mask']
+    if mask is None:
+        return False
+    
+    # Count how many contour points are inside the AOI mask
+    inside_count = 0
+    total_points = len(contour)
+    
+    for point in contour:
+        x, y = point[0]
+        if 0 <= y < mask.shape[0] and 0 <= x < mask.shape[1]:
+            if mask[int(y), int(x)] > 0:
+                inside_count += 1
+    
+    overlap_percent = inside_count / total_points if total_points > 0 else 0
+    return overlap_percent >= min_overlap_percent
