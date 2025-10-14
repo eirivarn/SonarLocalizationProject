@@ -1,214 +1,164 @@
-# SOLAQUA — Sonar + Navigation Analysis
+# SOLAQUA — Advanced Sonar Image Analysis for Aquaculture
 
-This repository contains tools and notebooks for processing Sonoptix-style sonar data, extracting net distance estimates from sonar imagery, and comparing them with navigation / DVL measurements.
+This repository contains tools and notebooks for processing Sonoptix-style sonar data, extracting net distance estimates from sonar imagery, and comparing them with navigation/DVL measurements using advanced computer vision techniques.
 
-This README shows the minimal steps to set up the environment, (re)generate NPZ cone exports from bag files, run the example analysis notebook, and where to find detailed documentation.
+**Key Features:**
+- **Signal-strength independent** image analysis using binary preprocessing
+- **Elliptical AOI tracking** with temporal smoothing for stable net detection
+- **Real-time distance measurement** with pixel-to-meter conversion
+- **Interactive comparison** between sonar and DVL measurements
+- **Automated video generation** with synchronized overlays
 
 ---
 
 ## Quick Start
 
-1. Create a Python 3.10+ virtual environment and install dependencies:
-
+1. **Setup Environment:**
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-2. Export data from ROS bag files (CSV, MP4, and cone NPZ):
-
+2. **Export Data from ROS Bags:**
 ```bash
-# Export CSVs, videos and NPZ cones into the `exports/` directory.
-# Example (recommended when using the external LaCie disk):
-python3 solaqua_export.py --data-dir /Volumes/LaCie/SOLAQUA/raw_data \
+# Export CSVs, videos, and NPZ cones into the exports/ directory
+python3 scripts/solaqua_export.py --data-dir /Volumes/LaCie/SOLAQUA/raw_data \
     --exports-dir /Volumes/LaCie/SOLAQUA/exports --all
 ```
 
-Notes on defaults and config
- - The exporter and notebooks read their defaults from `utils/sonar_config.py`.
-   - `EXPORTS_DIR_DEFAULT` and `EXPORTS_SUBDIRS` are the canonical locations used
-     by helper functions and notebooks when you don't pass explicit `--exports-dir`
-     or by-bag paths. You can change those values in `utils/sonar_config.py` or
-     override them at runtime with the CLI flags shown above.
- - When working with an external macOS-mounted disk (like the recommended
-   `/Volumes/LaCie/...` layout), the exporter now automatically ignores macOS
-   AppleDouble files (names beginning with `._`) and other dot-prefixed hidden
-   files. Those can otherwise be picked up as `*.bag` candidates and cause
-   spurious UTF-8 decode errors during inspection. If you still see errors,
-   check that the external volume is mounted and that your `.bag` files are
-   real (non-dot-prefixed) files.
-
-Notes: `solaqua_export.py` uses `utils/dataset_export_utils.py` to enumerate bag topics and write CSV/Parquet and NPZ sidecars. The NPZ files contain preprocessed cone images, timestamps and `extent` metadata required for accurate pixel→meter conversion.
-
-3. Open the analysis notebook and run the cells (Jupyter):
-
+3. **Run Image Analysis:**
 ```bash
 jupyter lab 06_image_analysis.ipynb
 ```
 
-The notebook `06_image_analysis.ipynb` demonstrates loading an NPZ, analyzing the red-line (major-axis) distance over time, plotting real-world distances, and running the interactive Plotly-based comparison between sonar and navigation (DVL) results.
+The notebook demonstrates:
+- Loading NPZ sonar data
+- Analyzing net distance over time using computer vision
+- Converting pixel distances to real-world meters
+- Interactive comparison between sonar and DVL measurements
+- Generating synchronized overlay videos
 
 ---
 
-## What the repository contains (short map)
+## Repository Structure
 
-- `solaqua_export.py` — high-level export tool that can write CSV/Parquet, MP4, PNG sequences and cone NPZ sidecars from bag files.
-- `utils/sonar_utils.py` — sonar enhancement, TVG compensation, and polar→Cartesian rasterization (`rasterize_cone`, `cone_raster_like_display_cell`).
-- `utils/sonar_image_analysis.py` — image preprocessing, contour detection, ellipse fitting and net-distance estimation; plotting and interactive comparison utilities.
-- `utils/net_distance_analysis.py` — loaders that gather navigation, DVL and other distance measurements from exported CSVs for comparison.
-- `docs/sonar_pipeline_explanation.md` — detailed technical documentation (mathematics, pipeline, code references).
-- `requirements.txt` — Python dependencies used by notebooks and utilities.
+### Core Scripts
+- `scripts/solaqua_export.py` — High-level export tool for CSV/Parquet, MP4, PNG sequences, and NPZ cones
+- `scripts/interactive_kernel_visualizer.py` — Interactive sonar visualization tool
+
+### Analysis Pipeline (`utils/`)
+- `sonar_image_analysis.py` — **Core image analysis pipeline** with binary preprocessing, contour detection, and elliptical tracking
+- `sonar_utils.py` — Sonar enhancement, TVG compensation, and polar→Cartesian rasterization
+- `net_distance_analysis.py` — DVL and navigation data loaders for comparison
+- `sonar_config.py` — Configuration parameters for all processing stages
+- `dataset_export_utils.py` — ROS bag parsing and data export utilities
+
+### Notebooks
+- `06_image_analysis.ipynb` — **Main analysis notebook** with complete pipeline demonstration
+- `01_Sonar_Visualizer.ipynb` — Basic sonar visualization
+- `02_Ping360_Visualizer.ipynb` — Ping360-specific visualization
+- `03_rov_navigation_analysis.ipynb` — Navigation analysis
+- `04_synchronized_sonar_net_distance_analysis.ipynb` — Synchronized analysis
+- `05_LEGACY_video_with_sonar_display.ipynb` — Legacy video generation
+- `07_pipeline_visualization.ipynb` — Pipeline visualization
+
+### Documentation
+- `docs/sonar_pipeline_explanation.md` — **Detailed technical documentation** of the complete analysis pipeline
+- `docs/dataset_runs.md` — Dataset-specific analysis results
+- `README.md` — This file
 
 ---
 
-## Reproducible experiment (recommended workflow)
+## Advanced Image Analysis Pipeline
 
-1. Run `solaqua_export.py` with `--all` to produce CSVs and NPZs in `exports/`.
-2. Open `06_image_analysis.ipynb` and set the `TARGET_BAG` variable in the first cells to the bag you want to analyze.
-3. Run the notebook cells sequentially: frame pick → analyze red-line → convert to meters → interactive comparison → (optional) generate overlay video.
+The SOLAQUA system uses a sophisticated computer vision pipeline for robust net detection:
 
-Tip: If you only want to re-run the analysis code without re-exporting, ensure the `exports/outputs/*_cones.npz` NPZ is present and points to the bag you want.
+### 1. Signal-Independent Preprocessing
+- **Binary conversion** eliminates signal strength variability
+- **Adaptive morphological enhancement** detects linear structures
+- **Edge detection** without traditional Canny pipeline
+
+### 2. Contour Detection & Selection
+- **Geometric scoring** favors elongated contours typical of nets
+- **AOI overlap requirements** ensure temporal consistency
+- **Spatial penalties** prevent false detections
+
+### 3. Elliptical AOI Tracking
+- **Temporal smoothing** prevents erratic ellipse movement
+- **Movement constraints** limit center jumps between frames
+- **Parameter smoothing** maintains stable ellipse shape
+
+### 4. Distance Measurement
+- **Pixel-to-meter conversion** using NPZ extent metadata
+- **Stability constraints** prevent measurement jumps
+- **Real-time analysis** across video sequences
+
+### 5. DVL Integration
+- **Timestamp synchronization** between sonar and navigation data
+- **Interactive comparison** with Plotly visualizations
+- **Statistical analysis** of sonar vs DVL correlations
+
+**Configuration:** All parameters are tunable in `utils/sonar_config.py`
 
 ---
 
-## Developer notes
+## Configuration & Tuning
 
-- The pixel→meter conversion is derived from the `extent` metadata saved with each NPZ; prefer that over ad-hoc constants.
-- The contour-selection and video overlay logic are intentionally shared between the video generation and analysis routines to avoid mismatches.
-- See `utils/sonar_config.py` for tunable image-processing and tracking parameters.
+### Image Processing Parameters (`IMAGE_PROCESSING_CONFIG`)
+```python
+'binary_threshold': 128,              # Binary conversion threshold
+'adaptive_base_radius': 2,            # Base kernel radius for enhancement
+'adaptive_max_elongation': 4,         # Maximum kernel elongation
+'min_contour_area': 100,              # Minimum contour size
+```
 
-If you'd like, I can add a small script that computes RMSE/correlation between sonar and DVL automatically and writes a short CSV report.
+### Tracking Parameters (`TRACKING_CONFIG`)
+```python
+'use_elliptical_aoi': True,           # Enable elliptical tracking
+'ellipse_expansion_factor': 0.3,      # AOI expansion (30%)
+'center_smoothing_alpha': 0.1,        # Center smoothing (lower = smoother)
+'ellipse_max_movement_pixels': 2.0,   # Maximum center movement per frame
+```
+
+### Data Directories
+- **Raw Data:** Configure `DATA_DIR` in notebooks or `sonar_config.py`
+- **Exports:** Default to `exports/` with subdirectories for organization
+- **External Drives:** Support for `/Volumes/LaCie/SOLAQUA/` layout
+
+---
+
+## Developer Notes
+
+- **Pixel→Meter Conversion:** Uses NPZ extent metadata for geometric accuracy
+- **Temporal Stability:** Elliptical AOI tracking prevents measurement jumps
+- **Signal Independence:** Binary preprocessing works across different sonar conditions
+- **Performance:** Optimized for real-time processing with cached kernels
+
+### Extending the Pipeline
+- Modify `SonarDataProcessor` class for custom analysis
+- Add new contour features in `compute_contour_features()`
+- Tune parameters in `sonar_config.py` for different environments
+
+---
+
+## Dependencies
+
+**Required:**
+- Python 3.10+
+- `numpy`, `pandas`, `opencv-python`
+- `plotly`, `matplotlib`
+- `scipy`, `scikit-image`
+- `rosbags` (ROS bag parsing)
+
+**Optional:**
+- `jupyterlab` (notebooks)
+- `pyarrow` (Parquet support)
+
+Install with: `pip install -r requirements.txt`
 
 ---
 
 ## License
 
 MIT — see `LICENSE` for the full text.
-# SOLAQUA Data Processing
-
-Tools and notebooks for working with the SOLAQUA aquaculture dataset:
-
-- Export sonar and auxiliary sensor data from ROS `.bag` files
-- Export camera frames and MP4 sequences
-- Visualize sonar pings (raw + enhanced)
-- Synchronize sonar with video and generate combined videos
-
----
-
-## Dependencies
-
-- Python 3.10+
-- [`rosbags`](https://gitlab.com/ternaris/rosbags) (read ROS 1/2 bags without ROS)
-- `numpy`, `pandas`, `matplotlib`
-- `opencv-python`
-- `pyyaml`
-- `pyarrow` (Parquet IO; optional but recommended)
-- (Optional) `scipy`, `jupyterlab`
-
-### Create & activate a virtual environment
-
-```bash
-python -m venv venv
-# Linux/macOS
-source venv/bin/activate
-# Windows PowerShell
-# .\venv\Scripts\Activate.ps1
-
-python -m pip install --upgrade pip wheel
-pip install -r requirements.txt
-```
-
-### `requirements.txt`
-
-```txt
-rosbags
-numpy
-pandas
-matplotlib
-opencv-python
-pyyaml
-pyarrow
-# optional
-scipy
-jupyterlab
-```
-
-> Tip: If you plan to use Parquet (`.parquet`) exports/loads, keep `pyarrow` installed.
-
----
-
-## Dataset layout
-
-Place the SOLAQUA `.bag` files in the **`data/`** folder:
-
-```
-data/
-  2024-08-20_13-39-34_data.bag
-  2024-08-20_13-39-34_video.bag
-  ...
-```
-
-Exports (CSV/Parquet/PNG/MP4) are written to **`exports/`** by the notebooks.
-
-### `.gitignore`
-
-If you haven’t already, ignore large generated artifacts:
-
-```gitignore
-# data and outputs are big; don’t commit
-/data/
-/exports/
-```
-
----
-
-## Workflow
-
-### 1) Data Export — `data_export.ipynb`
-Reads `*_data.bag` and (optionally) sonar topics from `*_video.bag`, then writes per-topic tables under `exports/by_bag/`.
-
-**Highlights**
-- Each sonar message becomes one row; 2D arrays are stored in an `image` column (JSON of lists)
-- Per-row timestamp preserved as `t` (seconds) and `ts_utc` (tz-aware)
-- Produces `exports/index_data_topics.csv` as an overview
-
-### 2) Video Export — `video_export.ipynb`
-Exports camera topics from `*_video.bag` to either MP4 or PNG sequences under `exports/videos/` and `exports/frames/`.
-
-**Highlights**
-- MP4: optional target FPS or median Δt estimate
-- PNG: per-frame timestamp indexing (`index.csv`) for later alignment
-
-### 3) Sonar + Video — `sonar_video.ipynb`
-Loads exported sonar and video frames, aligns by timestamp, and renders synchronized views.
-
-**Views**
-- **Left:** RGB video frame
-- **Right:** Sonar cone (raw or enhanced), apex at the bottom, spokes only (no arcs)
-
-**Output**
-- Side-by-side MP4 named by first sonar frame time (Europe/Oslo):
--  `YYYYMMDD_HHMMSS_micro+TZ_sonar_video.mp4`
-
----
-
-## Notes & tuning
-
-- **Ranges & angles:** If available, read device metadata (range resolution / sample period & sound speed / per-beam angles). Otherwise the viewer uses `RANGE_MIN_M`, `RANGE_MAX_M`, and `FOV_DEG` as linear fallbacks.
-- **Enhancement:** Optional log scale (dB), TVG (amplitude/power), absorption compensation, robust percentile clipping, and gamma. Toggle with `USE_ENHANCED` in the notebook.
-- **Flips:** Use `FLIP_RANGE`, `FLIP_BEAMS`, and `CONE_FLIP_VERTICAL` to correct orientation.
-- **Timestamps:** Stored in UTC; display is converted to Europe/Oslo in overlays and filenames.
-
----
-
-## Getting started quickly
-
-1. Place `.bag` files in `data/`
-2. `pip install -r requirements.txt`
-3. Open notebooks:
-   - `data_export.ipynb` → run all
-   - `video_export.ipynb` → export MP4 or PNG (creates `exports/frames/...`)
-   - `sonar_video.ipynb` → align & render side-by-side video
-
-That’s it — you should see outputs appear under `exports/`.
