@@ -88,19 +88,19 @@ IMAGE_PROCESSING_CONFIG: Dict = {
                                         # Starting radius for circular kernel before elongation
                                         # Larger values = more aggressive base merging
 
-    'adaptive_max_elongation': 5,        # Maximum elongation factor
+    'adaptive_max_elongation': 2,        # Maximum elongation factor
                                          # 1.0 = always circular, 4.0 = ellipse can be 4x longer than wide
                                          # Higher values = stronger linear feature enhancement
 
-    'adaptive_linearity_threshold': 0.1, # Minimum linearity to trigger elongation 
+    'adaptive_linearity_threshold': 0.5, # Minimum linearity to trigger elongation 
                                          # Lower values = more pixels get elliptical kernels (more sensitive)
                                          # Higher values = only very linear patterns get elongated (selective)
 
-    'adaptive_angle_steps': 15,          # Number of angles tested for linearity 
+    'adaptive_angle_steps': 20,          # Number of angles tested for linearity 
                                          # Uses 20° increments for optimal speed/quality balance
                                          # More steps = better angle resolution but slower processing
 
-    'momentum_boost': 50.0,              # Enhancement strength multiplier 
+    'momentum_boost': 20.0,              # Enhancement strength multiplier 
                                          # Higher values = stronger directional feature enhancement
                                          # Lower values = more subtle enhancement, preserves original intensities
     
@@ -114,12 +114,12 @@ IMAGE_PROCESSING_CONFIG: Dict = {
                                         
     
     # === MORPHOLOGICAL POST-PROCESSING ===
-    'morph_close_kernel': 5,            # Kernel size for morphological closing (connects nearby edges)
+    'morph_close_kernel': 3,            # Kernel size for morphological closing (connects nearby edges)
                                         # 0 = no closing, 3-5 = light closing, >5 = aggressive closing
                                         # Helps connect broken parts of net structures
     
     # === DISTANCE TRACKING STABILITY ===
-    'max_distance_change_pixels': 10,   # Maximum allowed distance change between frames (pixels)
+    'max_distance_change_pixels': 5,   # Maximum allowed distance change between frames (pixels)
                                         # Prevents tracking jumps when contour detection fails
                                         # Large jumps often indicate false positives or tracking loss
     'distance_change_smoothing': 0.05,   # Smoothing factor when distance change exceeds threshold
@@ -131,9 +131,9 @@ IMAGE_PROCESSING_CONFIG: Dict = {
                                         # 0 = no dilation, 1 = thin edges, 2+ = thick edges
 }# Tracking and AOI configuration
 TRACKING_CONFIG: Dict = {
-    'aoi_boost_factor': 10.0,            # Reasonable boost for contours inside AOI
+    'aoi_boost_factor': 20.0,            # Reasonable boost for contours inside AOI
     'aoi_expansion_pixels': 1,           # Expand AOI by this many pixels (was 2)
-    'ellipse_smoothing_alpha': 0.5,      # Ellipse temporal smoothing: 0.0=no smoothing (jittery), 0.8=very smooth, 1.0=no updates (frozen)
+    'ellipse_smoothing_alpha': 0.6,      # Ellipse temporal smoothing: 0.0=no smoothing (jittery), 0.8=very smooth, 1.0=no updates (frozen)
                                          # Controls how much the ellipse parameters (size, orientation) change between frames
                                          # Higher values = smoother tracking but slower adaptation to real changes
                                          # Lower values = faster adaptation but jittery tracking
