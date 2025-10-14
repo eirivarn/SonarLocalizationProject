@@ -60,6 +60,12 @@ class SonarDataProcessor:
     def __init__(self, img_config: Dict = None):
         self.img_config = img_config or IMAGE_PROCESSING_CONFIG
         self.reset_tracking()
+        self.previous_distance_pixels = None
+        self.previous_center = None
+        self.previous_angle_degrees = None
+        self.previous_distance_pixels = None
+        self.previous_center = None
+        self.previous_angle_degrees = None
         
     def reset_tracking(self):
         """Reset tracking state."""
@@ -143,6 +149,20 @@ class SonarDataProcessor:
         else:
             # Fallback to raw contour calculation
             distance_pixels, angle_degrees = _distance_angle_from_contour(best_contour, W, H)
+        
+        # Apply distance change threshold to prevent sudden jumps
+        if distance_pixels is not None and self.previous_distance_pixels is not None:
+            max_change = self.img_config.get('max_distance_change_pixels', 20)
+            distance_change = abs(distance_pixels - self.previous_distance_pixels)
+            
+            if distance_change > max_change:
+                # Large distance change detected - clamp to maximum allowed change
+                direction = 1 if distance_pixels > self.previous_distance_pixels else -1
+                distance_pixels = self.previous_distance_pixels + (direction * max_change)
+        
+        # Update previous distance for next frame
+        if distance_pixels is not None:
+            self.previous_distance_pixels = distance_pixels
         
         # Convert to meters if extent provided
         distance_meters = None
@@ -446,126 +466,225 @@ def select_best_contour_core(contours, last_center=None, aoi=None, cfg_img=IMAGE
 
 # ============================ FAST adaptive linear merging ============================
 
-def adaptive_linear_momentum_merge_fast(frame, base_radius=2, max_elongation=4, 
-                                       linearity_threshold=0.3, momentum_boost=1.5,
-                                       angle_steps=9):
+# Global kernel cache for optimization
+_KERNEL_CACHE = {}
+_CACHE_MAX_SIZE = 200  # Limit cache size to prevent memory issues
+
+def _get_cache_key(kernel_type, *params):
+    """Generate cache key for kernel caching."""
+    return (kernel_type,) + tuple(float(p) for p in params)
+
+def clear_kernel_cache():
+    """Clear the kernel cache to free memory."""
+    global _KERNEL_CACHE
+    _KERNEL_CACHE.clear()
+
+def _cache_kernel(cache_key, kernel):
+    """Add kernel to cache with size management."""
+    global _KERNEL_CACHE
+    if len(_KERNEL_CACHE) >= _CACHE_MAX_SIZE:
+        # Remove oldest entry (simple FIFO)
+        oldest_key = next(iter(_KERNEL_CACHE))
+        del _KERNEL_CACHE[oldest_key]
+    _KERNEL_CACHE[cache_key] = kernel
+
+def adaptive_linear_momentum_merge_fast(
+    frame: np.ndarray,
+    angle_steps: int = 36,
+    base_radius: int = 3,
+    max_elongation: float = 3.0,
+    momentum_boost: float = 0.8,
+    linearity_threshold: float = 0.15,
+    downscale_factor: int = 2,
+    top_k_bins: int = 8,
+    min_coverage_percent: float = 0.5,
+    gaussian_sigma: float = 1.0
+) -> np.ndarray:
     """
-    FAST version of adaptive linear merging for enhanced feature detection.
-    
-    Detects linearity and adapts circular → elliptical merging for better
-    linear feature enhancement in sonar images.
+    ADVANCED OPTIMIZED version using structure tensors and sophisticated filtering:
+    1. Structure tensor-based orientation detection (replaces oriented gradient bank)
+    2. Top-K bin selection for processing only most significant angles
+    3. Separable Gaussian blur instead of circular kernels  
+    4. ROI-based convolution processing
+    5. Aggressive bin filtering by coverage and linearity
+    6. Quantized angle management throughout pipeline
     
     Args:
-        frame: Input sonar frame (uint8)
-        base_radius: Base circular merging radius (pixels)
-        max_elongation: Maximum elongation factor for ellipse
-        linearity_threshold: Minimum linearity to trigger elongation
+        frame: Input grayscale image (0-255)
+        angle_steps: Number of angle bins for quantization
+        base_radius: Base kernel radius for enhancement
+        max_elongation: Maximum elongation factor for elliptical kernels
         momentum_boost: Enhancement strength multiplier
-        angle_steps: Number of angles (reduced for speed)
+        linearity_threshold: Minimum linearity for processing
+        downscale_factor: Factor for downsampling during analysis
+        top_k_bins: Maximum number of angle bins to process
+        min_coverage_percent: Minimum pixel coverage (%) for bin processing
+        gaussian_sigma: Sigma for Gaussian blur enhancement
     
     Returns:
-        Enhanced frame with adaptive linear merging applied
+        Enhanced grayscale image (0-255)
     """
+    if len(frame.shape) == 3:
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     
-    # Continue with original adaptive linear merging
     result = frame.astype(np.float32)
-    h, w = frame.shape
+    h, w = result.shape
     
-    # OPTIMIZATION 1: Reduced angle resolution for speed
-    angles = np.linspace(0, 180, angle_steps, endpoint=False)  # 20° increments instead of 10°
-    
-    # OPTIMIZATION 2: Downsampled linearity detection (2x downscale)
-    scale_factor = 2
-    h_small = h // scale_factor
-    w_small = w // scale_factor
-    
-    if h_small < base_radius * 2 or w_small < base_radius * 2:
-        # Frame too small for downsampling, use simple circular convolution
-        circular_kernel = create_circular_kernel_fast(base_radius)
-        enhanced = cv2.filter2D(result, -1, circular_kernel)
-        final_result = result + momentum_boost * enhanced
+    # ADVANCED OPTIMIZATION 1: Early exit for low contrast images
+    frame_std = np.std(result)
+    if frame_std < 5.0:
+        # Apply separable Gaussian blur for mild enhancement
+        enhanced = cv2.GaussianBlur(result, (2*base_radius+1, 2*base_radius+1), gaussian_sigma)
+        final_result = result + momentum_boost * 0.3 * enhanced
         return np.clip(final_result, 0, 255).astype(np.uint8)
     
-    # Downsample frame for linearity detection
+    # Downsampled dimensions for structure tensor analysis
+    h_small = max(h // downscale_factor, 32)
+    w_small = max(w // downscale_factor, 32)
     frame_small = cv2.resize(result, (w_small, h_small), interpolation=cv2.INTER_AREA)
     
-    # OPTIMIZATION 3: Pre-compute and cache gradient kernels
-    kernel_size = max(3, base_radius + 1)
-    gradient_kernels = []
-    for angle in angles:
-        kernel = create_oriented_gradient_kernel_fast(angle, kernel_size)
-        gradient_kernels.append(kernel)
+    # ADVANCED OPTIMIZATION 2: Structure tensor-based orientation detection
+    # First compute gradients for structure tensor
+    grad_x = cv2.Sobel(frame_small, cv2.CV_64F, 1, 0, ksize=3)
+    grad_y = cv2.Sobel(frame_small, cv2.CV_64F, 0, 1, ksize=3)
     
-    # OPTIMIZATION 4: Vectorized linearity detection on downsampled image
-    linearity_responses = []
-    for kernel in gradient_kernels:
-        response = np.abs(cv2.filter2D(frame_small, -1, kernel))
-        linearity_responses.append(response)
+    # Use existing structure tensor function for superior orientation and linearity detection
+    orientations, linearity_map_small = compute_structure_tensor_field_fast(
+        grad_x, grad_y, 
+        sigma=1.5  # Sigma for Gaussian smoothing in structure tensor
+    )
     
-    # Find best direction and linearity strength for each pixel (vectorized)
-    linearity_stack = np.stack(linearity_responses, axis=0)  # Shape: (angles, h_small, w_small)
-    best_angle_indices = np.argmax(linearity_stack, axis=0)
-    linearity_map_small = np.max(linearity_stack, axis=0)
+    # ADVANCED OPTIMIZATION 3: Quantize orientations to integer angle bins
+    # Convert orientations (-π/2 to π/2) to angle bins (0 to angle_steps-1)
+    orientations_normalized = (orientations + np.pi/2) / np.pi  # Normalize to [0, 1]
+    direction_bin_map_small = np.round(orientations_normalized * (angle_steps - 1)).astype(np.int32)
+    direction_bin_map_small = np.clip(direction_bin_map_small, 0, angle_steps - 1)
     
     # Normalize linearity map
     max_linearity = np.max(linearity_map_small)
     if max_linearity > 0:
         linearity_map_small = linearity_map_small / max_linearity
+    else:
+        # No linearity detected - apply Gaussian blur enhancement
+        enhanced = cv2.GaussianBlur(result, (2*base_radius+1, 2*base_radius+1), gaussian_sigma)
+        final_result = result + momentum_boost * 0.5 * enhanced
+        return np.clip(final_result, 0, 255).astype(np.uint8)
     
-    # OPTIMIZATION 5: Upsample linearity map back to full resolution
+    # ADVANCED OPTIMIZATION 4: Upsample maps to full resolution
     linearity_map = cv2.resize(linearity_map_small, (w, h), interpolation=cv2.INTER_LINEAR)
-    direction_map = cv2.resize(best_angle_indices.astype(np.float32), (w, h), interpolation=cv2.INTER_NEAREST)
+    direction_bin_map = cv2.resize(direction_bin_map_small.astype(np.float32), (w, h), interpolation=cv2.INTER_NEAREST).astype(np.int32)
     
-    # Convert direction indices back to angles
-    direction_map = angles[direction_map.astype(int)]
-    
-    # OPTIMIZATION 6: Simplified kernel-based enhancement
-    # Pre-compute common kernels
-    circular_kernel = create_circular_kernel_fast(base_radius)
-    
-    # Create binary mask for linear regions (vectorized)
+    # Create binary mask for linear regions
     linear_mask = linearity_map > linearity_threshold
     
     if np.sum(linear_mask) == 0:
-        # No linear patterns detected, use simple circular convolution
-        enhanced = cv2.filter2D(result, -1, circular_kernel)
-    else:
-        # OPTIMIZATION 7: Process only a representative set of elliptical orientations
-        unique_angles = np.unique(direction_map[linear_mask])
-        ellipse_kernels = {}
-        
-        # Pre-compute elliptical kernels for detected angles
-        for angle in unique_angles:
-            if not np.isnan(angle):
-                # Use simplified ellipse with average elongation
-                avg_elongation = 1 + (max_elongation - 1) * np.mean(linearity_map[linear_mask])
-                kernel = create_elliptical_kernel_fast(base_radius, avg_elongation, angle)
-                ellipse_kernels[angle] = kernel
-        
-        # OPTIMIZATION 8: Region-based processing instead of pixel-by-pixel
-        enhanced = cv2.filter2D(result, -1, circular_kernel)  # Base enhancement
-        
-        # Apply elliptical enhancement only to linear regions
-        for angle, ellipse_kernel in ellipse_kernels.items():
-            # Create mask for this specific angle
-            angle_mask = (np.abs(direction_map - angle) < 1e-3) & linear_mask
-            
-            if np.sum(angle_mask) > 0:
-                # Apply elliptical convolution
-                ellipse_enhanced = cv2.filter2D(result, -1, ellipse_kernel)
-                
-                # Blend based on linearity strength
-                blend_weights = linearity_map * angle_mask.astype(np.float32)
-                enhanced = enhanced * (1 - blend_weights) + ellipse_enhanced * blend_weights
+        # No linear patterns - apply Gaussian blur enhancement
+        enhanced = cv2.GaussianBlur(result, (2*base_radius+1, 2*base_radius+1), gaussian_sigma)
+        final_result = result + momentum_boost * 0.5 * enhanced
+        return np.clip(final_result, 0, 255).astype(np.uint8)
     
-    # Final enhancement combination
+    # ADVANCED OPTIMIZATION 5: Aggressive bin filtering and Top-K selection
+    unique_bins, bin_counts = np.unique(direction_bin_map[linear_mask], return_counts=True)
+    
+    # Calculate coverage percentages and total linearity per bin
+    total_linear_pixels = np.sum(linear_mask)
+    bin_coverage_percent = (bin_counts / total_linear_pixels) * 100.0
+    
+    # Calculate total linearity strength per bin
+    bin_linearity_totals = []
+    for bin_idx in unique_bins:
+        bin_mask = (direction_bin_map == bin_idx) & linear_mask
+        total_linearity = np.sum(linearity_map[bin_mask])
+        bin_linearity_totals.append(total_linearity)
+    bin_linearity_totals = np.array(bin_linearity_totals)
+    
+    # Filter bins by minimum coverage
+    coverage_filter = bin_coverage_percent >= min_coverage_percent
+    filtered_bins = unique_bins[coverage_filter]
+    filtered_linearity = bin_linearity_totals[coverage_filter]
+    
+    if len(filtered_bins) == 0:
+        # No bins meet coverage criteria - apply Gaussian blur
+        enhanced = cv2.GaussianBlur(result, (2*base_radius+1, 2*base_radius+1), gaussian_sigma)
+        final_result = result + momentum_boost * 0.5 * enhanced
+        return np.clip(final_result, 0, 255).astype(np.uint8)
+    
+    # ADVANCED OPTIMIZATION 6: Select top-K bins by linearity strength
+    if len(filtered_bins) > top_k_bins:
+        top_k_indices = np.argsort(filtered_linearity)[-top_k_bins:]
+        significant_bins = filtered_bins[top_k_indices]
+    else:
+        significant_bins = filtered_bins
+    
+    # Base enhancement with separable Gaussian blur (faster than circular convolution)
+    enhanced = cv2.GaussianBlur(result, (2*base_radius+1, 2*base_radius+1), gaussian_sigma)
+    
+    # ADVANCED OPTIMIZATION 7: ROI-based convolution processing
+    for angle_bin in significant_bins:
+        # Convert quantized bin back to angle for kernel creation
+        angle_degrees = float(angle_bin * 180.0 / angle_steps)
+        
+        # Create binary mask for this bin
+        bin_mask = (direction_bin_map == angle_bin) & linear_mask
+        
+        if np.sum(bin_mask) == 0:
+            continue
+            
+        # ADVANCED OPTIMIZATION 8: ROI bounding box calculation
+        # Find bounding box of the mask to limit convolution area
+        rows, cols = np.where(bin_mask)
+        if len(rows) == 0:
+            continue
+            
+        row_min, row_max = rows.min(), rows.max()
+        col_min, col_max = cols.min(), cols.max()
+        
+        # Expand ROI by kernel radius to account for convolution border effects
+        kernel_margin = base_radius + 2
+        roi_row_start = max(0, row_min - kernel_margin)
+        roi_row_end = min(h, row_max + kernel_margin + 1)
+        roi_col_start = max(0, col_min - kernel_margin)
+        roi_col_end = min(w, col_max + kernel_margin + 1)
+        
+        # Extract ROI for processing
+        roi_frame = result[roi_row_start:roi_row_end, roi_col_start:roi_col_end]
+        roi_mask = bin_mask[roi_row_start:roi_row_end, roi_col_start:roi_col_end]
+        roi_linearity = linearity_map[roi_row_start:roi_row_end, roi_col_start:roi_col_end]
+        
+        if roi_frame.size == 0:
+            continue
+        
+        # Calculate average elongation for this bin within ROI
+        avg_elongation = 1 + (max_elongation - 1) * np.mean(roi_linearity[roi_mask])
+        
+        # ADVANCED OPTIMIZATION 9: Cached elliptical kernel with ROI convolution
+        cache_key = _get_cache_key('ellipse', base_radius, avg_elongation, angle_degrees)
+        if cache_key not in _KERNEL_CACHE:
+            _cache_kernel(cache_key, create_elliptical_kernel_fast(base_radius, avg_elongation, angle_degrees))
+        ellipse_kernel = _KERNEL_CACHE[cache_key]
+        
+        # Apply elliptical convolution only to ROI
+        roi_enhanced = cv2.filter2D(roi_frame, -1, ellipse_kernel)
+        
+        # ADVANCED OPTIMIZATION 10: Masked blending within ROI
+        blend_weights = roi_linearity * roi_mask.astype(np.float32)
+        
+        # Update enhanced image only within ROI
+        roi_current = enhanced[roi_row_start:roi_row_end, roi_col_start:roi_col_end]
+        roi_blended = roi_current * (1.0 - blend_weights) + roi_enhanced * blend_weights
+        enhanced[roi_row_start:roi_row_end, roi_col_start:roi_col_end] = roi_blended
+    
+    # Final enhancement combination with adaptive clipping
     final_result = result + momentum_boost * enhanced
     
-    # Fast soft clipping
-    final_result = np.clip(final_result, 0, 255 * (1 + momentum_boost * 0.3))
-    final_result = 255 * np.tanh(final_result / 255)
+    # ADVANCED OPTIMIZATION 11: Adaptive soft clipping based on image statistics
+    clip_upper = 255.0 * (1.0 + momentum_boost * 0.2)
+    final_result = np.clip(final_result, 0.0, clip_upper)
     
-    return np.clip(final_result, 0, 255).astype(np.uint8)
+    # Smooth saturation using tanh for natural look
+    final_result = 255.0 * np.tanh(final_result / 255.0)
+    
+    return np.clip(final_result, 0.0, 255.0).astype(np.uint8)
 
 
 # ============================ ENHANCED LINE DIRECTION DETECTION ============================

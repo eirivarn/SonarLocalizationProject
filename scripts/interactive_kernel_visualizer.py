@@ -67,14 +67,18 @@ class SimpleKernelVisualizer:
         
     def _compute_enhanced_frame(self):
         """Compute enhanced frame using adaptive linear momentum merging."""
-        # Use fast version for better performance
+        # Use advanced optimized version with structure tensors
         return adaptive_linear_momentum_merge_fast(
             self.frame,
-            base_radius=self.config.get('adaptive_base_radius', 2),
-            max_elongation=self.config.get('adaptive_max_elongation', 4),
-            linearity_threshold=self.config.get('adaptive_linearity_threshold', 0.3),
-            momentum_boost=self.config.get('momentum_boost', 1.5),
-            angle_steps=self.config.get('adaptive_angle_steps', 9)
+            angle_steps=self.config.get('adaptive_angle_steps', 36),
+            base_radius=self.config.get('adaptive_base_radius', 3),
+            max_elongation=self.config.get('adaptive_max_elongation', 3.0),
+            momentum_boost=self.config.get('momentum_boost', 0.8),
+            linearity_threshold=self.config.get('adaptive_linearity_threshold', 0.15),
+            downscale_factor=self.config.get('downscale_factor', 2),
+            top_k_bins=self.config.get('top_k_bins', 8),
+            min_coverage_percent=self.config.get('min_coverage_percent', 0.5),
+            gaussian_sigma=self.config.get('gaussian_sigma', 1.0)
         )
     
     def setup_figure(self):

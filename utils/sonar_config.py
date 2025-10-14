@@ -88,19 +88,19 @@ IMAGE_PROCESSING_CONFIG: Dict = {
                                         # Starting radius for circular kernel before elongation
                                         # Larger values = more aggressive base merging
 
-    'adaptive_max_elongation': 5,        # Maximum elongation factor
+    'adaptive_max_elongation': 3,        # Maximum elongation factor
                                          # 1.0 = always circular, 4.0 = ellipse can be 4x longer than wide
                                          # Higher values = stronger linear feature enhancement
 
-    'adaptive_linearity_threshold': 0.75, # Minimum linearity to trigger elongation 
+    'adaptive_linearity_threshold': 1.0, # Minimum linearity to trigger elongation 
                                          # Lower values = more pixels get elliptical kernels (more sensitive)
                                          # Higher values = only very linear patterns get elongated (selective)
 
-    'adaptive_angle_steps': 10,          # Number of angles tested for linearity 
+    'adaptive_angle_steps': 15,          # Number of angles tested for linearity 
                                          # Uses 20° increments for optimal speed/quality balance
                                          # More steps = better angle resolution but slower processing
 
-    'momentum_boost': 30.0,              # Enhancement strength multiplier 
+    'momentum_boost': 40.0,              # Enhancement strength multiplier 
                                          # Higher values = stronger directional feature enhancement
                                          # Lower values = more subtle enhancement, preserves original intensities
     
@@ -109,16 +109,24 @@ IMAGE_PROCESSING_CONFIG: Dict = {
     # Binary frames use direct edge operators for cleaner, faster edge detection
     
     # === CONTOUR FILTERING ===
-    'min_contour_area': 200,            # Minimum contour area in pixels to be considered valid
+    'min_contour_area': 1000,            # Minimum contour area in pixels to be considered valid
                                         # Filters out small noise artifacts and debris
-                                        # Typical net sections are >>200 pixels
+                                        
     
     # === MORPHOLOGICAL POST-PROCESSING ===
     'morph_close_kernel': 3,            # Kernel size for morphological closing (connects nearby edges)
                                         # 0 = no closing, 3-5 = light closing, >5 = aggressive closing
                                         # Helps connect broken parts of net structures
     
-    'edge_dilation_iterations': 1,      # Number of dilation iterations on final edges (0-3 typical)
+    # === DISTANCE TRACKING STABILITY ===
+    'max_distance_change_pixels': 20,   # Maximum allowed distance change between frames (pixels)
+                                        # Prevents tracking jumps when contour detection fails
+                                        # Large jumps often indicate false positives or tracking loss
+    'distance_change_smoothing': 0.05,   # Smoothing factor when distance change exceeds threshold
+                                        # 0.0 = reject change completely, 1.0 = accept change fully
+                                        # Intermediate values blend new and previous distance
+    
+    'edge_dilation_iterations': 0,      # Number of dilation iterations on final edges (0-3 typical)
                                         # Makes detected edges slightly thicker for better contour detection
                                         # 0 = no dilation, 1 = thin edges, 2+ = thick edges
 }# Tracking and AOI configuration
