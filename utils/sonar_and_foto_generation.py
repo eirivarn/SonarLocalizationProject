@@ -397,6 +397,37 @@ def export_optimized_sonar_video(
                         cv2.circle(cone_bgr, (center_px, center_py), 3, sonar_center_color, -1)
                         cv2.circle(cone_bgr, (center_px, center_py), 3, (255, 255, 255), 1)
 
+                    # --- AOI / Corridor mask overlay (if available and enabled) ---
+                    from utils.sonar_config import VIDEO_CONFIG
+                    if VIDEO_CONFIG.get('show_aoi_corridor', False):
+                        # Attempt to locate mask data in sonar_rec (or global SONAR_DISTANCE_RESULTS)
+                        try:
+                            # Sonar analysis may include raw masks (ellipse_mask, corridor_mask)
+                            mask_ell = sonar_rec.get('ellipse_mask', None) if 'sonar_rec' in locals() else None
+                            mask_corr = sonar_rec.get('corridor_mask', None) if 'sonar_rec' in locals() else None
+                        except Exception:
+                            mask_ell = None
+                            mask_corr = None
+
+                        # If masks are not present but SONAR_DISTANCE_RESULTS contains blobs as arrays,
+                        # skip gracefully. The analysis module populates masks in `current_aoi` when running live.
+                        if mask_ell is not None and isinstance(mask_ell, (np.ndarray,)):
+                            # Convert single-channel mask to colored overlay and alpha blend
+                            a_color = VIDEO_CONFIG.get('aoi_mask_color', (0,255,0))
+                            a_alpha = float(VIDEO_CONFIG.get('aoi_mask_alpha', 0.25))
+                            mask_bool = (mask_ell > 0).astype(np.uint8)
+                            color_layer = np.zeros_like(cone_bgr, dtype=np.uint8)
+                            color_layer[mask_bool > 0] = a_color
+                            cone_bgr = cv2.addWeighted(cone_bgr.astype(np.float32), 1.0, color_layer.astype(np.float32), a_alpha, 0)
+
+                        if mask_corr is not None and isinstance(mask_corr, (np.ndarray,)):
+                            c_color = VIDEO_CONFIG.get('corridor_mask_color', (0,128,255))
+                            c_alpha = float(VIDEO_CONFIG.get('corridor_mask_alpha', 0.25))
+                            mask_bool = (mask_corr > 0).astype(np.uint8)
+                            color_layer = np.zeros_like(cone_bgr, dtype=np.uint8)
+                            color_layer[mask_bool > 0] = c_color
+                            cone_bgr = cv2.addWeighted(cone_bgr.astype(np.float32), 1.0, color_layer.astype(np.float32), c_alpha, 0)
+
                     # Create status text
                     status_lines = []
                     if net_distance is not None:

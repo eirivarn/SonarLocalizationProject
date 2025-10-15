@@ -124,9 +124,11 @@ class SonarDataProcessor:
                 )
                 
                 # Store AOI as mask and ellipse center for visualization
+                # also store ellipse_params (the smoothed ellipse) for corridor building
                 self.current_aoi = {
                     'mask': aoi_mask,
                     'center': ellipse_center,
+                    'ellipse_params': self.previous_ellipse,
                     'smoothed_center': self.smoothed_center,
                     'type': 'elliptical'
                 }
@@ -146,6 +148,43 @@ class SonarDataProcessor:
             
             # Update last_center for backward compatibility
             self.last_center = new_center
+            # If we have a best_contour and an ellipse, split the contour into inside/corridor/other
+            try:
+                if best_contour is not None and self.previous_ellipse is not None:
+                    # Corridor parameters from TRACKING_CONFIG (fallback to sensible defaults)
+                    band_k = float(TRACKING_CONFIG.get('corridor_band_k', 0.55))
+                    length_px = TRACKING_CONFIG.get('corridor_length_px', None)
+                    length_factor = float(TRACKING_CONFIG.get('corridor_length_factor', 1.25))
+                    widen = float(TRACKING_CONFIG.get('corridor_widen', 1.0))
+                    both_dirs = bool(TRACKING_CONFIG.get('corridor_both_directions', True))
+
+                    inside_c, corridor_c, other_c, ell_mask, corr_mask = split_contour_by_corridor(
+                        best_contour, self.previous_ellipse, (H, W),
+                        band_k=band_k, length_px=length_px, length_factor=length_factor,
+                        widen=widen, both_directions=both_dirs
+                    )
+
+                    # Choose merged contour for downstream distance/angle calculation: prefer inside + corridor
+                    if inside_c.shape[0] + corridor_c.shape[0] > 0:
+                        merged_pts = np.concatenate([inside_c.reshape(-1,2) if inside_c.size else np.empty((0,2)),
+                                                     corridor_c.reshape(-1,2) if corridor_c.size else np.empty((0,2))],
+                                                     axis=0)
+                        if merged_pts.shape[0] > 0:
+                            best_contour = merged_pts.reshape(-1,1,2).astype(best_contour.dtype)
+
+                    # Save split info into stats/features for debugging/visualization
+                    stats = stats or {}
+                    stats.update({
+                        'inside_points': int(inside_c.reshape(-1,2).shape[0]),
+                        'corridor_points': int(corridor_c.reshape(-1,2).shape[0]),
+                        'other_points': int(other_c.reshape(-1,2).shape[0])
+                    })
+                    # expose masks for potential overlay
+                    self.current_aoi['ellipse_mask'] = ell_mask
+                    self.current_aoi['corridor_mask'] = corr_mask
+            except Exception:
+                # Fail safe: keep original best_contour
+                pass
         
         # Extract distance and angle using smoothed center for stable tracking
         if best_contour is not None and self.smoothed_center is not None:
@@ -496,6 +535,221 @@ def point_in_aoi(point_x: float, point_y: float, aoi) -> bool:
         return ax <= point_x <= ax + aw and ay <= point_y <= ay + ah
     
     return False
+
+
+# -------------------- Oriented corridor AOI helpers --------------------
+def _ellipse_params_from_cv2(ellipse):
+    """
+    Normalize cv2.fitEllipse output to (cx, cy, a, b, theta_rad) where:
+      a = semi-major, b = semi-minor, theta along major axis (radians, [0, pi)).
+    cv2 ellipse is ((cx,cy), (width,height), angle_deg).
+    """
+    (cx, cy), (w, h), ang_deg = ellipse
+    if h > w:
+        w, h = h, w
+        ang_deg = ang_deg + 90.0
+    a = 0.5 * float(w)
+    b = 0.5 * float(h)
+    theta = np.deg2rad(ang_deg % 180.0)
+    return float(cx), float(cy), a, b, theta
+
+def _unit_axes(theta):
+    # major axis (u) and minor axis (v) unit vectors
+    u = np.array([np.cos(theta), np.sin(theta)], dtype=np.float32)
+    v = np.array([-np.sin(theta), np.cos(theta)], dtype=np.float32)
+    return u, v
+
+def _poly_mask(shape_hw, poly_xy):
+    """Return uint8 mask with a filled polygon (poly is Nx2 float or int xy)."""
+    H, W = shape_hw
+    mask = np.zeros((H, W), dtype=np.uint8)
+    poly_i32 = np.round(poly_xy).astype(np.int32).reshape(-1, 1, 2)
+    cv2.fillPoly(mask, [poly_i32], 255)
+    return mask
+
+def _oriented_rect_polygon(p0, u, v, half_width, length):
+    """Corners for an oriented rectangle starting at p0, extending by length along +u."""
+    p1 = p0 + length * u
+    n = half_width * v
+    return np.stack([p0 + n, p0 - n, p1 - n, p1 + n], axis=0)
+
+def _oriented_trapezoid_polygon(p0, u, v, half_w_near, half_w_far, length):
+    """Corners for an oriented trapezoid (tapered corridor)."""
+    p1 = p0 + length * u
+    n0 = half_w_near * v
+    n1 = half_w_far  * v
+    return np.stack([p0 + n0, p0 - n0, p1 - n1, p1 + n1], axis=0)
+
+def build_aoi_corridor_mask(
+    image_shape_hw,
+    ellipse,                  # cv2.fitEllipse tuple OR (cx,cy,a,b,theta_rad)
+    *,
+    band_k=0.55,              # corridor half-width = band_k * b
+    length_px=None,           # absolute corridor length in px (if None, uses length_factor * a)
+    length_factor=1.25,       # fallback length as multiple of a
+    widen=1.0,                # 1.0 = rectangle; >1.0 = trapezoid widening toward far end
+    both_directions=True,     # draw corridors along +u and -u
+    include_inside_ellipse=True
+):
+    """
+    Returns a uint8 mask with 255 where (inside ellipse) ∪ (inside corridor(s)).
+    Fast, rotation-invariant, no tangents/curvature needed.
+    """
+    # Normalize ellipse params
+    if isinstance(ellipse, tuple) and len(ellipse) == 3:
+        cx, cy, a, b, theta = _ellipse_params_from_cv2(ellipse)
+    else:
+        cx, cy, a, b, theta = ellipse
+    u, v = _unit_axes(theta)
+
+    # Where corridors start: ellipse boundary along ±u
+    p_plus  = np.array([cx, cy], dtype=np.float32) + a * u
+    p_minus = np.array([cx, cy], dtype=np.float32) - a * u
+
+    # Corridor geometry
+    half_w_near = band_k * max(b, 1.0)
+    if length_px is None:
+        length_px = float(length_factor * max(a, 1.0))
+    half_w_far = float(widen * half_w_near)
+
+    H, W = image_shape_hw
+    out = np.zeros((H, W), dtype=np.uint8)
+
+    # Inside-ellipse mask (optional)
+    if include_inside_ellipse:
+        ell_mask = np.zeros((H, W), dtype=np.uint8)
+        cv2.ellipse(
+            ell_mask,
+            (int(round(cx)), int(round(cy))),
+            (int(round(a)), int(round(b))),
+            np.rad2deg(theta),
+            0, 360, 255, thickness=-1
+        )
+        out = cv2.bitwise_or(out, ell_mask)
+
+    # Corridor(s)
+    if widen > 1.0:
+        poly_plus  = _oriented_trapezoid_polygon(p_plus,  u, v, half_w_near, half_w_far, length_px)
+        mask_plus  = _poly_mask((H, W), poly_plus)
+        out = cv2.bitwise_or(out, mask_plus)
+        if both_directions:
+            poly_minus = _oriented_trapezoid_polygon(p_minus, -u, v, half_w_near, half_w_far, length_px)
+            mask_minus = _poly_mask((H, W), poly_minus)
+            out = cv2.bitwise_or(out, mask_minus)
+    else:
+        poly_plus  = _oriented_rect_polygon(p_plus,  u, v, half_w_near, length_px)
+        mask_plus  = _poly_mask((H, W), poly_plus)
+        out = cv2.bitwise_or(out, mask_plus)
+        if both_directions:
+            poly_minus = _oriented_rect_polygon(p_minus, -u, v, half_w_near, length_px)
+            mask_minus = _poly_mask((H, W), poly_minus)
+            out = cv2.bitwise_or(out, mask_minus)
+
+    return out  # uint8, 255=included
+
+
+def trim_contour_with_aoi_corridor(
+    contour,                 # cv2 contour (N x 1 x 2) or (N x 2) float/int
+    ellipse,                 # cv2 ellipse or (cx,cy,a,b,theta)
+    image_shape_hw,
+    *,
+    band_k=0.55,
+    length_px=None,
+    length_factor=1.25,
+    widen=1.0,
+    both_directions=True,
+    include_inside_ellipse=True
+):
+    """
+    Keeps points that fall inside the ellipse OR inside corridor(s).
+    Returns (trimmed_contour, mask_used).
+    """
+    mask = build_aoi_corridor_mask(
+        image_shape_hw, ellipse,
+        band_k=band_k,
+        length_px=length_px,
+        length_factor=length_factor,
+        widen=widen,
+        both_directions=both_directions,
+        include_inside_ellipse=include_inside_ellipse
+    )
+    H, W = image_shape_hw
+    P = contour.reshape(-1, 2).astype(np.float32)
+    xs = np.clip(np.round(P[:, 0]).astype(int), 0, W-1)
+    ys = np.clip(np.round(P[:, 1]).astype(int), 0, H-1)
+    keep = mask[ys, xs] > 0
+    trimmed = P[keep].reshape(-1, 1, 2).astype(contour.dtype)
+    return trimmed, mask
+
+
+def split_contour_by_corridor(
+    contour,
+    ellipse,                 # cv2.fitEllipse tuple OR ((cx,cy),(w,h),angle)
+    image_shape_hw,
+    *,
+    band_k=0.55,
+    length_px=None,
+    length_factor=1.25,
+    widen=1.0,
+    both_directions=True
+):
+    """Split contour points into three groups:
+       - inside ellipse
+       - inside corridor(s) but outside ellipse
+       - outside both (other)
+    Returns tuple (inside_contour, corridor_contour, other_contour, masks)
+    """
+    H, W = image_shape_hw
+
+    # Normalize ellipse params to (cx,cy,a,b,theta_rad) for drawing ellipse mask
+    if isinstance(ellipse, tuple) and len(ellipse) == 3:
+        (cx, cy), (w, h), ang = ellipse
+        a = 0.5 * float(w)
+        b = 0.5 * float(h)
+        theta = np.deg2rad(ang % 180.0)
+    else:
+        cx, cy, a, b, theta = ellipse
+
+    # Ellipse mask
+    ell_mask = np.zeros((H, W), dtype=np.uint8)
+    cv2.ellipse(
+        ell_mask,
+        (int(round(cx)), int(round(cy))),
+        (int(round(a)), int(round(b))),
+        np.rad2deg(theta),
+        0, 360, 255, thickness=-1
+    )
+
+    # Corridor mask (exclude ellipse region)
+    corr_mask = build_aoi_corridor_mask(
+        image_shape_hw, ellipse,
+        band_k=band_k,
+        length_px=length_px,
+        length_factor=length_factor,
+        widen=widen,
+        both_directions=both_directions,
+        include_inside_ellipse=False
+    )
+
+    P = contour.reshape(-1, 2).astype(np.float32)
+    xs = np.clip(np.round(P[:, 0]).astype(int), 0, W-1)
+    ys = np.clip(np.round(P[:, 1]).astype(int), 0, H-1)
+
+    inside_mask_pts = ell_mask[ys, xs] > 0
+    corridor_mask_pts = (corr_mask[ys, xs] > 0) & (~inside_mask_pts)
+    other_mask_pts = ~(inside_mask_pts | corridor_mask_pts)
+
+    def _pts_to_contour(pts_bool):
+        pts = P[pts_bool]
+        if pts.size == 0:
+            return np.zeros((0, 1, 2), dtype=contour.dtype)
+        return pts.reshape(-1, 1, 2).astype(contour.dtype)
+
+    inside_contour = _pts_to_contour(inside_mask_pts)
+    corridor_contour = _pts_to_contour(corridor_mask_pts)
+    other_contour = _pts_to_contour(other_mask_pts)
+
+    return inside_contour, corridor_contour, other_contour, ell_mask, corr_mask
 
 def smooth_center_position(current_center: Tuple[float, float], 
                           new_center: Tuple[float, float], 
@@ -1940,6 +2194,29 @@ def create_enhanced_contour_detection_video_with_processor(npz_file_index=0, fra
                     
                     cv2.putText(vis, 'AOI-E', (int(ellipse_center[0]) + 8, int(ellipse_center[1]) + 8),
                                cv2.FONT_HERSHEY_SIMPLEX, VIDEO_CONFIG['text_scale'], (0,255,255), 1)
+                    # Filled AOI / Corridor overlays (alpha blended) if masks exist
+                    try:
+                        from utils.sonar_config import VIDEO_CONFIG as _VC
+                        if _VC.get('show_aoi_corridor', False):
+                            # Ellipse mask
+                            ell_mask = processor.current_aoi.get('ellipse_mask', None)
+                            if isinstance(ell_mask, np.ndarray):
+                                a_color = tuple(int(c) for c in _VC.get('aoi_mask_color', (0,255,0)))
+                                a_alpha = float(_VC.get('aoi_mask_alpha', 0.25))
+                                color_layer = np.zeros_like(vis, dtype=np.uint8)
+                                color_layer[ell_mask > 0] = a_color
+                                vis = cv2.addWeighted(vis.astype(np.float32), 1.0, color_layer.astype(np.float32), a_alpha, 0).astype(np.uint8)
+
+                            # Corridor mask
+                            corr_mask = processor.current_aoi.get('corridor_mask', None)
+                            if isinstance(corr_mask, np.ndarray):
+                                c_color = tuple(int(c) for c in _VC.get('corridor_mask_color', (0,128,255)))
+                                c_alpha = float(_VC.get('corridor_mask_alpha', 0.25))
+                                color_layer = np.zeros_like(vis, dtype=np.uint8)
+                                color_layer[corr_mask > 0] = c_color
+                                vis = cv2.addWeighted(vis.astype(np.float32), 1.0, color_layer.astype(np.float32), c_alpha, 0).astype(np.uint8)
+                    except Exception:
+                        pass
                 
                 elif aoi_type == 'rectangular' and 'rect' in processor.current_aoi:
                     # Draw rectangular AOI

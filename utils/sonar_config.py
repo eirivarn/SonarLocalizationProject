@@ -77,18 +77,18 @@ class ConeGridSpec:
 IMAGE_PROCESSING_CONFIG: Dict = {
     
     # === BINARY CONVERSION (NEW: SIGNAL-STRENGTH INDEPENDENT) ===
-    'binary_threshold': 90,            # Threshold for converting frame to binary (0-255)
+    'binary_threshold': 30,            # Threshold for converting frame to binary (0-255)
                                         # Pixels > threshold become white (255), others black (0)
                                         # Makes pipeline completely signal-strength independent
                                         # Focus on structural patterns only
     
     # === ADAPTIVE LINEAR MERGING ===
 
-    'adaptive_base_radius':2,           # Base circular merging radius 
+    'adaptive_base_radius':5,           # Base circular merging radius 
                                         # Starting radius for circular kernel before elongation
                                         # Larger values = more aggressive base merging
 
-    'adaptive_max_elongation': 2,        # Maximum elongation factor
+    'adaptive_max_elongation': 3,        # Maximum elongation factor
                                          # 1.0 = always circular, 4.0 = ellipse can be 4x longer than wide
                                          # Higher values = stronger linear feature enhancement
 
@@ -100,11 +100,11 @@ IMAGE_PROCESSING_CONFIG: Dict = {
                                          # Uses 20° increments for optimal speed/quality balance
                                          # More steps = better angle resolution but slower processing
 
-    'momentum_boost': 20.0,              # Enhancement strength multiplier 
+    'momentum_boost': 30.0,              # Enhancement strength multiplier 
                                          # Higher values = stronger directional feature enhancement
                                          # Lower values = more subtle enhancement, preserves original intensities
 
-    'use_advanced_momentum_merging': False,  # Toggle between advanced momentum merging and basic Gaussian kernel
+    'use_advanced_momentum_merging': True,  # Toggle between advanced momentum merging and basic Gaussian kernel
                                              # True = use advanced structure tensor analysis with elliptical kernels
                                              # False = use simple Gaussian blur for faster processing
                                              # Advanced mode provides better linear feature detection but slower
@@ -130,7 +130,7 @@ IMAGE_PROCESSING_CONFIG: Dict = {
                                         
     
     # === MORPHOLOGICAL POST-PROCESSING ===
-    'morph_close_kernel': 3,            # Kernel size for morphological closing (connects nearby edges)
+    'morph_close_kernel': 5,            # Kernel size for morphological closing (connects nearby edges)
                                         # 0 = no closing, 3-5 = light closing, >5 = aggressive closing
                                         # Helps connect broken parts of net structures
     
@@ -149,11 +149,11 @@ IMAGE_PROCESSING_CONFIG: Dict = {
 TRACKING_CONFIG: Dict = {
     'aoi_boost_factor': 20.0,            # Reasonable boost for contours inside AOI
     'aoi_expansion_pixels': 1,           # Expand AOI by this many pixels (was 2)
-    'ellipse_smoothing_alpha': 0.6,      # Ellipse temporal smoothing: 0.0=no smoothing (jittery), 0.8=very smooth, 1.0=no updates (frozen)
+    'ellipse_smoothing_alpha': 0.5,      # Ellipse temporal smoothing: 0.0=no smoothing (jittery), 0.8=very smooth, 1.0=no updates (frozen)
                                          # Controls how much the ellipse parameters (size, orientation) change between frames
                                          # Higher values = smoother tracking but slower adaptation to real changes
                                          # Lower values = faster adaptation but jittery tracking
-    'ellipse_shape_smoothing_alpha': 0.1, # Shape resistance smoothing: very low value makes ellipse resist shape changes
+    'ellipse_shape_smoothing_alpha': 0.25, # Shape resistance smoothing: very low value makes ellipse resist shape changes
                                           # 0.0 = no resistance (snaps to new shape immediately)
                                           # 1.0 = maximum resistance (shape never changes)
                                           # 0.1 = gradual shape adaptation over many frames
@@ -163,6 +163,15 @@ TRACKING_CONFIG: Dict = {
     'center_smoothing_alpha': 0.3,       # Smoothing factor for center tracking (was 0.2, lower = smoother)
     'use_elliptical_aoi': True,          # Use elliptical AOI instead of rectangular
 }
+
+# Corridor AOI tuning (used by sonar_image_analysis)
+TRACKING_CONFIG.update({
+    'corridor_band_k': 0.5,          # Half-width of corridor as fraction of ellipse semi-minor (b)
+    'corridor_length_px': None,       # Absolute corridor length in pixels (None -> uses length_factor*a)
+    'corridor_length_factor': 1.25,   # Corridor length as multiple of ellipse semi-major (a)
+    'corridor_widen': 0.6,            # Widening factor (1.0 = rectangle; >1.0 = trapezoid)
+    'corridor_both_directions': True, # Build corridors along ±major-axis
+})
 
 # Video output configuration
 VIDEO_CONFIG: Dict = {
@@ -184,6 +193,12 @@ VIDEO_CONFIG: Dict = {
     'show_ellipse': True,
     'show_bounding_box': False,
     'text_scale': 0.6,
+    # AOI / corridor overlay options
+    'show_aoi_corridor': True,         # Draw AOI ellipse + corridor mask on the cone overlay when sonar analysis is available
+    'aoi_mask_color': (0, 255, 0),      # BGR color for ellipse AOI mask overlay
+    'corridor_mask_color': (0, 128, 255),
+    'aoi_mask_alpha': 0.25,             # Alpha blend for AOI mask
+    'corridor_mask_alpha': 0.25,
     
     # === VIDEO SYNCHRONIZATION ===
     'max_sync_tolerance_seconds': 5.0,     # Maximum time difference for camera/sonar sync
