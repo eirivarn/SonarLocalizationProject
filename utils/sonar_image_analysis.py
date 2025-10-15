@@ -943,15 +943,29 @@ def preprocess_edges(frame_u8: np.ndarray, cfg=IMAGE_PROCESSING_CONFIG) -> Tuple
     binary_threshold = cfg.get('binary_threshold', 128)  # Default threshold
     binary_frame = (frame_u8 > binary_threshold).astype(np.uint8) * 255
     
-    # STEP 2: Apply structural enhancement on binary data using custom adaptive linear merging
-    enhanced_binary = adaptive_linear_momentum_merge_fast(
-        binary_frame,
-        base_radius=cfg.get('adaptive_base_radius', 2),
-        max_elongation=cfg.get('adaptive_max_elongation', 4),
-        linearity_threshold=cfg.get('adaptive_linearity_threshold', 0.3),
-        momentum_boost=cfg.get('momentum_boost', 1.5),
-        angle_steps=cfg.get('adaptive_angle_steps', 9)
-    )
+    # STEP 2: Apply structural enhancement on binary data
+    use_advanced = cfg.get('use_advanced_momentum_merging', True)
+    
+    if use_advanced:
+        # Use advanced adaptive linear momentum merging with structure tensor analysis
+        enhanced_binary = adaptive_linear_momentum_merge_fast(
+            binary_frame,
+            base_radius=cfg.get('adaptive_base_radius', 2),
+            max_elongation=cfg.get('adaptive_max_elongation', 4),
+            linearity_threshold=cfg.get('adaptive_linearity_threshold', 0.3),
+            momentum_boost=cfg.get('momentum_boost', 1.5),
+            angle_steps=cfg.get('adaptive_angle_steps', 9)
+        )
+    else:
+        # Use basic Gaussian kernel for faster processing
+        kernel_size = cfg.get('basic_gaussian_kernel_size', 5)
+        gaussian_sigma = cfg.get('basic_gaussian_sigma', 1.0)
+        momentum_boost = cfg.get('basic_momentum_boost', 0.5)
+        
+        # Apply Gaussian blur enhancement
+        enhanced = cv2.GaussianBlur(binary_frame, (kernel_size, kernel_size), gaussian_sigma)
+        enhanced_binary = binary_frame + momentum_boost * enhanced
+        enhanced_binary = np.clip(enhanced_binary, 0, 255).astype(np.uint8)
     
     # STEP 3: Extract edges from enhanced binary frame
     # For binary data, we can use simple edge detection or morphological operations

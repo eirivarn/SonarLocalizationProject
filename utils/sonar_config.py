@@ -103,6 +103,22 @@ IMAGE_PROCESSING_CONFIG: Dict = {
     'momentum_boost': 20.0,              # Enhancement strength multiplier 
                                          # Higher values = stronger directional feature enhancement
                                          # Lower values = more subtle enhancement, preserves original intensities
+
+    'use_advanced_momentum_merging': False,  # Toggle between advanced momentum merging and basic Gaussian kernel
+                                             # True = use advanced structure tensor analysis with elliptical kernels
+                                             # False = use simple Gaussian blur for faster processing
+                                             # Advanced mode provides better linear feature detection but slower
+
+    # === BASIC GAUSSIAN KERNEL PARAMETERS (when use_advanced_momentum_merging=False) ===
+    'basic_gaussian_kernel_size': 3,        # Kernel size for basic Gaussian blur (odd integer)
+                                             # Larger values = more smoothing but slower processing
+                                             # Typical range: 3-9
+    'basic_gaussian_sigma': 5.0,            # Sigma for basic Gaussian blur
+                                             # Higher values = more aggressive smoothing
+                                             # Lower values = sharper enhancement
+    'basic_momentum_boost': 5.0,            # Enhancement strength for basic mode
+                                             # Multiplier for how much enhanced signal to add back
+                                             # Higher values = stronger enhancement
     
     # === EDGE DETECTION (SIMPLIFIED FOR BINARY DATA) ===
     # Binary edge detection using gradient operators - no Canny parameters needed
