@@ -239,7 +239,6 @@ class SonarVisualizer:
             x_end = self.config["display_range_max_m"] * np.sin(th)
             y_end = self.config["display_range_max_m"] * np.cos(th)
             ax.plot([0, x_end], [0, y_end], lw=0.9, alpha=0.85, color="k")
-            ax.text(1.02 * x_end, 1.02 * y_end, f"{a:.0f}°", ha="center", va="center", fontsize=9)
 
         fig.colorbar(
             im,
