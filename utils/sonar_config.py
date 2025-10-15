@@ -153,6 +153,10 @@ TRACKING_CONFIG: Dict = {
                                          # Controls how much the ellipse parameters (size, orientation) change between frames
                                          # Higher values = smoother tracking but slower adaptation to real changes
                                          # Lower values = faster adaptation but jittery tracking
+    'ellipse_shape_smoothing_alpha': 0.1, # Shape resistance smoothing: very low value makes ellipse resist shape changes
+                                          # 0.0 = no resistance (snaps to new shape immediately)
+                                          # 1.0 = maximum resistance (shape never changes)
+                                          # 0.1 = gradual shape adaptation over many frames
     'ellipse_max_movement_pixels': 5.0,  # Maximum pixels ellipse center can move per frame (was 4.0)
     'max_frames_outside_aoi': 3,         # Max consecutive frames to allow best contour outside ellipse AOI
     'ellipse_expansion_factor': 0.15,     # Factor to expand detected contour ellipse for AOI (was 0.2, now 0.1 = 10% expansion) (was 0.2)

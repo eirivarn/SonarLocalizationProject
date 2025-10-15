@@ -114,12 +114,13 @@ class SonarDataProcessor:
                 
                 # Create elliptical AOI with temporal smoothing
                 expansion_factor = TRACKING_CONFIG.get('ellipse_expansion_factor', 0.3)
-                ellipse_smoothing_alpha = TRACKING_CONFIG.get('ellipse_smoothing_alpha', 0.2)
+                position_smoothing_alpha = TRACKING_CONFIG.get('center_smoothing_alpha', 0.3)
+                shape_smoothing_alpha = TRACKING_CONFIG.get('ellipse_shape_smoothing_alpha', 0.1)
                 max_movement = TRACKING_CONFIG.get('ellipse_max_movement_pixels', 4.0)
                 
                 aoi_mask, ellipse_center, self.previous_ellipse = create_smooth_elliptical_aoi(
                     best_contour, expansion_factor, (H, W), 
-                    self.previous_ellipse, ellipse_smoothing_alpha, max_movement
+                    self.previous_ellipse, position_smoothing_alpha, shape_smoothing_alpha, max_movement
                 )
                 
                 # Store AOI as mask and ellipse center for visualization
@@ -326,8 +327,8 @@ def rects_overlap(a: Tuple[int,int,int,int], b: Tuple[int,int,int,int]) -> bool:
     return not (ax+aw < bx or bx+bw < ax or ay+ah < by or by+bh < ay)
 
 def create_smooth_elliptical_aoi(contour: np.ndarray, expansion_factor: float, image_shape: Tuple[int, int], 
-                                previous_ellipse: Optional[Tuple] = None, smoothing_alpha: float = 0.2,
-                                max_movement_pixels: float = 4.0) -> Tuple[np.ndarray, Tuple[float, float], Tuple]:
+                                previous_ellipse: Optional[Tuple] = None, position_smoothing_alpha: float = 0.3,
+                                shape_smoothing_alpha: float = 0.1, max_movement_pixels: float = 4.0) -> Tuple[np.ndarray, Tuple[float, float], Tuple]:
     """Create an elliptical AOI with temporal smoothing.
     
     Args:
@@ -335,7 +336,8 @@ def create_smooth_elliptical_aoi(contour: np.ndarray, expansion_factor: float, i
         expansion_factor: Factor to expand the ellipse (e.g., 0.3 = 30% larger)
         image_shape: (height, width) of the image
         previous_ellipse: Previous ellipse parameters ((center), (axes), angle) or None
-        smoothing_alpha: Smoothing factor for ellipse parameters (0.0 = no smoothing, 1.0 = use previous only)
+        position_smoothing_alpha: Smoothing factor for ellipse center position (0.0 = no smoothing, 1.0 = use previous only)
+        shape_smoothing_alpha: Smoothing factor for ellipse shape parameters (width, height, angle) - lower values = more shape resistance
         max_movement_pixels: Maximum pixels center can move per frame
         
     Returns:
@@ -379,12 +381,12 @@ def create_smooth_elliptical_aoi(contour: np.ndarray, expansion_factor: float, i
             center_dx *= scale
             center_dy *= scale
         
-        smoothed_center_x = prev_center_x + smoothing_alpha * center_dx
-        smoothed_center_y = prev_center_y + smoothing_alpha * center_dy
+        smoothed_center_x = prev_center_x + position_smoothing_alpha * center_dx
+        smoothed_center_y = prev_center_y + position_smoothing_alpha * center_dy
         
-        # Smooth ellipse parameters
-        smoothed_width = prev_width + smoothing_alpha * (curr_width - prev_width)
-        smoothed_height = prev_height + smoothing_alpha * (curr_height - prev_height)
+        # Smooth ellipse shape parameters with shape resistance
+        smoothed_width = prev_width + shape_smoothing_alpha * (curr_width - prev_width)
+        smoothed_height = prev_height + shape_smoothing_alpha * (curr_height - prev_height)
         
         # Smooth angle (handle angle wraparound)
         angle_diff = curr_angle - prev_angle
@@ -393,7 +395,7 @@ def create_smooth_elliptical_aoi(contour: np.ndarray, expansion_factor: float, i
             angle_diff -= 360
         while angle_diff < -180:
             angle_diff += 360
-        smoothed_angle = prev_angle + smoothing_alpha * angle_diff
+        smoothed_angle = prev_angle + shape_smoothing_alpha * angle_diff
         
         center_x, center_y = smoothed_center_x, smoothed_center_y
         width, height = smoothed_width, smoothed_height
