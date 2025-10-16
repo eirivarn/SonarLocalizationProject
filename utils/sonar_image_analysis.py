@@ -1543,8 +1543,20 @@ class DistanceAnalysisEngine:
         
     def analyze_npz_sequence(self, npz_file_index: int = 0, frame_start: int = 0,
                            frame_count: Optional[int] = None, frame_step: int = 1,
-                           npz_dir: str = None) -> pd.DataFrame:
-        """Analyze distance over time from NPZ file."""
+                           npz_dir: str = None, save_outputs: bool = False) -> pd.DataFrame:
+        """Analyze distance over time from NPZ file.
+        
+        Args:
+            npz_file_index: Index of NPZ file to analyze
+            frame_start: Starting frame index
+            frame_count: Number of frames to analyze (None = all remaining)
+            frame_step: Step size between frames
+            npz_dir: Directory containing NPZ files (None = auto-detect)
+            save_outputs: If True, save results to CSV file in outputs directory
+            
+        Returns:
+            DataFrame with analysis results for each frame
+        """
         print("=== DISTANCE ANALYSIS FROM NPZ ===")
         
         files = get_available_npz_files(npz_dir)
@@ -1584,6 +1596,25 @@ class DistanceAnalysisEngine:
         
         df = pd.DataFrame(results)
         self._print_analysis_summary(df)
+        
+        # Save outputs to CSV if requested
+        if save_outputs:
+            from utils.sonar_config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
+            from pathlib import Path
+            
+            # Create output directory if it doesn't exist
+            outputs_dir = Path(EXPORTS_DIR_DEFAULT) / EXPORTS_SUBDIRS.get('outputs', 'outputs')
+            outputs_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Generate filename based on NPZ file name
+            npz_stem = npz_file.stem
+            csv_filename = f"{npz_stem}_analysis_results.csv"
+            csv_path = outputs_dir / csv_filename
+            
+            # Save to CSV
+            df.to_csv(csv_path, index=False)
+            print(f"Analysis results saved to: {csv_path}")
+        
         return df
     
     def analyze_sonar_csv(self, target_bag: str, exports_folder: Path,

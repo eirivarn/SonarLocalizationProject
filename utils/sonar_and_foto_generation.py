@@ -79,12 +79,12 @@ def export_optimized_sonar_video(
     NET_DISTANCE_TOLERANCE: float = 0.5,  # seconds
     NET_PITCH_TOLERANCE: float = 0.3,     # seconds
     # --- sonar analysis overlay (optional) ---
-    SONAR_DISTANCE_RESULTS: pd.DataFrame | None = None,  # DataFrame with sonar analysis results
+    SONAR_RESULTS: pd.DataFrame | None = None,  # DataFrame with sonar analysis results
 ):
     """
     Optimized sonar + (optional) net-line overlay + (optional) sonar analysis overlay.
     If VIDEO_SEQ_DIR is given, the output includes the actual camera frame (side-by-side).
-    If SONAR_DISTANCE_RESULTS is provided, displays both DVL and sonar analysis distances.
+    If SONAR_RESULTS is provided, displays both DVL and sonar analysis distances.
 
     Output is saved under EXPORTS_FOLDER / 'videos' with an 'optimized_sync' name.
     """
@@ -124,7 +124,7 @@ def export_optimized_sonar_video(
     print(f"Camera: {'enabled' if VIDEO_SEQ_DIR is not None else 'disabled'}")
     print(f"Net-line: {'enabled' if INCLUDE_NET else 'disabled'}"
           + (f" (dist tol={NET_DISTANCE_TOLERANCE}s, pitch tol={NET_PITCH_TOLERANCE}s)" if INCLUDE_NET else ""))
-    print(f"Sonar Analysis: {'enabled' if SONAR_DISTANCE_RESULTS is not None else 'disabled'}")
+    print(f"Sonar Analysis: {'enabled' if SONAR_RESULTS is not None else 'disabled'}")
 
     # --- Resolve exports folder and load sonar timestamps/frames ---
     exports_root = Path(EXPORTS_FOLDER) if EXPORTS_FOLDER is not None else Path(EXPORTS_DIR_DEFAULT)
@@ -189,7 +189,7 @@ def export_optimized_sonar_video(
     out_dir = Path(EXPORTS_FOLDER) / "videos"
     out_dir.mkdir(exist_ok=True)
     first_ts = pd.to_datetime(df.loc[frame_indices[0], "ts_utc"], utc=True, errors="coerce")
-    out_name = f"{TARGET_BAG}_optimized_sync_{'withcam_' if VIDEO_SEQ_DIR is not None else ''}{'withsonar_' if SONAR_DISTANCE_RESULTS is not None else ''}{'nonet_' if not INCLUDE_NET else ''}{ts_for_name(first_ts)}.mp4"
+    out_name = f"{TARGET_BAG}_optimized_sync_{'withcam_' if VIDEO_SEQ_DIR is not None else ''}{'withsonar_' if SONAR_RESULTS is not None else ''}{'nonet_' if not INCLUDE_NET else ''}{ts_for_name(first_ts)}.mp4"
     out_path = out_dir / out_name
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = None
@@ -244,7 +244,7 @@ def export_optimized_sonar_video(
             # --- optional net-line overlay (optimized sync) ---
             status_text = None
             line_color = (128, 128, 128)
-            if INCLUDE_NET or SONAR_DISTANCE_RESULTS is not None:
+            if INCLUDE_NET or SONAR_RESULTS is not None:
                 net_angle_deg = 0.0
                 net_distance = None
                 sonar_distance_m = None
@@ -296,7 +296,7 @@ def export_optimized_sonar_video(
                         sync_status = "NO_NAV_DATA"
 
                 # --- Sonar Analysis Data ---
-                if SONAR_DISTANCE_RESULTS is not None and len(SONAR_DISTANCE_RESULTS) > 0:
+                if SONAR_RESULTS is not None and len(SONAR_RESULTS) > 0:
                     # Convert pixel distance to meters using the extent
                     try:
                         # Calculate pixel-to-meter conversion
@@ -308,10 +308,10 @@ def export_optimized_sonar_video(
                         pixels_to_meters_avg = 0.5 * (px2m_x + px2m_y)
 
                         # Find closest sonar analysis measurement
-                        sonar_diffs = abs(SONAR_DISTANCE_RESULTS["timestamp"] - ts_target)
+                        sonar_diffs = abs(SONAR_RESULTS["timestamp"] - ts_target)
                         sonar_idx = sonar_diffs.idxmin()
                         min_sonar_dt = sonar_diffs.iloc[sonar_idx]
-                        sonar_rec = SONAR_DISTANCE_RESULTS.loc[sonar_idx]
+                        sonar_rec = SONAR_RESULTS.loc[sonar_idx]
 
                         if min_sonar_dt <= pd.Timedelta(f"{NET_DISTANCE_TOLERANCE}s") and sonar_rec.get("detection_success", False):
                             sonar_distance_px = sonar_rec["distance_pixels"]
@@ -400,7 +400,7 @@ def export_optimized_sonar_video(
                     # --- AOI / Corridor mask overlay (if available and enabled) ---
                     from utils.sonar_config import VIDEO_CONFIG
                     if VIDEO_CONFIG.get('show_aoi_corridor', False):
-                        # Attempt to locate mask data in sonar_rec (or global SONAR_DISTANCE_RESULTS)
+                        # Attempt to locate mask data in sonar_rec (or global SONAR_RESULTS)
                         try:
                             # Sonar analysis may include raw masks (ellipse_mask, corridor_mask)
                             mask_ell = sonar_rec.get('ellipse_mask', None) if 'sonar_rec' in locals() else None
@@ -409,7 +409,7 @@ def export_optimized_sonar_video(
                             mask_ell = None
                             mask_corr = None
 
-                        # If masks are not present but SONAR_DISTANCE_RESULTS contains blobs as arrays,
+                        # If masks are not present but SONAR_RESULTS contains blobs as arrays,
                         # skip gracefully. The analysis module populates masks in `current_aoi` when running live.
                         if mask_ell is not None and isinstance(mask_ell, (np.ndarray,)):
                             # Convert single-channel mask to colored overlay and alpha blend
@@ -438,7 +438,7 @@ def export_optimized_sonar_video(
                         status_text = " | ".join(status_lines)
 
                 else:
-                    if INCLUDE_NET or SONAR_DISTANCE_RESULTS is not None:
+                    if INCLUDE_NET or SONAR_RESULTS is not None:
                         status_text = f"NET: NO SYNC DATA (tol: {NET_DISTANCE_TOLERANCE}s)"
                         line_color = (128, 128, 128)
 
@@ -464,7 +464,7 @@ def export_optimized_sonar_video(
                         cv2.putText(cone_bgr, f"{bearing_deg:+d}°", label_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.4, grid_blue, 1)
 
             # annotate status if net considered
-            if (INCLUDE_NET or SONAR_DISTANCE_RESULTS is not None) and status_text:
+            if (INCLUDE_NET or SONAR_RESULTS is not None) and status_text:
                 # Legend
                 legend_y = 15
                 cv2.putText(cone_bgr, "DVL: Yellow/Orange (nav data)", (10, legend_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 2, cv2.LINE_AA)
@@ -564,7 +564,7 @@ def export_optimized_sonar_video(
             "cone_flip_vertical": bool(CONE_FLIP_VERTICAL),
             "cmap": str(CMAP_NAME),
             "include_net": bool(INCLUDE_NET),
-            "include_sonar_analysis": SONAR_DISTANCE_RESULTS is not None,
+            "include_sonar_analysis": SONAR_RESULTS is not None,
             "flip_range": bool(FLIP_RANGE),
             "flip_beams": bool(FLIP_BEAMS),
         }
