@@ -149,19 +149,15 @@ IMAGE_PROCESSING_CONFIG: Dict = {
 TRACKING_CONFIG: Dict = {
     'aoi_boost_factor': 10.0,            # Reasonable boost for contours inside AOI
     'aoi_expansion_pixels': 0,           # Expand AOI by this many pixels (was 2)
-    'ellipse_smoothing_alpha': 0.7,      # Ellipse temporal smoothing: 0.0=instant jump (no smoothing), 0.8=very smooth, 1.0=no updates (frozen)
-                                         # Controls how much the ellipse parameters (size, orientation) change between frames
-                                         # Higher values = smoother tracking but slower adaptation to real changes
-                                         # Lower values = faster adaptation but jittery tracking
-    'ellipse_shape_smoothing_alpha': 0.99, # Shape resistance smoothing: 0.0 = instant jump (no smoothing), 1.0 = maximum resistance (shape never changes)
-                                          # Higher values = smoother shape changes but slower adaptation
-                                          # Lower values = faster shape adaptation but more jittery
-    'ellipse_max_movement_pixels': 5.0,  # Maximum pixels ellipse center can move per frame (was 4.0)
-    'max_frames_outside_aoi': 5.0,         # Max consecutive frames to allow best contour outside ellipse AOI
-    'ellipse_expansion_factor': 0.1,     # Factor to expand detected contour ellipse for AOI (was 0.2, now 0.1 = 10% expansion) (was 0.2)
-    'center_smoothing_alpha': 0.25,       # Smoothing factor for center tracking: 0.0=instant jump (no smoothing), 1.0=no updates (frozen)
-                                         # Higher values = smoother center tracking but slower adaptation to movement
-                                         # Lower values = faster center adaptation but more jittery tracking
+    'center_smoothing_alpha': 0.3,       # Position smoothing: 0.0 = instant jump (no smoothing), 1.0 = maximum resistance (position never changes)
+                                         # Higher values = smoother position changes but slower adaptation
+                                         # Lower values = faster position adaptation but more jittery tracking
+    'ellipse_size_smoothing_alpha': 0.8, # Size smoothing: 0.0 = instant jump (no smoothing), 1.0 = maximum resistance (size never changes)
+                                          # Higher values = smoother size changes but slower adaptation
+                                          # Lower values = faster size adaptation but more jittery
+    'ellipse_orientation_smoothing_alpha': 0.5, # Orientation smoothing: 0.0 = instant jump (no smoothing), 1.0 = maximum resistance (orientation never changes)
+                                          # Higher values = smoother orientation changes but slower adaptation
+                                          # Lower values = faster orientation adaptation but more jittery
     'use_elliptical_aoi': True,          # Use elliptical AOI instead of rectangular
 }
 
