@@ -44,11 +44,35 @@ def load_all_distance_data_for_bag(target_bag: str, exports_folder: str | None =
     try:
         nav_file = data_folder / f"navigation_plane_approximation__{target_bag}_data.csv"
         if nav_file.exists():
-            nav_data = pd.read_csv(nav_file, usecols=['ts_oslo', 'NetDistance', 'Altitude'])
-            nav_data['timestamp'] = pd.to_datetime(nav_data['ts_oslo']).dt.tz_convert('UTC')
-            nav_data['net_distance_m_raw'] = nav_data['NetDistance']
-            raw_data['navigation'] = nav_data[['timestamp', 'net_distance_m_raw', 'NetDistance', 'Altitude']].copy()
-            print(f"    Loaded {len(nav_data)} navigation records")
+            # First try to read all columns to see what's available
+            nav_data_full = pd.read_csv(nav_file)
+            available_cols = nav_data_full.columns.tolist()
+            
+            # Required columns
+            required_cols = ['ts_oslo', 'NetDistance', 'Altitude']
+            optional_cols = ['NetPitch']
+            
+            cols_to_load = required_cols + [col for col in optional_cols if col in available_cols]
+            
+            if set(required_cols).issubset(set(available_cols)):
+                nav_data = nav_data_full[cols_to_load].copy()
+                nav_data['timestamp'] = pd.to_datetime(nav_data['ts_oslo']).dt.tz_convert('UTC')
+                nav_data['net_distance_m_raw'] = nav_data['NetDistance']
+                
+                # Include NetPitch in the final dataframe if available
+                final_cols = ['timestamp', 'net_distance_m_raw', 'NetDistance', 'Altitude']
+                if 'NetPitch' in nav_data.columns:
+                    final_cols.append('NetPitch')
+                
+                raw_data['navigation'] = nav_data[final_cols].copy()
+                print(f"    Loaded {len(nav_data)} navigation records")
+                if 'NetPitch' in nav_data.columns:
+                    print(f"    NetPitch data available: {nav_data['NetPitch'].notna().sum()} valid records")
+                else:
+                    print(f"    NetPitch data not available in navigation file")
+            else:
+                print(f"    Required columns {required_cols} not found in navigation file")
+                raw_data['navigation'] = None
         else:
             print(f"    Navigation file not found")
             raw_data['navigation'] = None

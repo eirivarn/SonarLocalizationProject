@@ -1857,10 +1857,16 @@ class ComparisonEngine:
         N = max(1, len(sonar) - 1)
         sonar['synthetic_time'] = (sonar['frame_index'] / float(N)) * dvl_duration
         
-        # Apply smoothing to sonar data
-        sonar_smooth = apply_smoothing(sonar['distance_meters'], window_size)
-        for key, values in sonar_smooth.items():
-            sonar[f'distance_meters_{key}'] = values
+        # Apply smoothing to sonar data (removed smoothing as requested)
+        # sonar_smooth = apply_smoothing(sonar['distance_meters'], window_size)
+        # for key, values in sonar_smooth.items():
+        #     sonar[f'distance_meters_{key}'] = values
+        
+        # Apply smoothing to sonar angle data if available (removed smoothing as requested)
+        # if 'angle_degrees' in sonar.columns and sonar['angle_degrees'].notna().any():
+        #     angle_smooth = apply_smoothing(sonar['angle_degrees'], window_size)
+        #     for key, values in angle_smooth.items():
+        #         sonar[f'angle_degrees_{key}'] = values
         
         # Create visualization - only Plotly supported
         if use_plotly:
@@ -1877,6 +1883,17 @@ class ComparisonEngine:
         sonar_mean = float(np.nanmean(sonar['distance_meters']))
         dvl_mean = float(nav['NetDistance'].mean())
         
+        # Calculate pitch statistics if available
+        pitch_stats = {}
+        if 'NetPitch' in nav.columns and nav['NetPitch'].notna().any():
+            sonar_pitch_mean = float(np.nanmean(sonar['angle_degrees'] - 180)) if 'angle_degrees' in sonar.columns else np.nan
+            dvl_pitch_mean = float(np.degrees(nav['NetPitch'].mean()))
+            pitch_stats = {
+                'sonar_pitch_mean_deg': sonar_pitch_mean,
+                'dvl_pitch_mean_deg': dvl_pitch_mean,
+                'pitch_diff_deg': sonar_pitch_mean - dvl_pitch_mean if not np.isnan(sonar_pitch_mean) else np.nan
+            }
+        
         stats = {
             'sonar_mean_m': sonar_mean,
             'dvl_mean_m': dvl_mean,
@@ -1884,7 +1901,8 @@ class ComparisonEngine:
             'sonar_duration_s': float(sonar['synthetic_time'].max()),
             'dvl_duration_s': dvl_duration,
             'sonar_frames': len(sonar),
-            'dvl_records': len(nav)
+            'dvl_records': len(nav),
+            **pitch_stats
         }
         
         # Print summary
@@ -1893,6 +1911,10 @@ class ComparisonEngine:
         print(f"Sonar mean distance: {sonar_mean:.3f} m")
         print(f"DVL mean distance:   {dvl_mean:.3f} m")
         print(f"Scale ratio (Sonar/DVL): {stats['scale_ratio']:.3f}x")
+        if pitch_stats:
+            print(f"Sonar mean pitch:    {pitch_stats['sonar_pitch_mean_deg']:.2f}°")
+            print(f"DVL mean pitch:      {pitch_stats['dvl_pitch_mean_deg']:.2f}°")
+            print(f"Pitch difference:    {pitch_stats['pitch_diff_deg']:.2f}°")
         print(f"Sonar duration: {stats['sonar_duration_s']:.1f}s ({stats['sonar_frames']} frames)")
         print(f"DVL duration:   {stats['dvl_duration_s']:.1f}s ({stats['dvl_records']} records)")
         
@@ -1918,12 +1940,7 @@ class ComparisonEngine:
         # Distance traces
         fig.add_trace(
             go.Scatter(x=sonar['synthetic_time'], y=sonar['distance_meters'],
-                      mode='lines', name='Sonar Raw', line=dict(color='rgba(255,0,0,0.3)')),
-            row=1, col=1
-        )
-        fig.add_trace(
-            go.Scatter(x=sonar['synthetic_time'], y=sonar['distance_meters_primary'],
-                      mode='lines', name='Sonar Smoothed', line=dict(color='red', width=3)),
+                      mode='lines', name='Sonar Distance', line=dict(color='red', width=3)),
             row=1, col=1
         )
         fig.add_trace(
@@ -1936,8 +1953,8 @@ class ComparisonEngine:
         if has_pitch:
             if 'angle_degrees' in sonar.columns:
                 fig.add_trace(
-                    go.Scatter(x=sonar['synthetic_time'], y=sonar['angle_degrees'],
-                              mode='lines', name='Sonar Angle', line=dict(color='orange', width=3)),
+                    go.Scatter(x=sonar['synthetic_time'], y=sonar['angle_degrees'] - 180,
+                              mode='lines', name='Sonar Pitch', line=dict(color='orange', width=3)),
                     row=2, col=1
                 )
             fig.add_trace(
