@@ -375,8 +375,8 @@ def create_smooth_elliptical_aoi(contour: np.ndarray, expansion_factor: float, i
         expansion_factor: Factor to expand the ellipse (e.g., 0.3 = 30% larger)
         image_shape: (height, width) of the image
         previous_ellipse: Previous ellipse parameters ((center), (axes), angle) or None
-        position_smoothing_alpha: Smoothing factor for ellipse center position (0.0 = no smoothing, 1.0 = use previous only)
-        shape_smoothing_alpha: Smoothing factor for ellipse shape parameters (width, height, angle) - lower values = more shape resistance
+        position_smoothing_alpha: Smoothing factor for ellipse center position (0.0 = instant jump, 1.0 = no change/maximum smoothing)
+        shape_smoothing_alpha: Smoothing factor for ellipse shape parameters (width, height, angle) (0.0 = instant jump, 1.0 = no change/maximum smoothing)
         max_movement_pixels: Maximum pixels center can move per frame
         
     Returns:
@@ -420,12 +420,12 @@ def create_smooth_elliptical_aoi(contour: np.ndarray, expansion_factor: float, i
             center_dx *= scale
             center_dy *= scale
         
-        smoothed_center_x = prev_center_x + position_smoothing_alpha * center_dx
-        smoothed_center_y = prev_center_y + position_smoothing_alpha * center_dy
+        smoothed_center_x = prev_center_x + (1 - position_smoothing_alpha) * center_dx
+        smoothed_center_y = prev_center_y + (1 - position_smoothing_alpha) * center_dy
         
         # Smooth ellipse shape parameters with shape resistance
-        smoothed_width = prev_width + shape_smoothing_alpha * (curr_width - prev_width)
-        smoothed_height = prev_height + shape_smoothing_alpha * (curr_height - prev_height)
+        smoothed_width = prev_width + (1 - shape_smoothing_alpha) * (curr_width - prev_width)
+        smoothed_height = prev_height + (1 - shape_smoothing_alpha) * (curr_height - prev_height)
         
         # Smooth angle (handle angle wraparound)
         angle_diff = curr_angle - prev_angle
@@ -434,7 +434,7 @@ def create_smooth_elliptical_aoi(contour: np.ndarray, expansion_factor: float, i
             angle_diff -= 360
         while angle_diff < -180:
             angle_diff += 360
-        smoothed_angle = prev_angle + shape_smoothing_alpha * angle_diff
+        smoothed_angle = prev_angle + (1 - shape_smoothing_alpha) * angle_diff
         
         center_x, center_y = smoothed_center_x, smoothed_center_y
         width, height = smoothed_width, smoothed_height
@@ -759,7 +759,7 @@ def smooth_center_position(current_center: Tuple[float, float],
     Args:
         current_center: Current smoothed center position
         new_center: New detected center position
-        smoothing_alpha: Smoothing factor (0.0 = no change, 1.0 = instant jump)
+        smoothing_alpha: Smoothing factor (0.0 = instant jump, 1.0 = no change/maximum smoothing)
         
     Returns:
         New smoothed center position
@@ -770,8 +770,8 @@ def smooth_center_position(current_center: Tuple[float, float],
     curr_x, curr_y = current_center
     new_x, new_y = new_center
     
-    smoothed_x = curr_x + smoothing_alpha * (new_x - curr_x)
-    smoothed_y = curr_y + smoothing_alpha * (new_y - curr_y)
+    smoothed_x = curr_x + (1 - smoothing_alpha) * (new_x - curr_x)
+    smoothed_y = curr_y + (1 - smoothing_alpha) * (new_y - curr_y)
     
     return (smoothed_x, smoothed_y)
 

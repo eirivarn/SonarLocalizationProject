@@ -77,22 +77,22 @@ class ConeGridSpec:
 IMAGE_PROCESSING_CONFIG: Dict = {
     
     # === BINARY CONVERSION (NEW: SIGNAL-STRENGTH INDEPENDENT) ===
-    'binary_threshold': 30,            # Threshold for converting frame to binary (0-255)
+    'binary_threshold': 1,            # Threshold for converting frame to binary (0-255)
                                         # Pixels > threshold become white (255), others black (0)
                                         # Makes pipeline completely signal-strength independent
                                         # Focus on structural patterns only
     
     # === ADAPTIVE LINEAR MERGING ===
 
-    'adaptive_base_radius':5,           # Base circular merging radius 
+    'adaptive_base_radius': 3,          # Base circular merging radius 
                                         # Starting radius for circular kernel before elongation
                                         # Larger values = more aggressive base merging
 
-    'adaptive_max_elongation': 3,        # Maximum elongation factor
+    'adaptive_max_elongation': 8,        # Maximum elongation factor
                                          # 1.0 = always circular, 4.0 = ellipse can be 4x longer than wide
                                          # Higher values = stronger linear feature enhancement
 
-    'adaptive_linearity_threshold': 0.5, # Minimum linearity to trigger elongation 
+    'adaptive_linearity_threshold': 1.0, # Minimum linearity to trigger elongation 
                                          # Lower values = more pixels get elliptical kernels (more sensitive)
                                          # Higher values = only very linear patterns get elongated (selective)
 
@@ -100,7 +100,7 @@ IMAGE_PROCESSING_CONFIG: Dict = {
                                          # Uses 20° increments for optimal speed/quality balance
                                          # More steps = better angle resolution but slower processing
 
-    'momentum_boost': 30.0,              # Enhancement strength multiplier 
+    'momentum_boost': 100.0,              # Enhancement strength multiplier 
                                          # Higher values = stronger directional feature enhancement
                                          # Lower values = more subtle enhancement, preserves original intensities
 
@@ -125,12 +125,12 @@ IMAGE_PROCESSING_CONFIG: Dict = {
     # Binary frames use direct edge operators for cleaner, faster edge detection
     
     # === CONTOUR FILTERING ===
-    'min_contour_area': 1000,            # Minimum contour area in pixels to be considered valid
+    'min_contour_area': 500,            # Minimum contour area in pixels to be considered valid
                                         # Filters out small noise artifacts and debris
                                         
     
     # === MORPHOLOGICAL POST-PROCESSING ===
-    'morph_close_kernel': 5,            # Kernel size for morphological closing (connects nearby edges)
+    'morph_close_kernel': 3,            # Kernel size for morphological closing (connects nearby edges)
                                         # 0 = no closing, 3-5 = light closing, >5 = aggressive closing
                                         # Helps connect broken parts of net structures
     
@@ -138,38 +138,39 @@ IMAGE_PROCESSING_CONFIG: Dict = {
     'max_distance_change_pixels': 5,   # Maximum allowed distance change between frames (pixels)
                                         # Prevents tracking jumps when contour detection fails
                                         # Large jumps often indicate false positives or tracking loss
-    'distance_change_smoothing': 0.05,   # Smoothing factor when distance change exceeds threshold
+    'distance_change_smoothing': 0.1,   # Smoothing factor when distance change exceeds threshold
                                         # 0.0 = reject change completely, 1.0 = accept change fully
                                         # Intermediate values blend new and previous distance
     
-    'edge_dilation_iterations': 0,      # Number of dilation iterations on final edges (0-3 typical)
+    'edge_dilation_iterations': 2,      # Number of dilation iterations on final edges (0-3 typical)
                                         # Makes detected edges slightly thicker for better contour detection
                                         # 0 = no dilation, 1 = thin edges, 2+ = thick edges
 }# Tracking and AOI configuration
 TRACKING_CONFIG: Dict = {
-    'aoi_boost_factor': 20.0,            # Reasonable boost for contours inside AOI
-    'aoi_expansion_pixels': 1,           # Expand AOI by this many pixels (was 2)
-    'ellipse_smoothing_alpha': 0.5,      # Ellipse temporal smoothing: 0.0=no smoothing (jittery), 0.8=very smooth, 1.0=no updates (frozen)
+    'aoi_boost_factor': 10.0,            # Reasonable boost for contours inside AOI
+    'aoi_expansion_pixels': 0,           # Expand AOI by this many pixels (was 2)
+    'ellipse_smoothing_alpha': 0.7,      # Ellipse temporal smoothing: 0.0=instant jump (no smoothing), 0.8=very smooth, 1.0=no updates (frozen)
                                          # Controls how much the ellipse parameters (size, orientation) change between frames
                                          # Higher values = smoother tracking but slower adaptation to real changes
                                          # Lower values = faster adaptation but jittery tracking
-    'ellipse_shape_smoothing_alpha': 0.25, # Shape resistance smoothing: very low value makes ellipse resist shape changes
-                                          # 0.0 = no resistance (snaps to new shape immediately)
-                                          # 1.0 = maximum resistance (shape never changes)
-                                          # 0.1 = gradual shape adaptation over many frames
+    'ellipse_shape_smoothing_alpha': 0.99, # Shape resistance smoothing: 0.0 = instant jump (no smoothing), 1.0 = maximum resistance (shape never changes)
+                                          # Higher values = smoother shape changes but slower adaptation
+                                          # Lower values = faster shape adaptation but more jittery
     'ellipse_max_movement_pixels': 5.0,  # Maximum pixels ellipse center can move per frame (was 4.0)
-    'max_frames_outside_aoi': 3,         # Max consecutive frames to allow best contour outside ellipse AOI
-    'ellipse_expansion_factor': 0.15,     # Factor to expand detected contour ellipse for AOI (was 0.2, now 0.1 = 10% expansion) (was 0.2)
-    'center_smoothing_alpha': 0.3,       # Smoothing factor for center tracking (was 0.2, lower = smoother)
+    'max_frames_outside_aoi': 5.0,         # Max consecutive frames to allow best contour outside ellipse AOI
+    'ellipse_expansion_factor': 0.1,     # Factor to expand detected contour ellipse for AOI (was 0.2, now 0.1 = 10% expansion) (was 0.2)
+    'center_smoothing_alpha': 0.25,       # Smoothing factor for center tracking: 0.0=instant jump (no smoothing), 1.0=no updates (frozen)
+                                         # Higher values = smoother center tracking but slower adaptation to movement
+                                         # Lower values = faster center adaptation but more jittery tracking
     'use_elliptical_aoi': True,          # Use elliptical AOI instead of rectangular
 }
 
 # Corridor AOI tuning (used by sonar_image_analysis)
 TRACKING_CONFIG.update({
-    'corridor_band_k': 0.5,          # Half-width of corridor as fraction of ellipse semi-minor (b)
+    'corridor_band_k': 0.75,          # Half-width of corridor as fraction of ellipse semi-minor (b)
     'corridor_length_px': None,       # Absolute corridor length in pixels (None -> uses length_factor*a)
     'corridor_length_factor': 1.25,   # Corridor length as multiple of ellipse semi-major (a)
-    'corridor_widen': 0.6,            # Widening factor (1.0 = rectangle; >1.0 = trapezoid)
+    'corridor_widen': 1.0,            # Widening factor (1.0 = rectangle; >1.0 = trapezoid)
     'corridor_both_directions': True, # Build corridors along ±major-axis
 })
 
