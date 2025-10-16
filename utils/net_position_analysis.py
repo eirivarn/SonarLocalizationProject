@@ -66,15 +66,37 @@ def load_navigation_data(target_bag: str, exports_folder: Optional[Path] = None)
     if exports_folder is None:
         exports_folder = Path(EXPORTS_DIR_DEFAULT)
 
-    nav_file = (exports_folder / EXPORTS_SUBDIRS.get('by_bag', 'by_bag') /
-                f"navigation_plane_approximation__{target_bag}_data.csv")
-
-    if not nav_file.exists():
-        raise FileNotFoundError(f"Navigation file not found: {nav_file}")
+    # Try multiple possible navigation file patterns
+    possible_patterns = [
+        f"sensor_navigation__{target_bag}.csv",
+        f"navigation_plane_approximation__{target_bag}_data.csv",
+        f"*navigation*{target_bag}*.csv"
+    ]
+    
+    by_bag_dir = exports_folder / EXPORTS_SUBDIRS.get('by_bag', 'by_bag')
+    
+    nav_file = None
+    for pattern in possible_patterns:
+        matching_files = list(by_bag_dir.glob(pattern))
+        if matching_files:
+            nav_file = matching_files[0]
+            break
+    
+    if nav_file is None:
+        raise FileNotFoundError(f"Navigation file not found for bag {target_bag} in {by_bag_dir}")
 
     print(f"Loading navigation data: {nav_file}")
     df = pd.read_csv(nav_file)
-    df['timestamp'] = pd.to_datetime(df['ts_utc'])
+    
+    # Handle different timestamp column names
+    if 'timestamp' in df.columns:
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+    elif 'ts_utc' in df.columns:
+        df['timestamp'] = pd.to_datetime(df['ts_utc'])
+    elif 't' in df.columns:
+        df['timestamp'] = pd.to_datetime(df['t'], unit='s', utc=True)
+    else:
+        raise ValueError("No recognized timestamp column found in navigation data")
 
     return df
 
@@ -91,13 +113,37 @@ def calculate_robot_to_net_position(net_analysis_df: pd.DataFrame,
     Returns:
         DataFrame with combined analysis
     """
+    # Create working copies
+    sonar_df = net_analysis_df.copy()
+    nav_df = navigation_df.copy()
+    
+    # Ensure both dataframes have proper timestamp columns
+    if 'timestamp' not in sonar_df.columns:
+        raise ValueError("Sonar dataframe missing 'timestamp' column")
+    if 'timestamp' not in nav_df.columns:
+        raise ValueError("Navigation dataframe missing 'timestamp' column")
+    
+    # Normalize timestamps to UTC and remove timezone info for merge compatibility
+    sonar_df['timestamp'] = pd.to_datetime(sonar_df['timestamp'], utc=True).dt.tz_localize(None)
+    nav_df['timestamp'] = pd.to_datetime(nav_df['timestamp'], utc=True).dt.tz_localize(None)
+    
+    # Sort both dataframes by timestamp
+    sonar_df = sonar_df.sort_values('timestamp').reset_index(drop=True)
+    nav_df = nav_df.sort_values('timestamp').reset_index(drop=True)
+    
+    print(f"Timestamp range - Sonar: {sonar_df['timestamp'].min()} to {sonar_df['timestamp'].max()}")
+    print(f"Timestamp range - Nav:   {nav_df['timestamp'].min()} to {nav_df['timestamp'].max()}")
+    
     # Merge dataframes on timestamp (find closest navigation data for each sonar frame)
     merged_df = pd.merge_asof(
-        net_analysis_df.sort_values('timestamp'),
-        navigation_df.sort_values('timestamp'),
+        sonar_df,
+        nav_df,
         on='timestamp',
-        direction='nearest'
+        direction='nearest',
+        suffixes=('_sonar', '_nav')
     )
+    
+    print(f"Merged {len(merged_df)} records from {len(sonar_df)} sonar and {len(nav_df)} nav records")
 
     # Calculate net position in world coordinates
     # Assuming sonar angle is relative to robot heading
@@ -106,17 +152,31 @@ def calculate_robot_to_net_position(net_analysis_df: pd.DataFrame,
     results = []
 
     for _, row in merged_df.iterrows():
-        if pd.isna(row.get('distance_meters', np.nan)) or pd.isna(row.get('angle_degrees', np.nan)):
+        # Check for valid detection and required navigation data
+        if not row.get('detection_success', False):
+            continue
+            
+        distance_m = row.get('distance_meters')
+        angle_deg = row.get('angle_degrees')
+        
+        if pd.isna(distance_m) or pd.isna(angle_deg):
             continue
 
         # Get robot position and orientation from navigation
-        robot_x = row.get('x', 0)  # Adjust column names based on your navigation data
-        robot_y = row.get('y', 0)
-        robot_heading = row.get('heading', 0)  # Robot heading in degrees
-
-        # Sonar detection relative to robot
-        distance_m = row['distance_meters']
-        angle_deg = row['angle_degrees']
+        # Handle different possible column names from DVL data
+        robot_x = row.get('NetX', row.get('x', row.get('X', 0)))
+        robot_y = row.get('NetY', row.get('y', row.get('Y', 0)))
+        robot_heading = row.get('NetHeading', row.get('heading', row.get('Heading', 0)))  # Robot heading in degrees
+        
+        # Convert to float to avoid issues
+        try:
+            robot_x = float(robot_x) if not pd.isna(robot_x) else 0.0
+            robot_y = float(robot_y) if not pd.isna(robot_y) else 0.0
+            robot_heading = float(robot_heading) if not pd.isna(robot_heading) else 0.0
+            distance_m = float(distance_m)
+            angle_deg = float(angle_deg)
+        except (ValueError, TypeError):
+            continue
 
         # Convert sonar angle to world coordinates
         # Assuming angle_deg is relative to sonar centerline
@@ -129,8 +189,8 @@ def calculate_robot_to_net_position(net_analysis_df: pd.DataFrame,
 
         results.append({
             'timestamp': row['timestamp'],
-            'frame_index': row['frame_index'],
-            'detection_success': row['detection_success'],
+            'frame_index': row.get('frame_index', 0),
+            'detection_success': True,
             'sonar_distance_m': distance_m,
             'sonar_angle_deg': angle_deg,
             'robot_x': robot_x,
@@ -140,6 +200,15 @@ def calculate_robot_to_net_position(net_analysis_df: pd.DataFrame,
             'net_y_world': net_y,
             'sonar_angle_world': sonar_angle_world
         })
+
+    if not results:
+        print("Warning: No valid position calculations could be performed")
+        # Return empty DataFrame with expected columns
+        return pd.DataFrame(columns=[
+            'timestamp', 'frame_index', 'detection_success', 'sonar_distance_m', 
+            'sonar_angle_deg', 'robot_x', 'robot_y', 'robot_heading', 
+            'net_x_world', 'net_y_world', 'sonar_angle_world'
+        ])
 
     return pd.DataFrame(results)
 
@@ -336,3 +405,337 @@ def run_net_position_analysis(target_bag: str,
         print(f"Results saved to: {results_file}")
 
     return combined_df, consistency_stats, fig
+
+
+def synchronize_sonar_dvl_frame_by_frame(df_sonar: pd.DataFrame, df_nav: pd.DataFrame, 
+                                        tolerance_seconds: float = 0.5,
+                                        apply_sonar_angle_correction: bool = True,
+                                        angle_correction_degrees: float = -180.0) -> pd.DataFrame:
+    """
+    Frame-by-frame synchronization of sonar and DVL data using exact video generation logic.
+    
+    Args:
+        df_sonar: Sonar analysis DataFrame with timestamp, distance_meters, angle_degrees
+        df_nav: Navigation DataFrame with timestamp, NetDistance, NetPitch
+        tolerance_seconds: Maximum time difference for synchronization
+        apply_sonar_angle_correction: Whether to apply angle correction to sonar data
+        angle_correction_degrees: Degrees to add to sonar angles for coordinate alignment
+        
+    Returns:
+        DataFrame with synchronized comparisons
+    """
+    # Prepare data exactly like video generation
+    sonar_data = df_sonar.copy()
+    nav_complete = df_nav.copy()
+    
+    # Convert timestamps to match video generation format
+    if 'timestamp' in sonar_data.columns:
+        sonar_data['ts_target'] = pd.to_datetime(sonar_data['timestamp'], utc=True, errors='coerce')
+    else:
+        raise ValueError("Sonar data missing timestamp column")
+    
+    nav_complete = nav_complete.sort_values("timestamp")
+    
+    position_comparisons = []
+    successful_syncs = 0
+    
+    print(f"Synchronizing {len(sonar_data)} sonar frames with DVL data...")
+    
+    # Process each sonar frame (same as video generation loop)
+    for idx, sonar_frame in sonar_data.iterrows():
+        if not sonar_frame.get('detection_success', False):
+            continue
+            
+        ts_target = sonar_frame['ts_target']
+        
+        # === DVL SYNCHRONIZATION (exact video generation logic) ===
+        if nav_complete is not None and len(nav_complete) > 0:
+            diffs = abs(nav_complete["timestamp"] - ts_target)
+            dvl_idx = diffs.idxmin()
+            min_dt = diffs.iloc[dvl_idx]
+            dvl_rec = nav_complete.loc[dvl_idx]
+            
+            if min_dt <= pd.Timedelta(f"{tolerance_seconds}s") and "NetDistance" in dvl_rec and pd.notna(dvl_rec["NetDistance"]):
+                # Extract DVL measurements (exact video generation method)
+                dvl_distance = float(dvl_rec["NetDistance"])
+                dvl_angle_deg = 0.0
+                
+                if "NetPitch" in dvl_rec and pd.notna(dvl_rec["NetPitch"]):
+                    dvl_angle_deg = float(np.degrees(dvl_rec["NetPitch"]))
+                
+                # Extract Sonar measurements with optional angle correction
+                sonar_distance = float(sonar_frame["distance_meters"])
+                sonar_angle_raw = float(sonar_frame["angle_degrees"])
+                
+                if apply_sonar_angle_correction:
+                    sonar_angle_deg = sonar_angle_raw + angle_correction_degrees
+                else:
+                    sonar_angle_deg = sonar_angle_raw
+                
+                # Calculate XY relative positions (same coordinate system as video)
+                # DVL: Direct distance and pitch angle
+                dvl_x = dvl_distance * np.sin(np.radians(dvl_angle_deg))
+                dvl_y = dvl_distance * np.cos(np.radians(dvl_angle_deg))
+                
+                # Sonar: Distance along center beam and corrected net orientation angle  
+                sonar_x = sonar_distance * np.sin(np.radians(sonar_angle_deg))
+                sonar_y = sonar_distance * np.cos(np.radians(sonar_angle_deg))
+                
+                # Store synchronized position comparison
+                position_comparisons.append({
+                    'timestamp': ts_target,
+                    'frame_index': sonar_frame.get('frame_index', idx),
+                    'sync_dt_seconds': min_dt.total_seconds(),
+                    # Distance measurements (validated by video)
+                    'dvl_distance_m': dvl_distance,
+                    'dvl_angle_deg': dvl_angle_deg,
+                    'sonar_distance_m': sonar_distance,
+                    'sonar_angle_raw': sonar_angle_raw,
+                    'sonar_angle_corrected': sonar_angle_deg,
+                    # XY relative positions
+                    'dvl_net_x': dvl_x,
+                    'dvl_net_y': dvl_y,
+                    'sonar_net_x': sonar_x,
+                    'sonar_net_y': sonar_y,
+                    # Position differences
+                    'position_diff_x': abs(sonar_x - dvl_x),
+                    'position_diff_y': abs(sonar_y - dvl_y),
+                    'position_diff_magnitude': np.sqrt((sonar_x - dvl_x)**2 + (sonar_y - dvl_y)**2)
+                })
+                successful_syncs += 1
+    
+    print(f"✓ Successfully synchronized {successful_syncs} frame pairs")
+    
+    if successful_syncs == 0:
+        print("Warning: No successful synchronizations found")
+        return pd.DataFrame()
+    
+    return pd.DataFrame(position_comparisons)
+
+
+def analyze_position_agreement(sync_df: pd.DataFrame, 
+                              distance_threshold_m: float = 0.5,
+                              xy_threshold_m: float = 0.5,
+                              total_threshold_m: float = 1.0) -> Dict:
+    """
+    Analyze position agreement between synchronized sonar and DVL measurements.
+    
+    Args:
+        sync_df: Synchronized DataFrame from synchronize_sonar_dvl_frame_by_frame
+        distance_threshold_m: Threshold for distance agreement
+        xy_threshold_m: Threshold for X/Y position agreement
+        total_threshold_m: Threshold for total position difference
+        
+    Returns:
+        Dictionary with agreement statistics
+    """
+    if len(sync_df) == 0:
+        return {'error': 'no_synchronized_data'}
+    
+    # Basic statistics
+    stats = {
+        'total_synchronized_frames': len(sync_df),
+        'mean_sync_time_diff_s': sync_df['sync_dt_seconds'].mean(),
+        'max_sync_time_diff_s': sync_df['sync_dt_seconds'].max(),
+    }
+    
+    # Angle correction statistics
+    stats.update({
+        'sonar_angle_raw_mean': sync_df['sonar_angle_raw'].mean(),
+        'sonar_angle_raw_std': sync_df['sonar_angle_raw'].std(),
+        'sonar_angle_corrected_mean': sync_df['sonar_angle_corrected'].mean(),
+        'sonar_angle_corrected_std': sync_df['sonar_angle_corrected'].std(),
+        'dvl_angle_mean': sync_df['dvl_angle_deg'].mean(),
+        'dvl_angle_std': sync_df['dvl_angle_deg'].std(),
+    })
+    
+    # Position comparison statistics
+    stats.update({
+        'dvl_net_x_mean': sync_df['dvl_net_x'].mean(),
+        'dvl_net_x_std': sync_df['dvl_net_x'].std(),
+        'dvl_net_y_mean': sync_df['dvl_net_y'].mean(),
+        'dvl_net_y_std': sync_df['dvl_net_y'].std(),
+        'sonar_net_x_mean': sync_df['sonar_net_x'].mean(),
+        'sonar_net_x_std': sync_df['sonar_net_x'].std(),
+        'sonar_net_y_mean': sync_df['sonar_net_y'].mean(),
+        'sonar_net_y_std': sync_df['sonar_net_y'].std(),
+    })
+    
+    # Position differences
+    stats.update({
+        'position_diff_x_mean': sync_df['position_diff_x'].mean(),
+        'position_diff_y_mean': sync_df['position_diff_y'].mean(),
+        'position_diff_magnitude_mean': sync_df['position_diff_magnitude'].mean(),
+        'position_diff_magnitude_max': sync_df['position_diff_magnitude'].max(),
+    })
+    
+    # Agreement analysis
+    good_x_matches = (sync_df['position_diff_x'] < xy_threshold_m).sum()
+    good_y_matches = (sync_df['position_diff_y'] < xy_threshold_m).sum()
+    good_total_matches = (sync_df['position_diff_magnitude'] < total_threshold_m).sum()
+    
+    stats.update({
+        'x_agreement_count': good_x_matches,
+        'x_agreement_percent': (good_x_matches / len(sync_df)) * 100,
+        'y_agreement_count': good_y_matches,
+        'y_agreement_percent': (good_y_matches / len(sync_df)) * 100,
+        'total_agreement_count': good_total_matches,
+        'total_agreement_percent': (good_total_matches / len(sync_df)) * 100,
+    })
+    
+    return stats
+
+
+def create_xy_position_comparison_plot(sync_df: pd.DataFrame, title: str = None) -> go.Figure:
+    """
+    Create XY position comparison visualization using Plotly.
+    
+    Args:
+        sync_df: Synchronized DataFrame from synchronize_sonar_dvl_frame_by_frame
+        title: Optional plot title
+        
+    Returns:
+        Plotly figure object
+    """
+    if len(sync_df) == 0:
+        # Create empty figure
+        fig = go.Figure()
+        fig.add_annotation(text="No synchronized data available",
+                          xref="paper", yref="paper",
+                          x=0.5, y=0.5, showarrow=False)
+        return fig
+    
+    from plotly.subplots import make_subplots
+    
+    # Create time series for plotting
+    time_seconds = np.arange(len(sync_df))  # Use frame sequence as time
+    
+    fig = make_subplots(
+        rows=2, cols=1,
+        subplot_titles=("X Position Over Time", "Y Position Over Time"),
+        shared_xaxes=True
+    )
+    
+    # X Position vs Time
+    fig.add_trace(
+        go.Scatter(x=time_seconds, y=sync_df['sonar_net_x'],
+                  mode='lines+markers', name='Sonar X', 
+                  line=dict(color='red', width=2), marker=dict(size=4)),
+        row=1, col=1
+    )
+    fig.add_trace(
+        go.Scatter(x=time_seconds, y=sync_df['dvl_net_x'],
+                  mode='lines+markers', name='DVL X', 
+                  line=dict(color='blue', width=2), marker=dict(size=4)),
+        row=1, col=1
+    )
+    
+    # Y Position vs Time
+    fig.add_trace(
+        go.Scatter(x=time_seconds, y=sync_df['sonar_net_y'],
+                  mode='lines+markers', name='Sonar Y', 
+                  line=dict(color='orange', width=2), marker=dict(size=4)),
+        row=2, col=1
+    )
+    fig.add_trace(
+        go.Scatter(x=time_seconds, y=sync_df['dvl_net_y'],
+                  mode='lines+markers', name='DVL Y', 
+                  line=dict(color='green', width=2), marker=dict(size=4)),
+        row=2, col=1
+    )
+    
+    # Update layout
+    default_title = "Sonar vs DVL Net Position Comparison (Frame-by-Frame Synchronized)"
+    fig.update_layout(
+        title=title or default_title,
+        height=700,
+        hovermode='x unified',
+        showlegend=True
+    )
+    
+    # Update axes labels
+    fig.update_xaxes(title_text="Time (frame sequence)", row=2, col=1)
+    fig.update_yaxes(title_text="X Position (m)", row=1, col=1)
+    fig.update_yaxes(title_text="Y Position (m)", row=2, col=1)
+    
+    return fig
+
+
+def run_complete_position_comparison(df_sonar: pd.DataFrame, df_nav: pd.DataFrame,
+                                   target_bag: str = None,
+                                   tolerance_seconds: float = 0.5,
+                                   save_results: bool = True,
+                                   exports_folder: Optional[Path] = None) -> Tuple[pd.DataFrame, Dict, go.Figure]:
+    """
+    Complete pipeline for sonar vs DVL position comparison.
+    
+    Args:
+        df_sonar: Sonar analysis DataFrame
+        df_nav: Navigation DataFrame
+        target_bag: Target bag identifier for saving
+        tolerance_seconds: Synchronization tolerance
+        save_results: Whether to save results to files
+        exports_folder: Output folder for results
+        
+    Returns:
+        Tuple of (synchronized_data, statistics, figure)
+    """
+    print("=== COMPLETE POSITION COMPARISON PIPELINE ===")
+    
+    # Step 1: Frame-by-frame synchronization
+    sync_df = synchronize_sonar_dvl_frame_by_frame(
+        df_sonar, df_nav, 
+        tolerance_seconds=tolerance_seconds,
+        apply_sonar_angle_correction=True,
+        angle_correction_degrees=-180.0  # Subtract 180 degrees
+    )
+    
+    if len(sync_df) == 0:
+        print("No synchronized data - cannot proceed with analysis")
+        return pd.DataFrame(), {'error': 'no_sync_data'}, go.Figure()
+    
+    # Step 2: Analyze agreement
+    stats = analyze_position_agreement(sync_df)
+    
+    # Step 3: Create visualization
+    fig = create_xy_position_comparison_plot(sync_df)
+    
+    # Step 4: Print summary
+    print(f"\n=== POSITION COMPARISON RESULTS ===")
+    print(f"Synchronized frames: {stats['total_synchronized_frames']}")
+    print(f"Mean sync tolerance: {stats['mean_sync_time_diff_s']:.3f}s")
+    print(f"\nANGLE CORRECTION:")
+    print(f"  Raw sonar angles:      {stats['sonar_angle_raw_mean']:.1f} ± {stats['sonar_angle_raw_std']:.1f}°")
+    print(f"  Corrected sonar angles: {stats['sonar_angle_corrected_mean']:.1f} ± {stats['sonar_angle_corrected_std']:.1f}°")
+    print(f"  DVL angles:            {stats['dvl_angle_mean']:.1f} ± {stats['dvl_angle_std']:.1f}°")
+    print(f"\nPOSITION COMPARISON:")
+    print(f"  DVL net position X:    {stats['dvl_net_x_mean']:.3f} ± {stats['dvl_net_x_std']:.3f} m")
+    print(f"  DVL net position Y:    {stats['dvl_net_y_mean']:.3f} ± {stats['dvl_net_y_std']:.3f} m") 
+    print(f"  Sonar net position X:  {stats['sonar_net_x_mean']:.3f} ± {stats['sonar_net_x_std']:.3f} m")
+    print(f"  Sonar net position Y:  {stats['sonar_net_y_mean']:.3f} ± {stats['sonar_net_y_std']:.3f} m")
+    print(f"\nPOSITION AGREEMENT:")
+    print(f"  X position agreement (<0.5m):     {stats['x_agreement_count']}/{stats['total_synchronized_frames']} ({stats['x_agreement_percent']:.1f}%)")
+    print(f"  Y position agreement (<0.5m):     {stats['y_agreement_count']}/{stats['total_synchronized_frames']} ({stats['y_agreement_percent']:.1f}%)")
+    print(f"  Total position agreement (<1.0m):  {stats['total_agreement_count']}/{stats['total_synchronized_frames']} ({stats['total_agreement_percent']:.1f}%)")
+    
+    # Step 5: Save results
+    if save_results and exports_folder and target_bag:
+        outputs_dir = exports_folder / EXPORTS_SUBDIRS.get('outputs', 'outputs')
+        outputs_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Save synchronized data
+        sync_file = outputs_dir / f"{target_bag}_position_comparison_sync.csv"
+        sync_df.to_csv(sync_file, index=False)
+        print(f"✓ Synchronized data saved to: {sync_file}")
+        
+        # Save statistics
+        stats_file = outputs_dir / f"{target_bag}_position_comparison_stats.json"
+        import json
+        with open(stats_file, 'w') as f:
+            # Convert numpy types for JSON serialization
+            json_stats = {k: float(v) if isinstance(v, (np.floating, np.integer)) else v
+                         for k, v in stats.items()}
+            json.dump(json_stats, f, indent=2)
+        print(f"✓ Statistics saved to: {stats_file}")
+    
+    return sync_df, stats, fig

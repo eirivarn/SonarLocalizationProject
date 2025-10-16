@@ -1542,8 +1542,8 @@ class DistanceAnalysisEngine:
         self.processor = processor or SonarDataProcessor()
         
     def analyze_npz_sequence(self, npz_file_index: int = 0, frame_start: int = 0,
-                           frame_count: Optional[int] = None, frame_step: int = 1,
-                           npz_dir: str = None, save_outputs: bool = False) -> pd.DataFrame:
+                       frame_count: Optional[int] = None, frame_step: int = 1,
+                       npz_dir: str = None, save_outputs: bool = False) -> pd.DataFrame:
         """Analyze distance over time from NPZ file.
         
         Args:
@@ -1614,7 +1614,7 @@ class DistanceAnalysisEngine:
             # Save to CSV
             df.to_csv(csv_path, index=False)
             print(f"Analysis results saved to: {csv_path}")
-        
+    
         return df
     
     def analyze_sonar_csv(self, target_bag: str, exports_folder: Path,
@@ -2010,6 +2010,266 @@ class ComparisonEngine:
         
         return fig
 
+    @staticmethod
+    def extract_sonar_net_position(distance_results: pd.DataFrame, 
+                                   sonar_coverage_m: float = 5.0,
+                                   sonar_image_size: int = 700) -> pd.DataFrame:
+        """Extract XY net position from sonar distance and angle measurements.
+        
+        Converts distance (along center beam) and angle to XY coordinates in DVL frame.
+        
+        Args:
+            distance_results: DataFrame from sonar analysis with 'distance_meters' and 'angle_degrees'
+            sonar_coverage_m: Sonar coverage range in meters
+            sonar_image_size: Height of sonar image in pixels
+            
+        Returns:
+            DataFrame with columns: frame_index, synthetic_time, net_x, net_y, distance_m, angle_deg
+        """
+        sonar_pos = distance_results.copy()
+        
+        # Ensure distance is in meters
+        if 'distance_meters' not in sonar_pos.columns or sonar_pos['distance_meters'].isna().all():
+            if 'distance_pixels' in sonar_pos.columns:
+                ppm = sonar_image_size / sonar_coverage_m
+                sonar_pos['distance_meters'] = sonar_pos['distance_pixels'] / ppm
+            else:
+                return None, {'error': 'no_distance_data'}
+        
+        # Filter valid detections only
+        sonar_pos = sonar_pos[sonar_pos['detection_success']].copy()
+        
+        # Apply 180-degree correction to angle (same as notebook 08)
+        sonar_pos['angle_corrected'] = sonar_pos['angle_degrees'] - 180.0
+        
+        # Convert corrected angle to radians
+        sonar_pos['angle_rad'] = np.radians(sonar_pos['angle_corrected'])
+        
+        # Extract XY position relative to sonar using corrected angles
+        # Assuming sonar frame: X = right (positive), Y = down (positive)
+        # Standard DVL frame: X = forward, Y = starboard (right)
+        sonar_pos['net_x'] = sonar_pos['distance_meters'] * np.sin(sonar_pos['angle_rad'])
+        sonar_pos['net_y'] = sonar_pos['distance_meters'] * np.cos(sonar_pos['angle_rad'])
+        
+        # Keep relevant columns
+        result = sonar_pos[['frame_index', 'distance_meters', 'angle_corrected', 'net_x', 'net_y']].copy()
+        result.columns = ['frame_index', 'distance_m', 'angle_deg', 'net_x', 'net_y']
+        
+        return result
+    
+    @staticmethod
+    def extract_dvl_net_position(nav: pd.DataFrame) -> pd.DataFrame:
+        """Extract DVL net position with relative time.
+        
+        Args:
+            nav: Navigation DataFrame with timestamp and position columns
+            
+        Returns:
+            DataFrame with columns: relative_time, dvl_x, dvl_y, dvl_z, pitch_rad, roll_rad
+        """
+        dvl_pos = nav.copy()
+        dvl_pos['relative_time'] = (pd.to_datetime(dvl_pos['timestamp'], errors='coerce') - 
+                                    pd.to_datetime(dvl_pos['timestamp'], errors='coerce').min()).dt.total_seconds()
+        
+        # Extract position (assuming DVL has Easting/Northing or X/Y columns)
+        pos_cols = [c for c in dvl_pos.columns if c.lower() in ['x', 'y', 'z', 'easting', 'northing', 'depth']]
+        
+        # Handle different column naming conventions
+        if 'Easting' in dvl_pos.columns and 'Northing' in dvl_pos.columns:
+            dvl_pos['dvl_x'] = dvl_pos['Easting']
+            dvl_pos['dvl_y'] = dvl_pos['Northing']
+        elif 'X' in dvl_pos.columns and 'Y' in dvl_pos.columns:
+            dvl_pos['dvl_x'] = dvl_pos['X']
+            dvl_pos['dvl_y'] = dvl_pos['Y']
+        elif 'NetX' in dvl_pos.columns and 'NetY' in dvl_pos.columns:
+            dvl_pos['dvl_x'] = dvl_pos['NetX']
+            dvl_pos['dvl_y'] = dvl_pos['NetY']
+        else:
+            # Default: use first two numeric columns after timestamp
+            numeric_cols = dvl_pos.select_dtypes(include=[np.number]).columns.tolist()
+            if len(numeric_cols) >= 2:
+                dvl_pos['dvl_x'] = dvl_pos[numeric_cols[0]]
+                dvl_pos['dvl_y'] = dvl_pos[numeric_cols[1]]
+            else:
+                raise ValueError("Cannot identify X/Y position columns in DVL data")
+        
+        # Extract attitude angles
+        if 'NetPitch' in dvl_pos.columns:
+            dvl_pos['pitch_rad'] = dvl_pos['NetPitch']
+        else:
+            dvl_pos['pitch_rad'] = 0.0
+            
+        if 'NetRoll' in dvl_pos.columns:
+            dvl_pos['roll_rad'] = dvl_pos['NetRoll']
+        else:
+            dvl_pos['roll_rad'] = 0.0
+        
+        result = dvl_pos[['relative_time', 'dvl_x', 'dvl_y', 'pitch_rad', 'roll_rad']].copy()
+        return result
+    
+    @staticmethod
+    def compare_sonar_vs_dvl_position(distance_results: pd.DataFrame, 
+                                     raw_data: Dict[str, pd.DataFrame],
+                                     sonar_coverage_m: float = 5.0,
+                                     sonar_image_size: int = 700,
+                                     use_plotly: bool = True) -> Tuple[object, Dict]:
+        """Compare sonar vs DVL net relative position (XY coordinates).
+        
+        This method synchronizes sonar distance+angle measurements with DVL position
+        using the same time-linear synchronization as compare_sonar_vs_dvl.
+        
+        Args:
+            distance_results: DataFrame from sonar analysis
+            raw_data: Dict with 'navigation' key containing DVL DataFrame
+            sonar_coverage_m: Sonar coverage range in meters
+            sonar_image_size: Height of sonar image in pixels
+            use_plotly: Use interactive Plotly visualization
+            
+        Returns:
+            Tuple of (figure, statistics_dict)
+        """
+        # Validate inputs
+        if raw_data is None or 'navigation' not in raw_data or raw_data['navigation'] is None:
+            return None, {'error': 'no_navigation_data'}
+        if distance_results is None:
+            return None, {'error': 'no_distance_results'}
+        
+        print("=== SONAR vs DVL POSITION COMPARISON ===")
+        
+        # Extract positions
+        sonar_pos = ComparisonEngine.extract_sonar_net_position(distance_results, sonar_coverage_m, sonar_image_size)
+        dvl_pos = ComparisonEngine.extract_dvl_net_position(raw_data['navigation'])
+        
+        if len(sonar_pos) == 0:
+            return None, {'error': 'no_valid_sonar_detections'}
+        if len(dvl_pos) == 0:
+            return None, {'error': 'no_navigation_data'}
+        
+        # Time synchronization (same method as compare_sonar_vs_dvl)
+        dvl_duration = float(dvl_pos['relative_time'].max() - dvl_pos['relative_time'].min())
+        if dvl_duration <= 0:
+            dvl_duration = 1.0
+        
+        N = max(1, len(sonar_pos) - 1)
+        sonar_pos['synthetic_time'] = (sonar_pos['frame_index'] / float(N)) * dvl_duration
+        dvl_pos['synthetic_time'] = dvl_pos['relative_time']
+        
+        # Calculate statistics
+        stats = {
+            'sonar_frames': len(sonar_pos),
+            'dvl_records': len(dvl_pos),
+            'sonar_duration_s': float(sonar_pos['synthetic_time'].max()),
+            'dvl_duration_s': dvl_duration,
+            'sonar_mean_distance_m': float(sonar_pos['distance_m'].mean()),
+            'sonar_mean_angle_deg': float(sonar_pos['angle_deg'].mean()),
+            'sonar_mean_x': float(sonar_pos['net_x'].mean()),
+            'sonar_mean_y': float(sonar_pos['net_y'].mean()),
+            'dvl_mean_x': float(dvl_pos['dvl_x'].mean()),
+            'dvl_mean_y': float(dvl_pos['dvl_y'].mean()),
+        }
+        
+        # Print summary
+        print(f"Sonar detections: {stats['sonar_frames']} frames")
+        print(f"DVL records: {stats['dvl_records']} records")
+        print(f"\nSONAR net position (mean):")
+        print(f"  X (right):  {stats['sonar_mean_x']:+.3f} m")
+        print(f"  Y (down):   {stats['sonar_mean_y']:+.3f} m")
+        print(f"  Distance:   {stats['sonar_mean_distance_m']:.3f} m")
+        print(f"  Angle:      {stats['sonar_mean_angle_deg']:.1f}°")
+        print(f"\nDVL net position (mean):")
+        print(f"  X:          {stats['dvl_mean_x']:+.3f} m")
+        print(f"  Y:          {stats['dvl_mean_y']:+.3f} m")
+        
+        # Create visualization
+        if use_plotly:
+            try:
+                fig = ComparisonEngine._create_position_comparison_plot(sonar_pos, dvl_pos)
+            except ImportError:
+                print("Error: Plotly not available. Please install plotly: pip install plotly")
+                return None, stats
+        else:
+            print("Error: Only Plotly visualization supported. Set use_plotly=True")
+            return None, stats
+        
+        return fig, stats
+    
+    @staticmethod
+    def _create_position_comparison_plot(sonar_pos: pd.DataFrame, dvl_pos: pd.DataFrame) -> object:
+        """Create interactive Plotly position comparison visualization."""
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+        
+        fig = make_subplots(
+            rows=2, cols=2,
+            subplot_titles=("XY Trajectory Overlay", "X Position vs Time", 
+                           "Y Position vs Time", "Distance vs Time"),
+            specs=[[{'type':'scatter'}, {'type':'scatter'}],
+                   [{'type':'scatter'}, {'type':'scatter'}]]
+        )
+        
+        # XY trajectory overlay
+        fig.add_trace(
+            go.Scatter(x=sonar_pos['net_x'], y=sonar_pos['net_y'], 
+                      mode='lines+markers', name='Sonar XY',
+                      line=dict(color='red', width=2)),
+            row=1, col=1
+        )
+        fig.add_trace(
+            go.Scatter(x=dvl_pos['dvl_x'], y=dvl_pos['dvl_y'],
+                      mode='lines+markers', name='DVL XY',
+                      line=dict(color='blue', width=2)),
+            row=1, col=1
+        )
+        
+        # X position vs time
+        fig.add_trace(
+            go.Scatter(x=sonar_pos['synthetic_time'], y=sonar_pos['net_x'],
+                      mode='lines', name='Sonar X', line=dict(color='red')),
+            row=1, col=2
+        )
+        fig.add_trace(
+            go.Scatter(x=dvl_pos['synthetic_time'], y=dvl_pos['dvl_x'],
+                      mode='lines', name='DVL X', line=dict(color='blue')),
+            row=1, col=2
+        )
+        
+        # Y position vs time
+        fig.add_trace(
+            go.Scatter(x=sonar_pos['synthetic_time'], y=sonar_pos['net_y'],
+                      mode='lines', name='Sonar Y', line=dict(color='orange')),
+            row=2, col=1
+        )
+        fig.add_trace(
+            go.Scatter(x=dvl_pos['synthetic_time'], y=dvl_pos['dvl_y'],
+                      mode='lines', name='DVL Y', line=dict(color='green')),
+            row=2, col=1
+        )
+        
+        # Distance vs time
+        fig.add_trace(
+            go.Scatter(x=sonar_pos['synthetic_time'], y=sonar_pos['distance_m'],
+                      mode='lines', name='Sonar Distance', line=dict(color='purple')),
+            row=2, col=2
+        )
+        
+        fig.update_xaxes(title_text="X Position (m)", row=1, col=1)
+        fig.update_yaxes(title_text="Y Position (m)", row=1, col=1)
+        fig.update_xaxes(title_text="Time (s)", row=1, col=2)
+        fig.update_yaxes(title_text="X Position (m)", row=1, col=2)
+        fig.update_xaxes(title_text="Time (s)", row=2, col=1)
+        fig.update_yaxes(title_text="Y Position (m)", row=2, col=1)
+        fig.update_xaxes(title_text="Time (s)", row=2, col=2)
+        fig.update_yaxes(title_text="Distance (m)", row=2, col=2)
+        
+        fig.update_layout(
+            title="Sonar vs DVL Net Position Comparison",
+            height=900,
+            hovermode='x unified',
+            showlegend=True
+        )
+        
+        return fig
+
 # ============================ Frame export & video ============================
 
 def pick_and_save_frame(npz_file_index: int = 0, frame_position: str | float = 'middle',
@@ -2375,7 +2635,7 @@ def contour_overlap_with_aoi(contour: np.ndarray, aoi, min_overlap_percent: floa
     mask = aoi['mask']
     if mask is None:
         return False
-    
+
     # Count how many contour points are inside the AOI mask
     inside_count = 0
     total_points = len(contour)
