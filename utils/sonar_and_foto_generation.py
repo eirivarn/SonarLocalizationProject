@@ -80,11 +80,14 @@ def export_optimized_sonar_video(
     NET_PITCH_TOLERANCE: float = 0.3,     # seconds
     # --- sonar analysis overlay (optional) ---
     SONAR_RESULTS: pd.DataFrame | None = None,  # DataFrame with sonar analysis results
+    # --- FFT net position overlay (optional) ---
+    FFT_NET_DATA: pd.DataFrame | None = None,  # DataFrame with FFT net position data
 ):
     """
     Optimized sonar + (optional) net-line overlay + (optional) sonar analysis overlay.
     If VIDEO_SEQ_DIR is given, the output includes the actual camera frame (side-by-side).
     If SONAR_RESULTS is provided, displays both DVL and sonar analysis distances.
+    If FFT_NET_DATA is provided, displays FFT net position overlay.
 
     Output is saved under EXPORTS_FOLDER / 'videos' with an 'optimized_sync' name.
     """
