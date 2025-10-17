@@ -82,24 +82,22 @@ def export_optimized_sonar_video(
     SONAR_RESULTS: pd.DataFrame | None = None,  # DataFrame with sonar analysis results
     # --- FFT net position overlay (optional) ---
     FFT_NET_DATA: pd.DataFrame | None = None,  # DataFrame with FFT net position data
+    # --- NEW: DVL data and sync parameters ---
+    DVL_NAV_DATA: pd.DataFrame | None = None,  # DataFrame with DVL navigation data
+    SYNC_WINDOW_SECONDS: float = 0.1,  # Time window for synchronization
 ):
     """
     Optimized sonar + (optional) net-line overlay + (optional) sonar analysis overlay.
     If VIDEO_SEQ_DIR is given, the output includes the actual camera frame (side-by-side).
     If SONAR_RESULTS is provided, displays both DVL and sonar analysis distances.
-    If FFT_NET_DATA is provided, displays FFT net position overlay.
+    If FFT_NET_DATA is provided, displays FFT net position overlay in cyan.
 
     Output is saved under EXPORTS_FOLDER / 'videos' with an 'optimized_sync' name.
     """
     import time
     import matplotlib.cm as cm
 
-    # expected helpers in this module:
-    #  - load_df, get_sonoptix_frame, apply_flips, enhance_intensity
-    #  - cone_raster_like_display_cell, read_video_index
-    #  - load_png_bgr, to_local, put_text, ts_for_name
-
-    print("OPTIMIZED SONAR VIDEO")
+    print("OPTIMIZED SONAR VIDEO WITH THREE-SYSTEM SYNCHRONIZATION")
     print("=" * 70)
     print(f"Target Bag: {TARGET_BAG}")
     print(f"   Cone Size: {CONE_W}x{CONE_H}")
@@ -128,6 +126,7 @@ def export_optimized_sonar_video(
     print(f"Net-line: {'enabled' if INCLUDE_NET else 'disabled'}"
           + (f" (dist tol={NET_DISTANCE_TOLERANCE}s, pitch tol={NET_PITCH_TOLERANCE}s)" if INCLUDE_NET else ""))
     print(f"Sonar Analysis: {'enabled' if SONAR_RESULTS is not None else 'disabled'}")
+    print(f"FFT Data: {'enabled' if FFT_NET_DATA is not None else 'disabled'}")
 
     # --- Resolve exports folder and load sonar timestamps/frames ---
     exports_root = Path(EXPORTS_FOLDER) if EXPORTS_FOLDER is not None else Path(EXPORTS_DIR_DEFAULT)
@@ -146,9 +145,83 @@ def export_optimized_sonar_video(
         df["ts_utc"] = pd.to_datetime(df["t"], unit="s", utc=True, errors="coerce")
     print(f"Loaded {len(df)} sonar frames in {time.time()-t0:.2f}s")
 
-    # --- Optional: load navigation (NetDistance/NetPitch) ---
-    nav_complete = None
-    if INCLUDE_NET:
+    # --- STEP 1: Load and synchronize all three systems using comparison analysis approach ---
+    
+    # Load DVL data if not provided explicitly (same method as comparison analysis)
+    if DVL_NAV_DATA is None and INCLUDE_NET:
+        try:
+            # Use same loading method as comparison analysis
+            import utils.net_distance_analysis as sda
+            BY_BAG_FOLDER = exports_root / EXPORTS_SUBDIRS.get('by_bag', 'by_bag')
+            raw_data, _ = sda.load_all_distance_data_for_bag(TARGET_BAG, BY_BAG_FOLDER)
+            
+            dvl_data = raw_data.get('navigation', None)
+            if dvl_data is not None:
+                # Ensure proper timestamp format
+                if 'timestamp' not in dvl_data.columns and 'ts_utc' in dvl_data.columns:
+                    dvl_data = dvl_data.copy()
+                    dvl_data['timestamp'] = pd.to_datetime(dvl_data['ts_utc'])
+                elif 'timestamp' in dvl_data.columns:
+                    dvl_data['timestamp'] = pd.to_datetime(dvl_data['timestamp'])
+                DVL_NAV_DATA = dvl_data
+                print(f"   Auto-loaded DVL data: {len(DVL_NAV_DATA)} records")
+            else:
+                print("   No DVL navigation data found")
+        except Exception as e:
+            print(f"   DVL loading error: {e}")
+            DVL_NAV_DATA = None
+
+    # Synchronize all timestamps to sonar reference (same as comparison analysis)
+    if df is not None and len(df) > 0:
+        # Use first sonar frame as reference time
+        reference_time = pd.to_datetime(df.iloc[0]["ts_utc"], utc=True, errors="coerce")
+        
+        # Synchronize FFT data
+        if FFT_NET_DATA is not None:
+            fft_sync = FFT_NET_DATA.copy()
+            if 'timestamp' in fft_sync.columns:
+                fft_relative_seconds = pd.to_numeric(fft_sync['timestamp'], errors='coerce')
+                
+                # Check if timestamps are relative (small values) or absolute
+                if fft_relative_seconds.max() < 86400:  # Less than 1 day in seconds = relative
+                    fft_sync['timestamp'] = reference_time + pd.to_timedelta(fft_relative_seconds, unit='s')
+                    print(f"   Applied relative timestamp conversion for FFT data")
+                else:
+                    fft_sync['timestamp'] = pd.to_datetime(fft_sync['timestamp'])
+                    print(f"   Used absolute timestamps for FFT data")
+            FFT_NET_DATA = fft_sync
+        
+        # Synchronize DVL data  
+        if DVL_NAV_DATA is not None:
+            dvl_sync = DVL_NAV_DATA.copy()
+            if 'timestamp' not in dvl_sync.columns and 'ts_utc' in dvl_sync.columns:
+                dvl_sync['timestamp'] = pd.to_datetime(dvl_sync['ts_utc'])
+            elif 'timestamp' in dvl_sync.columns:
+                dvl_sync['timestamp'] = pd.to_datetime(dvl_sync['timestamp'])
+            DVL_NAV_DATA = dvl_sync
+
+        # Verify time overlap between systems
+        if DVL_NAV_DATA is not None or FFT_NET_DATA is not None:
+            sonar_time_range = (pd.to_datetime(df["ts_utc"]).min(), pd.to_datetime(df["ts_utc"]).max())
+            print(f"   Time Range Verification:")
+            print(f"     Sonar: {sonar_time_range[0]} to {sonar_time_range[1]}")
+            
+            if DVL_NAV_DATA is not None:
+                dvl_time_range = (DVL_NAV_DATA['timestamp'].min(), DVL_NAV_DATA['timestamp'].max())
+                print(f"     DVL:   {dvl_time_range[0]} to {dvl_time_range[1]}")
+            
+            if FFT_NET_DATA is not None:
+                fft_time_range = (FFT_NET_DATA['timestamp'].min(), FFT_NET_DATA['timestamp'].max())
+                print(f"     FFT:   {fft_time_range[0]} to {fft_time_range[1]}")
+
+    # --- Optional: load navigation (NetDistance/NetPitch) - use synchronized DVL data ---
+    nav_complete = DVL_NAV_DATA
+    if nav_complete is not None:
+        print(f"   Using synchronized DVL data: {len(nav_complete)} records")
+        avail = [c for c in ["NetDistance", "NetPitch", "timestamp"] if c in nav_complete.columns]
+        print(f"      Available: {avail}")
+    elif INCLUDE_NET:
+        # Fallback to original loading method
         nav_file = exports_root / EXPORTS_SUBDIRS.get('by_bag', 'by_bag') / f"navigation_plane_approximation__{TARGET_BAG}_data.csv"
         if nav_file.exists():
             t0 = time.time()
@@ -215,7 +288,7 @@ def export_optimized_sonar_video(
     grid_blue = (255, 150, 50)
     vehicle_center = (CONE_W // 2, CONE_H - 1)
 
-    # --- frame creation (optimized logic) ---
+    # --- frame creation (optimized logic with FFT support) ---
     def make_cone_frame(frame_idx: int) -> np.ndarray | None:
         try:
             # sonar frame
@@ -244,21 +317,32 @@ def export_optimized_sonar_video(
             cone_rgb = (cmap(np.ma.masked_invalid(cone))[:, :, :3] * 255).astype(np.uint8)
             cone_bgr = cv2.cvtColor(cone_rgb, cv2.COLOR_RGB2BGR)
 
-            # --- optional net-line overlay (optimized sync) ---
+            # --- optional net-line overlay (optimized sync with FFT support) ---
             status_text = None
             line_color = (128, 128, 128)
-            if INCLUDE_NET or SONAR_RESULTS is not None:
+            if INCLUDE_NET or SONAR_RESULTS is not None or FFT_NET_DATA is not None:
                 net_angle_deg = 0.0
                 net_distance = None
                 sonar_distance_m = None
+                fft_distance_m = None
+                fft_pitch_deg = None
                 sync_status = "NO_DATA"
 
+                # CRITICAL FIX: Use timezone-naive timestamps consistently
                 ts_target = pd.to_datetime(df.loc[frame_idx, "ts_utc"], utc=True, errors="coerce")
+                # Convert to timezone-naive if it's timezone-aware
+                if hasattr(ts_target, 'tz') and ts_target.tz is not None:
+                    ts_target = ts_target.tz_localize(None)
 
                 # --- DVL Navigation Data ---
                 if INCLUDE_NET:
                     if nav_complete is not None and len(nav_complete) > 0:
-                        diffs = abs(nav_complete["timestamp"] - ts_target)
+                        # Ensure nav_complete timestamps are timezone-naive
+                        nav_timestamps = nav_complete["timestamp"]
+                        if nav_timestamps.dt.tz is not None:
+                            nav_timestamps = nav_timestamps.dt.tz_localize(None)
+                        
+                        diffs = abs(nav_timestamps - ts_target)
                         idx = diffs.idxmin()
                         min_dt = diffs.iloc[idx]
                         rec = nav_complete.loc[idx]
@@ -279,7 +363,7 @@ def export_optimized_sonar_video(
                                 # Find closest record with valid pitch
                                 pitch_candidates = nav_complete[nav_complete["NetPitch"].notna()]
                                 if len(pitch_candidates) > 0:
-                                    pitch_diffs = abs(pitch_candidates["timestamp"] - ts_target)
+                                    pitch_diffs = abs(nav_timestamps[pitch_candidates.index] - ts_target)
                                     pitch_idx = pitch_diffs.idxmin()
                                     pitch_min_dt = pitch_diffs.iloc[pitch_idx]
 
@@ -287,20 +371,52 @@ def export_optimized_sonar_video(
                                         pitch_rec = pitch_candidates.loc[pitch_idx]
                                         net_angle_deg = float(np.degrees(pitch_rec["NetPitch"]))
                                         sync_status = "DISTANCE_OK_WITH_PITCH"
-                                    else:
-                                        pass
-                                else:
-                                    pass
-                            else:
-                                pass
 
-                        pass
-                    else:
-                        sync_status = "NO_NAV_DATA"
+                # --- FFT Data Synchronization with Unit Conversion ---
+                if FFT_NET_DATA is not None and len(FFT_NET_DATA) > 0:
+                    try:
+                        # Ensure FFT timestamps are timezone-naive
+                        fft_timestamps = FFT_NET_DATA["timestamp"]
+                        if hasattr(fft_timestamps.iloc[0], 'tz') and fft_timestamps.dt.tz is not None:
+                            fft_timestamps = fft_timestamps.dt.tz_localize(None)
+                        
+                        # Find closest FFT measurement within tolerance
+                        fft_diffs = abs(fft_timestamps - ts_target)
+                        fft_idx = fft_diffs.idxmin()
+                        min_fft_dt = fft_diffs.iloc[fft_idx]
+                        fft_rec = FFT_NET_DATA.loc[fft_idx]
+
+                        if min_fft_dt <= pd.Timedelta(f"{NET_DISTANCE_TOLERANCE}s"):
+                            # Handle different possible column names and units
+                            if "distance_m" in fft_rec and pd.notna(fft_rec["distance_m"]):
+                                fft_distance_m = float(fft_rec["distance_m"])
+                            elif "distance_cm" in fft_rec and pd.notna(fft_rec["distance_cm"]):
+                                fft_distance_m = float(fft_rec["distance_cm"]) / 100.0  # cm -> m
+                            elif "distance" in fft_rec and pd.notna(fft_rec["distance"]):
+                                # Assume cm if no unit specified (common FFT format)
+                                fft_distance_m = float(fft_rec["distance"]) / 100.0  # cm -> m
+                                
+                            if "pitch_deg" in fft_rec and pd.notna(fft_rec["pitch_deg"]):
+                                fft_pitch_deg = float(fft_rec["pitch_deg"])
+                            elif "pitch_rad" in fft_rec and pd.notna(fft_rec["pitch_rad"]):
+                                fft_pitch_deg = float(np.degrees(fft_rec["pitch_rad"]))  # rad -> deg
+                            elif "pitch" in fft_rec and pd.notna(fft_rec["pitch"]):
+                                # Assume radians if no unit specified (common FFT format)
+                                fft_pitch_deg = float(np.degrees(fft_rec["pitch"]))  # rad -> deg
+                            
+                            # Update sync status
+                            if fft_distance_m is not None:
+                                if sync_status == "NO_DATA":
+                                    sync_status = "FFT_ONLY"
+                                elif sync_status in ["DISTANCE_OK", "FULL_SYNC", "DISTANCE_OK_WITH_PITCH"]:
+                                    sync_status = "FFT_DVL_SYNC"
+                                elif sync_status in ["SONAR_ONLY", "BOTH_SYNC"]:
+                                    sync_status = "ALL_THREE_SYNC"
+                    except Exception as e:
+                        print(f"Warning: Could not sync FFT data: {e}")
 
                 # --- Sonar Analysis Data ---
                 if SONAR_RESULTS is not None and len(SONAR_RESULTS) > 0:
-                    # Convert pixel distance to meters using the extent
                     try:
                         # Calculate pixel-to-meter conversion
                         x_min, x_max, y_min, y_max = meta_extent if meta_extent is not None else (-DISPLAY_RANGE_MAX_M, DISPLAY_RANGE_MAX_M, RANGE_MIN_M, DISPLAY_RANGE_MAX_M)
@@ -310,8 +426,13 @@ def export_optimized_sonar_video(
                         px2m_y = height_m / float(CONE_H)
                         pixels_to_meters_avg = 0.5 * (px2m_x + px2m_y)
 
+                        # Ensure sonar timestamps are timezone-naive
+                        sonar_timestamps = SONAR_RESULTS["timestamp"]
+                        if hasattr(sonar_timestamps.iloc[0], 'tz') and sonar_timestamps.dt.tz is not None:
+                            sonar_timestamps = sonar_timestamps.dt.tz_localize(None)
+
                         # Find closest sonar analysis measurement
-                        sonar_diffs = abs(SONAR_RESULTS["timestamp"] - ts_target)
+                        sonar_diffs = abs(sonar_timestamps - ts_target)
                         sonar_idx = sonar_diffs.idxmin()
                         min_sonar_dt = sonar_diffs.iloc[sonar_idx]
                         sonar_rec = SONAR_RESULTS.loc[sonar_idx]
@@ -322,16 +443,18 @@ def export_optimized_sonar_video(
                             sonar_angle_deg = sonar_rec.get("angle_degrees", 0.0) if pd.notna(sonar_rec.get("angle_degrees")) else 0.0
                             if sync_status == "NO_DATA":
                                 sync_status = "SONAR_ONLY"
-                            elif sync_status in ["DISTANCE_OK", "FULL_SYNC"]:
+                            elif sync_status in ["DISTANCE_OK", "FULL_SYNC", "DISTANCE_OK_WITH_PITCH"]:
                                 sync_status = "BOTH_SYNC"
+                            elif sync_status in ["FFT_ONLY", "FFT_DVL_SYNC"]:
+                                sync_status = "ALL_THREE_SYNC"
                     except Exception as e:
                         print(f"Warning: Could not sync sonar analysis data: {e}")
 
-                # --- Draw overlays ---
-                if sync_status in ["DISTANCE_OK", "FULL_SYNC", "SONAR_ONLY", "BOTH_SYNC", "DISTANCE_OK_WITH_PITCH"]:
+                # --- Draw overlays for all three systems ---
+                if sync_status in ["DISTANCE_OK", "FULL_SYNC", "SONAR_ONLY", "BOTH_SYNC", "DISTANCE_OK_WITH_PITCH", "FFT_ONLY", "FFT_DVL_SYNC", "ALL_THREE_SYNC"]:
                     net_half_width = 2.0
 
-                    # Draw DVL net line (if available)
+                    # Draw DVL net line (if available) - Yellow/Orange
                     if net_distance is not None and net_distance <= DISPLAY_RANGE_MAX_M:
                         if sync_status == "FULL_SYNC":
                             dvl_line_color = (0, 255, 255)  # Yellow - perfect sync
@@ -347,7 +470,7 @@ def export_optimized_sonar_video(
                             dvl_label = f"DVL: {net_distance:.2f}m @ 0.0°"
 
                         # Only draw angled line if we have pitch data
-                        use_angle = sync_status in ["FULL_SYNC", "DISTANCE_OK_WITH_PITCH", "BOTH_SYNC"]
+                        use_angle = sync_status in ["FULL_SYNC", "DISTANCE_OK_WITH_PITCH", "BOTH_SYNC", "FFT_DVL_SYNC", "ALL_SYNC"]
                         net_angle_rad = np.radians(net_angle_deg) if use_angle else 0.0
 
                         x1, y1 = -net_half_width, net_distance
@@ -371,7 +494,42 @@ def export_optimized_sonar_video(
                         cv2.circle(cone_bgr, (center_px, center_py), 3, dvl_center_color, -1)
                         cv2.circle(cone_bgr, (center_px, center_py), 3, (255, 255, 255), 1)
 
-                    # Draw Sonar analysis line (if available)
+                    # Draw FFT net line (if available) - Cyan
+                    if fft_distance_m is not None and fft_distance_m <= DISPLAY_RANGE_MAX_M:
+                        fft_line_color = (255, 255, 0)  # Cyan (BGR format)
+                        fft_center_color = (128, 128, 0)  # Dark cyan
+                        fft_label = f"FFT: {fft_distance_m:.2f}m"
+                        if fft_pitch_deg is not None:
+                            fft_label += f" @ {fft_pitch_deg:.1f}°"
+
+                        # Draw angled line using FFT pitch (if available)
+                        fft_angle_rad = np.radians(fft_pitch_deg) if fft_pitch_deg is not None else 0.0
+                        fx1, fy1 = -net_half_width, fft_distance_m
+                        fx2, fy2 = +net_half_width, fft_distance_m
+
+                        cos_a, sin_a = np.cos(fft_angle_rad), np.sin(fft_angle_rad)
+                        frx1 = fx1 * cos_a - (fy1 - fft_distance_m) * sin_a
+                        fry1 = fx1 * sin_a + (fy1 - fft_distance_m) * cos_a + fft_distance_m
+                        frx2 = fx2 * cos_a - (fy2 - fft_distance_m) * sin_a
+                        fry2 = fx2 * sin_a + (fy2 - fft_distance_m) * cos_a + fft_distance_m
+
+                        fpx1, fpy1 = x_px(frx1), y_px(fry1)
+                        fpx2, fpy2 = x_px(frx2), y_px(fry2)
+
+                        # Draw FFT line with distinctive thick cyan style
+                        cv2.line(cone_bgr, (fpx1, fpy1), (fpx2, fpy2), fft_line_color, 4)
+                        
+                        # Draw endpoint circles with cyan outline
+                        for (px, py) in [(fpx1, fpy1), (fpx2, fpy2)]:
+                            cv2.circle(cone_bgr, (px, py), 6, (255, 255, 255), -1)
+                            cv2.circle(cone_bgr, (px, py), 6, fft_line_color, 2)
+
+                        # Draw center point with distinctive FFT styling
+                        center_px, center_py = x_px(0), y_px(fft_distance_m)
+                        cv2.circle(cone_bgr, (center_px, center_py), 8, fft_center_color, -1)
+                        cv2.circle(cone_bgr, (center_px, center_py), 8, (255, 255, 255), 2)
+
+                    # Draw Sonar analysis line (if available) - Magenta
                     if sonar_distance_m is not None and sonar_distance_m <= DISPLAY_RANGE_MAX_M:
                         sonar_line_color = (255, 0, 255)  # Magenta
                         sonar_center_color = (128, 0, 128)  # Dark magenta
@@ -431,17 +589,19 @@ def export_optimized_sonar_video(
                             color_layer[mask_bool > 0] = c_color
                             cone_bgr = cv2.addWeighted(cone_bgr.astype(np.float32), 1.0, color_layer.astype(np.float32), c_alpha, 0)
 
-                    # Create status text
+                    # Create status text with all three systems
                     status_lines = []
                     if net_distance is not None:
-                        status_lines.append(dvl_label)
+                        status_lines.append(dvl_label if 'dvl_label' in locals() else f"DVL: {net_distance:.2f}m")
+                    if fft_distance_m is not None:
+                        status_lines.append(fft_label)
                     if sonar_distance_m is not None:
-                        status_lines.append(sonar_label)
+                        status_lines.append(sonar_label if 'sonar_label' in locals() else f"SONAR: {sonar_distance_m:.2f}m")
                     if status_lines:
                         status_text = " | ".join(status_lines)
 
                 else:
-                    if INCLUDE_NET or SONAR_RESULTS is not None:
+                    if INCLUDE_NET or SONAR_RESULTS is not None or FFT_NET_DATA is not None:
                         status_text = f"NET: NO SYNC DATA (tol: {NET_DISTANCE_TOLERANCE}s)"
                         line_color = (128, 128, 128)
 
@@ -467,17 +627,18 @@ def export_optimized_sonar_video(
                         cv2.putText(cone_bgr, f"{bearing_deg:+d}°", label_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.4, grid_blue, 1)
 
             # annotate status if net considered
-            if (INCLUDE_NET or SONAR_RESULTS is not None) and status_text:
-                # Legend
+            if (INCLUDE_NET or SONAR_RESULTS is not None or FFT_NET_DATA is not None) and status_text:
+                # Updated Legend for three systems
                 legend_y = 15
-                cv2.putText(cone_bgr, "DVL: Yellow/Orange (nav data)", (10, legend_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 2, cv2.LINE_AA)
-                cv2.putText(cone_bgr, "SONAR: Magenta (analysis)", (10, legend_y + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2, cv2.LINE_AA)
-                # Status
-                cv2.putText(cone_bgr, status_text, (10, 35 + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 3, cv2.LINE_AA)
-                cv2.putText(cone_bgr, status_text, (10, 35 + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+                cv2.putText(cone_bgr, "DVL: Yellow/Orange | FFT: Cyan | SONAR: Magenta", (10, legend_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2, cv2.LINE_AA)
+                cv2.putText(cone_bgr, "DVL: Yellow/Orange | FFT: Cyan | SONAR: Magenta", (10, legend_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
+                
+                # Status with black outline for better visibility
+                cv2.putText(cone_bgr, status_text, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3, cv2.LINE_AA)
+                cv2.putText(cone_bgr, status_text, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
 
-            # footer info
-            frame_info = f"Frame {frame_idx}/{len(frame_indices)} | {TARGET_BAG} | Opt.Sync"
+            # footer info with three-system indicator
+            frame_info = f"Frame {frame_idx}/{len(frame_indices)} | {TARGET_BAG} | 3-Sys.Sync"
             cv2.putText(cone_bgr, frame_info, (10, CONE_H - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2, cv2.LINE_AA)
             cv2.putText(cone_bgr, frame_info, (10, CONE_H - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
 
@@ -568,6 +729,15 @@ def export_optimized_sonar_video(
             "cmap": str(CMAP_NAME),
             "include_net": bool(INCLUDE_NET),
             "include_sonar_analysis": SONAR_RESULTS is not None,
+            "include_fft_data": FFT_NET_DATA is not None,
+            "fft_units_converted": True,
+            "three_system_sync": True,
+            "units_info": {
+                "distance_unit": "meters",
+                "angle_unit": "degrees",
+                "fft_conversions": "cm->m, rad->deg"
+            },
+            "sync_window_seconds": float(SYNC_WINDOW_SECONDS),
             "flip_range": bool(FLIP_RANGE),
             "flip_beams": bool(FLIP_BEAMS),
         }
@@ -577,6 +747,10 @@ def export_optimized_sonar_video(
         with open(meta_path, "w", encoding="utf-8") as fh:
             json.dump(meta, fh, ensure_ascii=False, indent=2)
         print(f"\n🎉 DONE! Wrote {frames_written} frames to {out_path} @ {natural_fps:.2f} FPS")
+        print(f"Three-system synchronization: DVL(Yellow/Orange) | FFT(Cyan) | Sonar(Magenta)")
         print(f"Metadata saved to: {meta_path}")
     except Exception as e:
         print(f"Warning: could not write metadata: {e}")
+    
+    return out_path
+    return out_path
