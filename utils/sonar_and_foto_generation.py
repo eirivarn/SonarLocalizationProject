@@ -41,6 +41,121 @@ def put_text(bgr, s, y, x=10, scale=0.55):
     cv2.putText(bgr, s, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, (255,255,255), 2, cv2.LINE_AA)
     cv2.putText(bgr, s, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, (0,0,0),   1, cv2.LINE_AA)
 
+def prepare_three_system_data(
+    target_bag: str,
+    exports_folder: Path,
+    net_analysis_results: pd.DataFrame,
+    raw_data: dict,
+    fft_csv_path: Path | None = None,
+    use_notebook08_sync: bool = True
+) -> tuple[pd.DataFrame, pd.DataFrame | None]:
+    """
+    Prepare synchronized data for three-system video generation.
+    
+    Returns:
+        tuple: (net_analysis_sync, fft_net_data_sync)
+    """
+    print("🔄 PREPARING THREE-SYSTEM SYNCHRONIZED DATA")
+    print("=" * 60)
+    
+    # STEP 1: Load FFT data using notebook 08's method
+    fft_net_data = None
+    if fft_csv_path and fft_csv_path.exists():
+        try:
+            # Try to use notebook 08's FFT loading methods
+            from utils.relative_fft_analysis import load_relative_fft_data, convert_fft_to_xy_coordinates
+            
+            print("✓ Using notebook 08's FFT loading methods...")
+            fft_net_data = load_relative_fft_data(fft_csv_path)
+            fft_net_data = convert_fft_to_xy_coordinates(fft_net_data)
+            print(f"✓ Loaded FFT data via notebook 08 method: {len(fft_net_data)} records")
+            
+        except ImportError:
+            print("✗ Notebook 08 FFT utilities not available - using fallback method")
+            # Fallback to manual method
+            fft_net_data = pd.read_csv(fft_csv_path)
+            fft_net_data = fft_net_data.rename(columns={'time': 'timestamp', 'distance': 'distance_cm', 'pitch': 'pitch_rad'})
+            
+            # Convert units
+            if 'distance_cm' in fft_net_data.columns:
+                fft_net_data['distance_m'] = fft_net_data['distance_cm'] / 100.0
+            if 'pitch_rad' in fft_net_data.columns:
+                fft_net_data['pitch_deg'] = np.degrees(fft_net_data['pitch_rad'])
+            
+            # Handle timestamps - convert Unix timestamps to timezone-naive datetime
+            fft_timestamp_values = pd.to_numeric(fft_net_data['timestamp'], errors='coerce')
+            if fft_timestamp_values.min() > 1e9:
+                fft_net_data['timestamp'] = pd.to_datetime(fft_timestamp_values, unit='s', utc=True).dt.tz_localize(None)
+                print(f"✓ Converted Unix timestamps to timezone-naive")
+        except Exception as e:
+            print(f"✗ FFT loading error: {e}")
+            fft_net_data = None
+    elif fft_csv_path:
+        print(f"✗ FFT file not found: {fft_csv_path.name}")
+    
+    # STEP 2: Use notebook 08's synchronization approach if available
+    if fft_net_data is not None and use_notebook08_sync:
+        try:
+            # Import notebook 08's synchronization utilities
+            from utils.net_relative_utils import run_complete_three_system_analysis
+            
+            print("✓ Using notebook 08's three-system synchronization...")
+            
+            # Run the same synchronization that works in notebook 08  
+            sync_df, stats, _, _, _, _ = run_complete_three_system_analysis(
+                df_sonar=net_analysis_results,
+                df_nav=raw_data['navigation'],
+                df_fft=fft_net_data,
+                target_bag=target_bag,
+                exports_folder=exports_folder
+            )
+            
+            print(f"✓ Three-system synchronization completed: {len(sync_df)} synchronized records")
+            
+            # Extract the synchronized data for video generation
+            net_analysis_sync = sync_df[['timestamp', 'sonar_distance_m', 'sonar_angle_deg', 'detection_success']].copy()
+            net_analysis_sync = net_analysis_sync.rename(columns={
+                'sonar_distance_m': 'distance_meters',
+                'sonar_angle_deg': 'angle_degrees'
+            })
+            net_analysis_sync['distance_pixels'] = net_analysis_sync['distance_meters'] / 0.01  # Approximate
+            net_analysis_sync['tracking_status'] = 'SYNCHRONIZED'
+            
+            # Use synchronized FFT data
+            fft_net_data_sync = sync_df[['timestamp', 'fft_distance_m', 'fft_pitch_deg']].copy()
+            fft_net_data_sync = fft_net_data_sync.rename(columns={
+                'fft_distance_m': 'distance_m',
+                'fft_pitch_deg': 'pitch_deg'
+            })
+            
+            print(f"✓ Prepared synchronized datasets for video generation")
+            return net_analysis_sync, fft_net_data_sync
+            
+        except ImportError:
+            print("✗ Could not import notebook 08 synchronization utilities")
+            print("Falling back to individual synchronization...")
+            
+        except Exception as e:
+            print(f"✗ Notebook 08 synchronization failed: {e}")
+            print("Falling back to individual synchronization...")
+    
+    # STEP 3: Fallback synchronization - ensure timezone-naive timestamps
+    print("✓ Using fallback synchronization method")
+    
+    net_analysis_sync = net_analysis_results.copy()
+    if 'timestamp' in net_analysis_sync.columns:
+        net_analysis_sync['timestamp'] = pd.to_datetime(net_analysis_sync['timestamp']).dt.tz_localize(None)
+    
+    fft_net_data_sync = None
+    if fft_net_data is not None:
+        fft_net_data_sync = fft_net_data.copy()
+        if 'timestamp' in fft_net_data_sync.columns:
+            if hasattr(fft_net_data_sync['timestamp'].iloc[0], 'tz') and fft_net_data_sync['timestamp'].dt.tz is not None:
+                fft_net_data_sync['timestamp'] = fft_net_data_sync['timestamp'].dt.tz_localize(None)
+    
+    print(f"✓ Fallback synchronization completed")
+    return net_analysis_sync, fft_net_data_sync
+
 def export_optimized_sonar_video(
     TARGET_BAG: str,
     EXPORTS_FOLDER: Path | None,
@@ -453,24 +568,31 @@ def export_optimized_sonar_video(
                 # --- Draw overlays for all three systems ---
                 if sync_status in ["DISTANCE_OK", "FULL_SYNC", "SONAR_ONLY", "BOTH_SYNC", "DISTANCE_OK_WITH_PITCH", "FFT_ONLY", "FFT_DVL_SYNC", "ALL_THREE_SYNC"]:
                     net_half_width = 2.0
+                    
+                    # Standardized visual parameters for all systems
+                    line_thickness = 4
+                    endpoint_radius = 6
+                    center_radius = 8
+                    endpoint_outline = 2
+                    center_outline = 2
 
                     # Draw DVL net line (if available) - Yellow/Orange
                     if net_distance is not None and net_distance <= DISPLAY_RANGE_MAX_M:
                         if sync_status == "FULL_SYNC":
                             dvl_line_color = (0, 255, 255)  # Yellow - perfect sync
-                            dvl_center_color = (0, 0, 255)  # Red
+                            dvl_center_color = (0, 200, 200)  # Darker yellow
                             dvl_label = f"DVL: {net_distance:.2f}m @ {net_angle_deg:.1f}°"
                         elif sync_status == "DISTANCE_OK_WITH_PITCH":
                             dvl_line_color = (0, 255, 128)  # Light green - distance OK, pitch from closest
-                            dvl_center_color = (0, 128, 0)  # Dark green
+                            dvl_center_color = (0, 200, 100)  # Darker green
                             dvl_label = f"DVL: {net_distance:.2f}m @ {net_angle_deg:.1f}° (approx)"
                         else:
                             dvl_line_color = (0, 165, 255)  # Orange - distance only
-                            dvl_center_color = (0, 100, 255)  # Dark orange
+                            dvl_center_color = (0, 130, 200)  # Darker orange
                             dvl_label = f"DVL: {net_distance:.2f}m @ 0.0°"
 
                         # Only draw angled line if we have pitch data
-                        use_angle = sync_status in ["FULL_SYNC", "DISTANCE_OK_WITH_PITCH", "BOTH_SYNC", "FFT_DVL_SYNC", "ALL_SYNC"]
+                        use_angle = sync_status in ["FULL_SYNC", "DISTANCE_OK_WITH_PITCH", "BOTH_SYNC", "FFT_DVL_SYNC", "ALL_THREE_SYNC"]
                         net_angle_rad = np.radians(net_angle_deg) if use_angle else 0.0
 
                         x1, y1 = -net_half_width, net_distance
@@ -485,19 +607,23 @@ def export_optimized_sonar_video(
                         px1, py1 = x_px(rx1), y_px(ry1)
                         px2, py2 = x_px(rx2), y_px(ry2)
 
-                        cv2.line(cone_bgr, (px1, py1), (px2, py2), dvl_line_color, 3)
+                        # Standardized DVL line drawing
+                        cv2.line(cone_bgr, (px1, py1), (px2, py2), dvl_line_color, line_thickness)
+                        
+                        # Standardized endpoint circles
                         for (px, py) in [(px1, py1), (px2, py2)]:
-                            cv2.circle(cone_bgr, (px, py), 4, (255, 255, 255), -1)
-                            cv2.circle(cone_bgr, (px, py), 4, (0, 0, 0), 1)
+                            cv2.circle(cone_bgr, (px, py), endpoint_radius, (255, 255, 255), -1)
+                            cv2.circle(cone_bgr, (px, py), endpoint_radius, dvl_line_color, endpoint_outline)
 
+                        # Standardized center point
                         center_px, center_py = x_px(0), y_px(net_distance)
-                        cv2.circle(cone_bgr, (center_px, center_py), 3, dvl_center_color, -1)
-                        cv2.circle(cone_bgr, (center_px, center_py), 3, (255, 255, 255), 1)
+                        cv2.circle(cone_bgr, (center_px, center_py), center_radius, dvl_center_color, -1)
+                        cv2.circle(cone_bgr, (center_px, center_py), center_radius, (255, 255, 255), center_outline)
 
                     # Draw FFT net line (if available) - Cyan
                     if fft_distance_m is not None and fft_distance_m <= DISPLAY_RANGE_MAX_M:
                         fft_line_color = (255, 255, 0)  # Cyan (BGR format)
-                        fft_center_color = (128, 128, 0)  # Dark cyan
+                        fft_center_color = (200, 200, 0)  # Darker cyan
                         fft_label = f"FFT: {fft_distance_m:.2f}m"
                         if fft_pitch_deg is not None:
                             fft_label += f" @ {fft_pitch_deg:.1f}°"
@@ -516,23 +642,23 @@ def export_optimized_sonar_video(
                         fpx1, fpy1 = x_px(frx1), y_px(fry1)
                         fpx2, fpy2 = x_px(frx2), y_px(fry2)
 
-                        # Draw FFT line with distinctive thick cyan style
-                        cv2.line(cone_bgr, (fpx1, fpy1), (fpx2, fpy2), fft_line_color, 4)
+                        # Standardized FFT line drawing
+                        cv2.line(cone_bgr, (fpx1, fpy1), (fpx2, fpy2), fft_line_color, line_thickness)
                         
-                        # Draw endpoint circles with cyan outline
+                        # Standardized endpoint circles
                         for (px, py) in [(fpx1, fpy1), (fpx2, fpy2)]:
-                            cv2.circle(cone_bgr, (px, py), 6, (255, 255, 255), -1)
-                            cv2.circle(cone_bgr, (px, py), 6, fft_line_color, 2)
+                            cv2.circle(cone_bgr, (px, py), endpoint_radius, (255, 255, 255), -1)
+                            cv2.circle(cone_bgr, (px, py), endpoint_radius, fft_line_color, endpoint_outline)
 
-                        # Draw center point with distinctive FFT styling
+                        # Standardized center point
                         center_px, center_py = x_px(0), y_px(fft_distance_m)
-                        cv2.circle(cone_bgr, (center_px, center_py), 8, fft_center_color, -1)
-                        cv2.circle(cone_bgr, (center_px, center_py), 8, (255, 255, 255), 2)
+                        cv2.circle(cone_bgr, (center_px, center_py), center_radius, fft_center_color, -1)
+                        cv2.circle(cone_bgr, (center_px, center_py), center_radius, (255, 255, 255), center_outline)
 
                     # Draw Sonar analysis line (if available) - Magenta
                     if sonar_distance_m is not None and sonar_distance_m <= DISPLAY_RANGE_MAX_M:
                         sonar_line_color = (255, 0, 255)  # Magenta
-                        sonar_center_color = (128, 0, 128)  # Dark magenta
+                        sonar_center_color = (200, 0, 200)  # Darker magenta
                         sonar_label = f"SONAR: {sonar_distance_m:.2f}m @ {sonar_angle_deg:.1f}°"
 
                         # Draw angled line using sonar angle
@@ -549,14 +675,18 @@ def export_optimized_sonar_video(
                         spx1, spy1 = x_px(srx1), y_px(sry1)
                         spx2, spy2 = x_px(srx2), y_px(sry2)
 
-                        cv2.line(cone_bgr, (spx1, spy1), (spx2, spy2), sonar_line_color, 3)
+                        # Standardized Sonar line drawing
+                        cv2.line(cone_bgr, (spx1, spy1), (spx2, spy2), sonar_line_color, line_thickness)
+                        
+                        # Standardized endpoint circles
                         for (px, py) in [(spx1, spy1), (spx2, spy2)]:
-                            cv2.circle(cone_bgr, (px, py), 4, (255, 255, 255), -1)
-                            cv2.circle(cone_bgr, (px, py), 4, (0, 0, 0), 1)
+                            cv2.circle(cone_bgr, (px, py), endpoint_radius, (255, 255, 255), -1)
+                            cv2.circle(cone_bgr, (px, py), endpoint_radius, sonar_line_color, endpoint_outline)
 
+                        # Standardized center point
                         center_px, center_py = x_px(0), y_px(sonar_distance_m)
-                        cv2.circle(cone_bgr, (center_px, center_py), 3, sonar_center_color, -1)
-                        cv2.circle(cone_bgr, (center_px, center_py), 3, (255, 255, 255), 1)
+                        cv2.circle(cone_bgr, (center_px, center_py), center_radius, sonar_center_color, -1)
+                        cv2.circle(cone_bgr, (center_px, center_py), center_radius, (255, 255, 255), center_outline)
 
                     # --- AOI / Corridor mask overlay (if available and enabled) ---
                     from utils.sonar_config import VIDEO_CONFIG
@@ -753,4 +883,66 @@ def export_optimized_sonar_video(
         print(f"Warning: could not write metadata: {e}")
     
     return out_path
-    return out_path
+
+def generate_three_system_video(
+    target_bag: str,
+    exports_folder: Path,
+    net_analysis_results: pd.DataFrame,
+    raw_data: dict,
+    fft_csv_path: Path | None = None,
+    start_idx: int = 1,
+    end_idx: int = 1200,
+    **video_kwargs
+) -> Path:
+    """
+    Simplified three-system video generation with automatic synchronization.
+    
+    Args:
+        target_bag: Bag identifier
+        exports_folder: Path to exports folder
+        net_analysis_results: Sonar analysis results
+        raw_data: Raw data dictionary (with 'navigation' key)
+        fft_csv_path: Path to FFT CSV file
+        start_idx: Start frame index
+        end_idx: End frame index
+        **video_kwargs: Additional arguments for export_optimized_sonar_video
+    
+    Returns:
+        Path to generated video file
+    """
+    print("🎬 GENERATING THREE-SYSTEM VIDEO")
+    print("=" * 50)
+    
+    # Prepare synchronized data
+    net_analysis_sync, fft_net_data_sync = prepare_three_system_data(
+        target_bag=target_bag,
+        exports_folder=exports_folder,
+        net_analysis_results=net_analysis_results,
+        raw_data=raw_data,
+        fft_csv_path=fft_csv_path
+    )
+    
+    # Generate video with synchronized data
+    video_path = export_optimized_sonar_video(
+        TARGET_BAG=target_bag,
+        EXPORTS_FOLDER=exports_folder,
+        START_IDX=start_idx,
+        END_IDX=end_idx,
+        STRIDE=1,
+        AUTO_DETECT_VIDEO=True,
+        INCLUDE_NET=True,
+        SONAR_RESULTS=net_analysis_sync,
+        FFT_NET_DATA=fft_net_data_sync,
+        NET_DISTANCE_TOLERANCE=0.5,
+        NET_PITCH_TOLERANCE=2.0,
+        **video_kwargs
+    )
+    
+    print(f"\n✅ THREE-SYSTEM VIDEO GENERATED: {video_path}")
+    print(f"   Systems synchronized:")
+    print(f"   - 🟡 DVL: Navigation-based robot position relative to net")
+    print(f"   - 🔵 FFT: High-precision signal processing net detection")
+    print(f"   - 🟣 Sonar: Image analysis of sonar returns")
+    print(f"   - 🎨 Uniform styling: All systems use consistent visual appearance")
+    
+    return video_path
