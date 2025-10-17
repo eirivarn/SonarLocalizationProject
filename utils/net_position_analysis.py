@@ -21,35 +21,278 @@ from plotly.subplots import make_subplots
 from utils.sonar_config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
 
 
-def load_net_analysis_results(target_bag: str, exports_folder: Optional[Path] = None) -> pd.DataFrame:
+def extract_frames_from_specific_bag(target_bag: str, exports_folder: Path, 
+                                    frame_stride: int = 2, limit_frames: int = 1000) -> bool:
     """
-    Load net analysis results from CSV file.
-
+    Extract frames directly from MP4 files for a specific bag with proper timestamps.
+    
     Args:
-        target_bag: Bag name identifier
-        exports_folder: Path to exports folder (default: EXPORTS_DIR_DEFAULT)
+        target_bag: Target bag name (e.g., '2024-08-20_17-02-00')
+        exports_folder: Exports folder path
+        frame_stride: Extract every Nth frame (default: 2)
+        limit_frames: Maximum frames to extract per video (default: 1000)
+        
+    Returns:
+        True if extraction was successful, False otherwise
+    """
+    import cv2
+    import pandas as pd
+    import os
+    from utils.sonar_config import EXPORTS_SUBDIRS
+    
+    videos_dir = exports_folder / EXPORTS_SUBDIRS.get('videos', 'videos')
+    frames_dir = exports_folder / EXPORTS_SUBDIRS.get('frames', 'frames')
+    by_bag_dir = exports_folder / EXPORTS_SUBDIRS.get('by_bag', 'by_bag')
+    
+    # Find MP4 files for the specific bag (exclude hidden files)
+    target_mp4_files = [f for f in videos_dir.glob(f"*{target_bag}*compressed_image*.mp4") 
+                       if not f.name.startswith('._')]
+    
+    if not target_mp4_files:
+        print(f"No MP4 files found for bag: {target_bag}")
+        return False
+    
+    print(f"Found {len(target_mp4_files)} MP4 file(s) for {target_bag}")
+    
+    success_count = 0
+    for mp4_file in target_mp4_files:
+        try:
+            # Create output directory
+            output_dir = frames_dir / f"{mp4_file.stem}_frames"
+            
+            # Remove hidden files that might interfere
+            hidden_file = frames_dir / f"._{mp4_file.stem}_frames"
+            if hidden_file.exists():
+                hidden_file.unlink()
+            
+            output_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Load bag CSV for timestamp conversion
+            csv_pattern = f"sensor_sonoptix_echo_image__{target_bag}_video.csv"
+            csv_file = by_bag_dir / csv_pattern
+            
+            bag_start_time = None
+            if csv_file.exists():
+                try:
+                    bag_df = pd.read_csv(csv_file)
+                    if "ts_utc" in bag_df.columns:
+                        bag_df["ts_utc"] = pd.to_datetime(bag_df["ts_utc"], utc=True)
+                        bag_start_time = bag_df["ts_utc"].min()
+                    elif "t" in bag_df.columns:
+                        bag_df["ts_utc"] = pd.to_datetime(bag_df["t"], unit="s", utc=True)
+                        bag_start_time = bag_df["ts_utc"].min()
+                except Exception:
+                    pass
+            
+            # Extract frames
+            cap = cv2.VideoCapture(str(mp4_file))
+            if not cap.isOpened():
+                print(f"Could not open video: {mp4_file.name}")
+                continue
+            
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            
+            frame_count = 0
+            extracted_count = 0
+            index_rows = []
+            
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                
+                if frame_count % frame_stride == 0 and extracted_count < limit_frames:
+                    timestamp_sec = frame_count / fps if fps > 0 else frame_count
+                    frame_filename = f"frame_{frame_count:06d}_{timestamp_sec:.3f}s.png"
+                    frame_path = output_dir / frame_filename
+                    
+                    cv2.imwrite(str(frame_path), frame)
+                    extracted_count += 1
+                    
+                    index_entry = {
+                        "video": mp4_file.name,
+                        "frame_number": frame_count,
+                        "timestamp_sec": timestamp_sec,
+                        "file": frame_filename,
+                        "extracted_count": extracted_count
+                    }
+                    
+                    if bag_start_time is not None:
+                        absolute_timestamp = bag_start_time + pd.Timedelta(seconds=timestamp_sec)
+                        index_entry["ts_utc"] = absolute_timestamp
+                    
+                    index_rows.append(index_entry)
+                
+                frame_count += 1
+            
+            cap.release()
+            
+            # Save index
+            if index_rows:
+                index_df = pd.DataFrame(index_rows)
+                index_path = output_dir / "index.csv"
+                index_df.to_csv(index_path, index=False)
+                
+                has_absolute_ts = "ts_utc" in index_df.columns
+                print(f"Extracted {extracted_count} frames from {mp4_file.name}")
+                print(f"  Output: {output_dir.name}/")
+                print(f"  Absolute timestamps: {has_absolute_ts}")
+                
+                success_count += 1
+            
+        except Exception as e:
+            print(f"Error processing {mp4_file.name}: {e}")
+            continue
+    
+    return success_count > 0
 
+
+def load_net_analysis_results(target_bag: str, exports_folder: Path) -> pd.DataFrame:
+    """
+    Load net analysis results, creating them automatically if they don't exist.
+    
+    Args:
+        target_bag: Target bag name
+        exports_folder: Exports folder path
+        
     Returns:
         DataFrame with net analysis results
+        
+    Raises:
+        FileNotFoundError: If no analysis results can be found or created
     """
-    if exports_folder is None:
-        exports_folder = Path(EXPORTS_DIR_DEFAULT)
+    outputs_dir = exports_folder / "outputs"
+    
+    # Try multiple possible patterns for existing analysis files
+    possible_patterns = [
+        f"{target_bag}_analysis_results.csv",
+        f"*{target_bag}*analysis_results.csv",
+        f"*{target_bag}*_cones_analysis_results.csv",
+    ]
+    
+    # Look for existing analysis files
+    for pattern in possible_patterns:
+        matching_files = list(outputs_dir.glob(pattern))
+        if matching_files:
+            sonar_csv_path = matching_files[0]
+            df_sonar = pd.read_csv(sonar_csv_path)
+            print(f"Loaded analysis file: {sonar_csv_path.name} ({len(df_sonar)} frames)")
+            return df_sonar
+    
+    # No existing analysis found - try to create it
+    print(f"No analysis CSV found for {target_bag}, attempting to create from NPZ")
+    
+    # Check if NPZ file exists
+    npz_file = outputs_dir / f"{target_bag}_cones.npz"
+    if not npz_file.exists():
+        # Try alternative NPZ naming patterns
+        npz_patterns = [
+            f"*{target_bag}*_cones.npz",
+            f"{target_bag}*.npz"
+        ]
+        
+        for pattern in npz_patterns:
+            matching_npz = list(outputs_dir.glob(pattern))
+            if matching_npz:
+                npz_file = matching_npz[0]
+                break
+    
+    if npz_file.exists():
+        print(f"Found NPZ file: {npz_file.name}")
+        return _create_analysis_from_npz(npz_file, target_bag)
+    else:
+        # List available files for guidance
+        analysis_files = list(outputs_dir.glob("*analysis_results.csv"))
+        if analysis_files:
+            print(f"Available analysis files:")
+            for f in analysis_files[:3]:
+                print(f"  {f.name}")
+        
+        raise FileNotFoundError(
+            f"No analysis results found for '{target_bag}'. "
+            f"Create NPZ file first or provide existing analysis CSV."
+        )
 
-    # Look for analysis results CSV
-    outputs_dir = exports_folder / EXPORTS_SUBDIRS.get('outputs', 'outputs')
-    pattern = f"*{target_bag}*analysis_results.csv"
 
-    matching_files = list(outputs_dir.glob(pattern))
-    if not matching_files:
-        raise FileNotFoundError(f"No analysis results CSV found for bag {target_bag} in {outputs_dir}")
-
-    csv_file = matching_files[0]  # Take first match
-    print(f"Loading net analysis results: {csv_file}")
-
-    df = pd.read_csv(csv_file)
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
-
-    return df
+def _create_analysis_from_npz(npz_file: Path, target_bag: str) -> pd.DataFrame:
+    """
+    Create analysis results from NPZ file using DistanceAnalysisEngine.
+    """
+    print("Creating analysis from NPZ using DistanceAnalysisEngine...")
+    
+    try:
+        # Try different possible import paths
+        engine = None
+        import_attempts = [
+            "utils.image_analysis_utils",
+            "image_analysis_utils", 
+            "utils.distance_analysis",
+            "distance_analysis"
+        ]
+        
+        for import_path in import_attempts:
+            try:
+                iau = __import__(import_path, fromlist=['DistanceAnalysisEngine'])
+                if hasattr(iau, 'DistanceAnalysisEngine'):
+                    engine = iau.DistanceAnalysisEngine()
+                    break
+            except ImportError:
+                continue
+        
+        if engine is None:
+            # Search in utils directory
+            try:
+                import sys
+                import importlib
+                utils_dir = Path(__file__).parent
+                for py_file in utils_dir.glob("*.py"):
+                    if py_file.name.startswith("_"):
+                        continue
+                    
+                    module_name = f"utils.{py_file.stem}"
+                    try:
+                        module = importlib.import_module(module_name)
+                        if hasattr(module, 'DistanceAnalysisEngine'):
+                            engine = module.DistanceAnalysisEngine()
+                            break
+                    except ImportError:
+                        continue
+            except Exception:
+                pass
+        
+        if engine is None:
+            raise ImportError("DistanceAnalysisEngine not found. Run analysis manually in notebook 06.")
+        
+        # Create NPZ file index
+        npz_file_index = pd.DataFrame([{
+            'npz_file': npz_file,
+            'bag_name': target_bag,
+            'num_frames': None
+        }])
+        
+        print("Running distance analysis...")
+        net_analysis_results = engine.analyze_npz_sequence(
+            npz_file_index=npz_file_index,    
+            frame_start=1,
+            frame_count=1500,
+            frame_step=1,
+            save_outputs=True
+        )
+        
+        print(f"Analysis complete: {len(net_analysis_results)} frames")
+        detection_rate = net_analysis_results['detection_success'].mean()
+        print(f"Detection success rate: {detection_rate:.1%}")
+        
+        return net_analysis_results
+        
+    except ImportError as e:
+        print(f"Import error: {e}")
+        print("Run analysis manually using notebook 06 with save_outputs=True")
+        raise
+    except Exception as e:
+        print(f"Analysis error: {e}")
+        raise
 
 
 def load_navigation_data(target_bag: str, exports_folder: Optional[Path] = None) -> pd.DataFrame:

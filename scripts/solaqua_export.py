@@ -19,6 +19,10 @@ Usage:
     python3 scripts/solaqua_export.py --data-dir /Volumes/LaCie/SOLAQUA/raw_data --exports-dir /Volumes/LaCie/SOLAQUA/exports --csv-only
     python3 scripts/solaqua_export.py --data-dir /Volumes/LaCie/SOLAQUA/raw_data --exports-dir /Volumes/LaCie/SOLAQUA/exports --video-only
     python3 scripts/solaqua_export.py --data-dir /Volumes/LaCie/SOLAQUA/raw_data --exports-dir /Volumes/LaCie/SOLAQUA/exports --frames-from-mp4 --frame-stride 2 --limit-frames 1000
+    
+    # Process specific bag only:
+    python3 scripts/solaqua_export.py --data-dir /Volumes/LaCie/SOLAQUA/raw_data --exports-dir /Volumes/LaCie/SOLAQUA/exports --bag-stem 2024-08-20_17-02-00 --all
+    python3 scripts/solaqua_export.py --data-dir /Volumes/LaCie/SOLAQUA/raw_data --exports-dir /Volumes/LaCie/SOLAQUA/exports --bag-stem 2024-08-20_17-02-00 --frames-from-mp4 --frame-stride 2 --limit-frames 1000
 """
 
 import argparse
@@ -753,6 +757,10 @@ Examples:
 
   # Custom video settings
   python scripts/solaqua_export.py --data-dir data --exports-dir exports --video --fps 10 --limit-videos 5
+  
+  # Process specific bag only:
+  python scripts/solaqua_export.py --data-dir data --exports-dir exports --bag-stem 2024-08-20_17-02-00 --all
+  python scripts/solaqua_export.py --data-dir data --exports-dir exports --bag-stem 2024-08-20_17-02-00 --frames-from-mp4 --frame-stride 2 --limit-frames 1000
         """
     )
     
