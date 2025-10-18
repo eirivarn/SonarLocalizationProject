@@ -18,7 +18,10 @@ Usage:
     python3 scripts/solaqua_export.py --data-dir /Volumes/LaCie/SOLAQUA/raw_data --exports-dir /Volumes/LaCie/SOLAQUA/exports --all
     python3 scripts/solaqua_export.py --data-dir /Volumes/LaCie/SOLAQUA/raw_data --exports-dir /Volumes/LaCie/SOLAQUA/exports --csv-only
     python3 scripts/solaqua_export.py --data-dir /Volumes/LaCie/SOLAQUA/raw_data --exports-dir /Volumes/LaCie/SOLAQUA/exports --video-only
-    python3 scripts/solaqua_export.py --data-dir /Volumes/LaCie/SOLAQUA/raw_data --exports-dir /Volumes/LaCie/SOLAQUA/exports --frames-from-mp4 --frame-stride 2 --limit-frames 1000
+    python3 scripts/solaqua_export.py --data-dir /Volumes/LaCie/SOLAQUA/raw_data --exports-dir /Volumes/LaCie/SOLAQUA/exports --frames-from-mp4 --frame-stride 2 --limit-frames 1500
+
+    # Create cone NPZ files from CSV data: 
+    python3 scripts/solaqua_export.py --data-dir /Volumes/LaCie/SOLAQUA/raw_data --exports-dir /Volumes/LaCie/SOLAQUA/exports --npz
     
     # Process specific bag only:
     python3 scripts/solaqua_export.py --data-dir /Volumes/LaCie/SOLAQUA/raw_data --exports-dir /Volumes/LaCie/SOLAQUA/exports --bag-stem 2024-08-20_17-02-00 --all
@@ -809,10 +812,10 @@ Examples:
                        help="Limit number of videos per bag")
     
     # Frame options
-    parser.add_argument("--frame-stride", type=int, default=10,
-                       help="Take every Nth frame (default: 10)")
-    parser.add_argument("--limit-frames", type=int, default=100,
-                       help="Max frames per bag/video (default: 100)")
+    parser.add_argument("--frame-stride", type=int, default=1,
+                       help="Take every Nth frame (default: 1)")
+    parser.add_argument("--limit-frames", type=int, default=3000,
+                       help="Max frames per bag/video (default: 3000)")
     parser.add_argument("--resize", type=str,
                        help="Resize frames to WIDTHxHEIGHT (e.g., 640x480)")
     parser.add_argument("--overwrite-frames", action="store_true",

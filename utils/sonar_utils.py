@@ -413,7 +413,7 @@ def plot_video_and_cone(
     for a in np.linspace(-half, half, n_spokes):
         th = np.deg2rad(a)
         axes[1].plot([0, y_max * np.sin(th)], [0, y_max * np.cos(th)], color="k", lw=0.9, alpha=0.85)
-        axes[1].text(1.02 * y_max * np.sin(th), 1.02 * y_max * np.cos(th), f"{a:.0f}°", ha="center", va="center", fontsize=9)
+        axes[1].text(1.02 * y_max * np.sin(th), 1.02 * y_max * np.cos(th), f"{a:.0f}", ha="center", va="center", fontsize=9)
 
     title_cone = "Sonar Cone"
     if enhanced:
@@ -495,7 +495,7 @@ def render_cone_side_by_side_frame(
         th = np.deg2rad(a)
         axes[1].plot([0, y_max*np.sin(th)], [0, y_max*np.cos(th)],
                      color="k", lw=0.9, alpha=0.85)
-        axes[1].text(1.02*y_max*np.sin(th), 1.02*y_max*np.cos(th), f"{a:.0f}°",
+        axes[1].text(1.02*y_max*np.sin(th), 1.02*y_max*np.cos(th), f"{a:.0f}",
                      ha="center", va="center", fontsize=9)
 
     title_cone = "Sonar Cone"

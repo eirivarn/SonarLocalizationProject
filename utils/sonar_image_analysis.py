@@ -55,7 +55,7 @@ class FrameAnalysisResult:
         }
 
 class SonarDataProcessor:
-    """Simplified sonar data processor - core functionality only."""
+    """ sonar data processor - core functionality only."""
     
     def __init__(self, img_config: Dict = None):
         self.img_config = img_config or IMAGE_PROCESSING_CONFIG
@@ -87,7 +87,7 @@ class SonarDataProcessor:
         )
         
     def analyze_frame(self, frame_u8: np.ndarray, extent: Tuple[float,float,float,float] = None) -> FrameAnalysisResult:
-        """Simplified frame analysis without complex object separation."""
+        """ frame analysis without complex object separation."""
         H, W = frame_u8.shape[:2]
         
         # STEP 1: Simple preprocessing
@@ -242,7 +242,7 @@ class SonarDataProcessor:
         )
 
     def process_frame(self, frame_idx: int) -> Optional[FrameAnalysisResult]:
-        """SIMPLIFIED process frame - user provides NPZ file index separately."""
+        """ process frame - user provides NPZ file index separately."""
         # NOTE: This method requires NPZ file to be loaded separately
         # Use DistanceAnalysisEngine.analyze_npz_sequence for full workflow
         try:
@@ -1060,7 +1060,7 @@ def compute_structure_tensor_field_fast(grad_x: np.ndarray, grad_y: np.ndarray,
         sigma: Gaussian smoothing parameter
         
     Returns:
-        orientation_map: Dominant orientation at each pixel (0-180°)
+        orientation_map: Dominant orientation at each pixel (0-180)
         coherency_map: Coherency (linearity measure) at each pixel (0-1)
     """
     # Structure tensor components
@@ -1113,14 +1113,14 @@ def compute_structure_tensor_field_fast(grad_x: np.ndarray, grad_y: np.ndarray,
 
 
 def create_oriented_gradient_kernel_fast(angle_degrees, size):
-    """Fast simplified gradient kernel creation."""
+    """Fast  gradient kernel creation."""
     if size % 2 == 0:
         size += 1
     
     center = size // 2
     kernel = np.zeros((size, size), dtype=np.float32)
     
-    # Simplified gradient using Sobel-like pattern
+    #  gradient using Sobel-like pattern
     angle_rad = np.radians(angle_degrees)
     cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
     
@@ -1142,7 +1142,7 @@ def create_oriented_gradient_kernel_fast(angle_degrees, size):
     return kernel
 
 def create_circular_kernel_fast(radius):
-    """Fast circular kernel with simplified weights."""
+    """Fast circular kernel with  weights."""
     size = 2 * radius + 1
     center = radius
     y, x = np.ogrid[:size, :size]
@@ -1157,8 +1157,8 @@ def create_circular_kernel_fast(radius):
     return kernel / np.sum(kernel) if np.sum(kernel) > 0 else kernel
 
 def create_elliptical_kernel_fast(base_radius, elongation_factor, angle_degrees):
-    """Fast elliptical kernel with simplified computation."""
-    # Simplified ellipse - just stretch circular kernel
+    """Fast elliptical kernel with  computation."""
+    #  ellipse - just stretch circular kernel
     elongated_radius = int(base_radius * elongation_factor)
     size = 2 * elongated_radius + 1
     center = size // 2
@@ -1174,7 +1174,7 @@ def create_elliptical_kernel_fast(base_radius, elongation_factor, angle_degrees)
     x_rot = x_c * cos_a + y_c * sin_a
     y_rot = -x_c * sin_a + y_c * cos_a
     
-    # Ellipse equation (simplified)
+    # Ellipse equation
     ellipse_dist = (x_rot / elongated_radius) ** 2 + (y_rot / base_radius) ** 2
     kernel = (ellipse_dist <= 1.0).astype(np.float32)
     
@@ -1473,7 +1473,7 @@ def process_frame_for_video(frame_u8: np.ndarray, prev_aoi: Optional[Tuple[int,i
                 # Draw the ellipse
                 cv2.ellipse(out, ellipse, (255, 0, 255), 1)
                 
-                # 90°-rotated major-axis line (red)
+                # 90-rotated major-axis line (red)
                 ang_r = np.radians(ang + 90.0)
                 half = major * 0.5
                 p1 = (int(cx + half*np.cos(ang_r)), int(cy + half*np.sin(ang_r)))
@@ -1589,10 +1589,6 @@ class DistanceAnalysisEngine:
             result.timestamp = timestamps[idx] if idx < len(timestamps) else timestamps[0]
             
             results.append(result.to_dict())
-            
-            if (i + 1) % 50 == 0:
-                success_rate = sum(1 for r in results if r['detection_success']) / len(results) * 100
-                print(f"  Processed {i+1}/{actual} frames (Success rate: {success_rate:.1f}%)")
         
         df = pd.DataFrame(results)
         self._print_analysis_summary(df)
@@ -1672,10 +1668,6 @@ class DistanceAnalysisEngine:
                 result.timestamp = df.loc[idx, "ts_utc"]
                 
                 results.append(result.to_dict())
-                
-                if (i + 1) % 50 == 0:
-                    success_rate = sum(1 for r in results if r['detection_success']) / len(results) * 100
-                    print(f"  Processed {i+1}/{actual} frames (Success rate: {success_rate:.1f}%)")
                     
             except Exception as e:
                 print(f"Error processing frame {idx}: {e}")
@@ -1946,9 +1938,9 @@ class ComparisonEngine:
         print(f"DVL mean distance:   {dvl_mean:.3f} m")
         print(f"Scale ratio (Sonar/DVL): {stats['scale_ratio']:.3f}x")
         if pitch_stats:
-            print(f"Sonar mean pitch:    {pitch_stats['sonar_pitch_mean_deg']:.2f}°")
-            print(f"DVL mean pitch:      {pitch_stats['dvl_pitch_mean_deg']:.2f}°")
-            print(f"Pitch difference:    {pitch_stats['pitch_diff_deg']:.2f}°")
+            print(f"Sonar mean pitch:    {pitch_stats['sonar_pitch_mean_deg']:.2f}")
+            print(f"DVL mean pitch:      {pitch_stats['dvl_pitch_mean_deg']:.2f}")
+            print(f"Pitch difference:    {pitch_stats['pitch_diff_deg']:.2f}")
         print(f"Sonar duration: {stats['sonar_duration_s']:.1f}s ({stats['sonar_frames']} frames)")
         print(f"DVL duration:   {stats['dvl_duration_s']:.1f}s ({stats['dvl_records']} records)")
         
@@ -2175,7 +2167,7 @@ class ComparisonEngine:
         print(f"  X (right):  {stats['sonar_mean_x']:+.3f} m")
         print(f"  Y (down):   {stats['sonar_mean_y']:+.3f} m")
         print(f"  Distance:   {stats['sonar_mean_distance_m']:.3f} m")
-        print(f"  Angle:      {stats['sonar_mean_angle_deg']:.1f}°")
+        print(f"  Angle:      {stats['sonar_mean_angle_deg']:.1f}")
         print(f"\nDVL net position (mean):")
         print(f"  X:          {stats['dvl_mean_x']:+.3f} m")
         print(f"  Y:          {stats['dvl_mean_y']:+.3f} m")
@@ -2373,16 +2365,6 @@ def create_contour_detection_video(npz_file_index=0, frame_start=0, frame_count=
         except Exception:
             pass
             
-        # Update tracking stats
-        if next_aoi is not None:
-            if aoi is None:
-                new += 1
-            elif aoi == next_aoi:
-                lost += 1
-            else:
-                tracked += 1
-        else:
-            lost += 1
         aoi = next_aoi
         
         # Add frame counter
@@ -2397,23 +2379,14 @@ def create_contour_detection_video(npz_file_index=0, frame_start=0, frame_count=
     print(f"\n=== VIDEO CREATION COMPLETE ===")
     print(f"Video saved to: {output_path}")
     print(f"Video specs: {W}x{H}, {VIDEO_CONFIG['fps']} fps, {actual} frames")
-    print(f"Tracking stats:")
-    total_det = tracked + new
-    print(f"  - Tracked frames: {tracked}")
-    print(f"  - New detections: {new}")
-    print(f"  - Lost/searching frames: {lost}")
-    if total_det > 0:
-        print(f"  - Detection success rate: {total_det/actual*100:.1f}%")
-        print(f"  - Tracking continuity:   {tracked/max(1,total_det)*100:.1f}%")
-    
     return output_path
 
 def create_enhanced_contour_detection_video_with_processor(npz_file_index=0, frame_start=0, frame_count=100,
                                                           frame_step=5, output_path='enhanced_video.mp4',
                                                           processor: SonarDataProcessor = None):
-    """Create video using the simplified SonarDataProcessor."""
-    print("=== ENHANCED VIDEO CREATION (Simplified) ===")
-    print(f"Creating video with simplified processor...")
+    """Create video using the  SonarDataProcessor."""
+    print("=== ENHANCED VIDEO CREATION () ===")
+    print(f"Creating video with  processor...")
     print(f"Frames: {frame_count}, step: {frame_step}")
     
     if processor is None:
@@ -2460,7 +2433,7 @@ def create_enhanced_contour_detection_video_with_processor(npz_file_index=0, fra
     # Tracking statistics
     tracked, new, lost = 0, 0, 0
     
-    print(f"Processing {actual} frames with simplified processor...")
+    print(f"Processing {actual} frames...")
     
     for i in range(actual):
         idx = frame_start + i * frame_step
@@ -2563,7 +2536,7 @@ def create_enhanced_contour_detection_video_with_processor(npz_file_index=0, fra
                     # Draw the ellipse (magenta)
                     cv2.ellipse(vis, ellipse, (255, 0, 255), 1)
                     
-                    # 90°-rotated major-axis line (red)
+                    # 90-rotated major-axis line (red)
                     ang_r = np.radians(ang + 90.0)
                     half = major * 0.5
                     p1 = (int(cx + half*np.cos(ang_r)), int(cy + half*np.sin(ang_r)))
@@ -2594,9 +2567,9 @@ def create_enhanced_contour_detection_video_with_processor(npz_file_index=0, fra
             new += 1
         else:
             lost += 1
-        
-        # Add processing info (simplified)
-        frame_info = f'Frame: {idx} | {status} | Simplified Processing'
+
+        # Add processing info
+        frame_info = f'Frame: {idx} | {status} | Processing'
         cv2.putText(vis, frame_info, (10, H - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1)
         
         vw.write(vis)
@@ -2605,17 +2578,10 @@ def create_enhanced_contour_detection_video_with_processor(npz_file_index=0, fra
             print(f"Processed {i+1}/{actual} frames")
 
     vw.release()
-    
-    print(f"\n=== ENHANCED VIDEO CREATION COMPLETE ===")
+
+    print(f"\n=== VIDEO CREATION COMPLETE ===")
     print(f"Video saved to: {output_path}")
     print(f"Video specs: {W}x{H}, {VIDEO_CONFIG['fps']} fps, {actual} frames")
-    print(f"SIMPLIFIED TRACKING STATS:")
-    total_det = tracked + new
-    print(f"  - Total detected frames: {total_det}")
-    print(f"  - Lost/searching frames: {lost}")
-    if total_det > 0:
-        print(f"  - Detection success rate: {total_det/actual*100:.1f}%")
-    
     return output_path
 
 def contour_overlap_with_aoi(contour: np.ndarray, aoi, min_overlap_percent: float = 0.7) -> bool:
@@ -2648,3 +2614,71 @@ def contour_overlap_with_aoi(contour: np.ndarray, aoi, min_overlap_percent: floa
     
     overlap_percent = inside_count / total_points if total_points > 0 else 0
     return overlap_percent >= min_overlap_percent
+
+def get_pixel_to_meter_mapping(npz_file_path: Union[str, Path]) -> Dict[str, Any]:
+    """
+    Auto-detect pixel->meter mapping from NPZ file metadata.
+    
+    Args:
+        npz_file_path: Path to NPZ file
+        
+    Returns:
+        Dictionary containing mapping parameters and metadata
+    """
+    npz_file_path = Path(npz_file_path)
+    
+    try:
+        cones, ts, extent, meta = load_cone_run_npz(npz_file_path)
+        T, H, W = cones.shape
+        x_min, x_max, y_min, y_max = extent
+        width_m = float(x_max - x_min)
+        height_m = float(y_max - y_min)
+        px2m_x = width_m / float(W)
+        px2m_y = height_m / float(H)
+        pixels_to_meters_avg = 0.5 * (px2m_x + px2m_y)
+        
+        mapping_info = {
+            'pixels_to_meters_avg': pixels_to_meters_avg,
+            'px2m_x': px2m_x,
+            'px2m_y': px2m_y,
+            'image_shape': (H, W),
+            'sonar_coverage_meters': max(width_m, height_m),
+            'extent': extent,
+            'width_m': width_m,
+            'height_m': height_m,
+            'source': 'npz_metadata',
+            'success': True
+        }
+        
+        print(f"Detected NPZ extent: x=[{x_min:.3f},{x_max:.3f}] m, y=[{y_min:.3f},{y_max:.3f}] m")
+        print(f"Image shape from NPZ: H={H}, W={W}")
+        print(f"meters/pixel: x={px2m_x:.6f}, y={px2m_y:.6f}, avg={pixels_to_meters_avg:.6f}")
+        
+        return mapping_info
+        
+    except Exception as e:
+        print(f"Could not read NPZ metadata: {e}")
+        print("Falling back to defaults from sonar_config.")
+        
+        from utils.sonar_config import CONE_H_DEFAULT, CONE_W_DEFAULT, DISPLAY_RANGE_MAX_M_DEFAULT
+        image_shape = (CONE_H_DEFAULT, CONE_W_DEFAULT)
+        sonar_coverage_meters = DISPLAY_RANGE_MAX_M_DEFAULT * 2  # approximate
+        pixels_to_meters_avg = sonar_coverage_meters / max(image_shape)
+        
+        mapping_info = {
+            'pixels_to_meters_avg': pixels_to_meters_avg,
+            'px2m_x': pixels_to_meters_avg,
+            'px2m_y': pixels_to_meters_avg,
+            'image_shape': image_shape,
+            'sonar_coverage_meters': sonar_coverage_meters,
+            'extent': None,
+            'width_m': sonar_coverage_meters,
+            'height_m': sonar_coverage_meters,
+            'source': 'config_defaults',
+            'success': False,
+            'error': str(e)
+        }
+        
+        print(f"Using fallback pixels_to_meters_avg = {pixels_to_meters_avg:.6f} m/px")
+        
+        return mapping_info

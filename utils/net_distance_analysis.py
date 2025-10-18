@@ -576,16 +576,16 @@ def process_sonar_data_and_visualize(
         distance = distance_data['Navigation NetDistance']['value']
 
         if distance <= sonar_params['rmax']:
-            # Create a net line where 0° = parallel to x-axis (cross-track)
+            # Create a net line where 0 = parallel to x-axis (cross-track)
             net_half_width = 2.0  # Half width of the net line
 
-            # Original cross-track oriented line points (0° reference = parallel to x-axis)
+            # Original cross-track oriented line points (0 reference = parallel to x-axis)
             original_x1 = -net_half_width
             original_y1 = 0  # Start at origin level
             original_x2 = net_half_width
             original_y2 = 0  # Start at origin level
 
-            # Rotate by net pitch angle directly (0° = parallel to x-axis)
+            # Rotate by net pitch angle directly (0 = parallel to x-axis)
             cos_angle = np.cos(net_angle_rad)   # Use direct angle (no negation)
             sin_angle = np.sin(net_angle_rad)   # Use direct angle (no negation)
 
@@ -604,7 +604,7 @@ def process_sonar_data_and_visualize(
             # Draw ONLY the rotated net line (thinner orange line)
             ax.plot([rotated_x1, rotated_x2], [rotated_y1, rotated_y2],
                    color='orange', linewidth=4, alpha=0.95,
-                   label=f" Net Position: {distance:.2f}m @ {net_angle_deg:.1f}° (pitch)", zorder=5)
+                   label=f" Net Position: {distance:.2f}m @ {net_angle_deg:.1f} (pitch)", zorder=5)
 
             # Add smaller endpoints
             ax.plot([rotated_x1, rotated_x2], [rotated_y1, rotated_y2], 'o',
@@ -637,7 +637,7 @@ def process_sonar_data_and_visualize(
     title = f" SONAR WITH NET POSITION (PITCH-BASED) - {target_bag}\n"
     title += f"Frame {frame_index} | rmax={sonar_params['rmax']}m"
     if distance_data and 'Navigation NetDistance' in distance_data:
-        title += f" | Net: {distance_data['Navigation NetDistance']['value']:.2f}m @ {net_angle_deg:.1f}° (pitch)"
+        title += f" | Net: {distance_data['Navigation NetDistance']['value']:.2f}m @ {net_angle_deg:.1f} (pitch)"
     ax.set_title(title, fontsize=18, fontweight='bold', pad=25)
 
     # SIMPLIFIED LEGEND
@@ -658,7 +658,7 @@ def process_sonar_data_and_visualize(
     if distance_data and 'Navigation NetDistance' in distance_data:
         info_text = f"🎯 NET POSITION:\n"
         info_text += f"• Distance: {distance_data['Navigation NetDistance']['value']:.2f}m\n"
-        info_text += f"• Pitch: {net_angle_deg:.1f}° (direct)\n"
+        info_text += f"• Pitch: {net_angle_deg:.1f} (direct)\n"
         info_text += f"• Orange line = net position"
 
         ax.text(0.02, 0.98, info_text, transform=ax.transAxes, fontsize=12,

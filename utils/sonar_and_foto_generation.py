@@ -216,7 +216,7 @@ def export_optimized_sonar_video(
     print("=" * 70)
     print(f"Target Bag: {TARGET_BAG}")
     print(f"   Cone Size: {CONE_W}x{CONE_H}")
-    print(f"   Range: {RANGE_MIN_M}-{DISPLAY_RANGE_MAX_M}m | FOV: {FOV_DEG}°")
+    print(f"   Range: {RANGE_MIN_M}-{DISPLAY_RANGE_MAX_M}m | FOV: {FOV_DEG}")
     
     # --- Auto-detect video files if enabled ---
     if VIDEO_SEQ_DIR is None and AUTO_DETECT_VIDEO:
@@ -581,15 +581,15 @@ def export_optimized_sonar_video(
                         if sync_status == "FULL_SYNC":
                             dvl_line_color = (0, 255, 255)  # Yellow - perfect sync
                             dvl_center_color = (0, 200, 200)  # Darker yellow
-                            dvl_label = f"DVL: {net_distance:.2f}m @ {net_angle_deg:.1f}°"
+                            dvl_label = f"DVL: {net_distance:.2f}m @ {net_angle_deg:.1f}"
                         elif sync_status == "DISTANCE_OK_WITH_PITCH":
                             dvl_line_color = (0, 255, 128)  # Light green - distance OK, pitch from closest
                             dvl_center_color = (0, 200, 100)  # Darker green
-                            dvl_label = f"DVL: {net_distance:.2f}m @ {net_angle_deg:.1f}° (approx)"
+                            dvl_label = f"DVL: {net_distance:.2f}m @ {net_angle_deg:.1f} (approx)"
                         else:
                             dvl_line_color = (0, 165, 255)  # Orange - distance only
                             dvl_center_color = (0, 130, 200)  # Darker orange
-                            dvl_label = f"DVL: {net_distance:.2f}m @ 0.0°"
+                            dvl_label = f"DVL: {net_distance:.2f}m @ 0.0"
 
                         # Only draw angled line if we have pitch data
                         use_angle = sync_status in ["FULL_SYNC", "DISTANCE_OK_WITH_PITCH", "BOTH_SYNC", "FFT_DVL_SYNC", "ALL_THREE_SYNC"]
@@ -626,7 +626,7 @@ def export_optimized_sonar_video(
                         fft_center_color = (200, 200, 0)  # Darker cyan
                         fft_label = f"FFT: {fft_distance_m:.2f}m"
                         if fft_pitch_deg is not None:
-                            fft_label += f" @ {fft_pitch_deg:.1f}°"
+                            fft_label += f" @ {fft_pitch_deg:.1f}"
 
                         # Draw angled line using FFT pitch (if available)
                         fft_angle_rad = np.radians(fft_pitch_deg) if fft_pitch_deg is not None else 0.0
@@ -659,7 +659,7 @@ def export_optimized_sonar_video(
                     if sonar_distance_m is not None and sonar_distance_m <= DISPLAY_RANGE_MAX_M:
                         sonar_line_color = (255, 0, 255)  # Magenta
                         sonar_center_color = (200, 0, 200)  # Darker magenta
-                        sonar_label = f"SONAR: {sonar_distance_m:.2f}m @ {sonar_angle_deg:.1f}°"
+                        sonar_label = f"SONAR: {sonar_distance_m:.2f}m @ {sonar_angle_deg:.1f}"
 
                         # Draw angled line using sonar angle
                         sonar_angle_rad = np.radians(sonar_angle_deg)
@@ -754,7 +754,7 @@ def export_optimized_sonar_video(
                     cv2.line(cone_bgr, vehicle_center, (px_end, py_end), grid_blue, 1)
                     if bearing_deg % 30 == 0:
                         label_pos = (x_px(x_end * 0.85), y_px(y_end * 0.85))
-                        cv2.putText(cone_bgr, f"{bearing_deg:+d}°", label_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.4, grid_blue, 1)
+                        cv2.putText(cone_bgr, f"{bearing_deg:+d}", label_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.4, grid_blue, 1)
 
             # annotate status if net considered
             if (INCLUDE_NET or SONAR_RESULTS is not None or FFT_NET_DATA is not None) and status_text:

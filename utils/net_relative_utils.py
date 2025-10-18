@@ -53,7 +53,7 @@ class NetRelativePositionCalculator:
             df: DataFrame with sonar measurements
             distance_col: Column name for distance measurements
             angle_col: Column name for angle measurements
-            apply_angle_correction: Whether to apply -180° correction to angles
+            apply_angle_correction: Whether to apply -180 correction to angles
             
         Returns:
             DataFrame with added sonar_x_m and sonar_y_m columns
@@ -394,7 +394,7 @@ class NetRelativeVisualizer:
         fig.update_layout(
             title=f"Pitch Comparison Over Time: {target_bag}",
             xaxis_title="Time",
-            yaxis_title="Pitch (°)",
+            yaxis_title="Pitch ()",
             height=500,
             showlegend=True
         )
@@ -568,7 +568,7 @@ def run_complete_three_system_analysis(df_sonar: pd.DataFrame, df_nav: pd.DataFr
     if 'pitch' in df_fft_processed.columns:
         df_fft_processed['pitch_rad'] = pd.to_numeric(df_fft_processed['pitch'], errors='coerce')
         df_fft_processed['pitch_deg'] = df_fft_processed['pitch_rad'] * 180 / np.pi
-        print(f"FFT pitch range: {df_fft_processed['pitch_deg'].min():.1f}° to {df_fft_processed['pitch_deg'].max():.1f}°")
+        print(f"FFT pitch range: {df_fft_processed['pitch_deg'].min():.1f} to {df_fft_processed['pitch_deg'].max():.1f}")
     
     # Calculate X,Y positions from distance and pitch (using radians)
     if 'distance_m' in df_fft_processed.columns and 'pitch_rad' in df_fft_processed.columns:

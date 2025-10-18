@@ -97,7 +97,7 @@ IMAGE_PROCESSING_CONFIG: Dict = {
                                          # Higher values = only very linear patterns get elongated (selective)
 
     'adaptive_angle_steps': 20,          # Number of angles tested for linearity 
-                                         # Uses 20° increments for optimal speed/quality balance
+                                         # Uses 20 increments for optimal speed/quality balance
                                          # More steps = better angle resolution but slower processing
 
     'momentum_boost': 100.0,              # Enhancement strength multiplier 
