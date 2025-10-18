@@ -31,7 +31,7 @@ from utils.sonar_config import SONAR_VIS_DEFAULTS, ConeGridSpec, EXPORTS_DIR_DEF
 
 class SonarVisualizer:
     """
-    Main class for sonar data visualization with configurable parameters.
+    Class for sonar data visualization with configurable parameters.
     Delegates computation to utils.sonar_utils to keep this file small and focused.
     """
 
@@ -305,11 +305,6 @@ def print_sonar_files(candidates: List[Path]) -> None:
         return
     for i, p in enumerate(candidates):
         print(f"[{i}] {p}")
-
-# -----------------------------------------------------------------------------
-# Optional: direct bag analysis (kept as-is, small and standalone)
-# -----------------------------------------------------------------------------
-def analyze_bag_directly(bag_path: Union[str, Path], topic: str, frame_index: int = 0) -> Dict:
     """
     Inspect one frame directly from a ROS bag (for debugging).
     """
