@@ -58,11 +58,10 @@ def prepare_three_system_data(
     print("🔄 PREPARING THREE-SYSTEM SYNCHRONIZED DATA")
     print("=" * 60)
     
-    # STEP 1: Load FFT data using notebook 08's method
+    # STEP 1: Load FFT data if available
     fft_net_data = None
     if fft_csv_path and fft_csv_path.exists():
         try:
-            # Try to use notebook 08's FFT loading methods
             from utils.relative_fft_analysis import load_relative_fft_data, convert_fft_to_xy_coordinates
             
             print("✓ Using notebook 08's FFT loading methods...")
@@ -70,28 +69,16 @@ def prepare_three_system_data(
             fft_net_data = convert_fft_to_xy_coordinates(fft_net_data)
             print(f"✓ Loaded FFT data via notebook 08 method: {len(fft_net_data)} records")
             
-        except ImportError:
-            print("✗ Notebook 08 FFT utilities not available - using fallback method")
-            # Fallback to manual method
-            fft_net_data = pd.read_csv(fft_csv_path)
-            fft_net_data = fft_net_data.rename(columns={'time': 'timestamp', 'distance': 'distance_cm', 'pitch': 'pitch_rad'})
-            
-            # Convert units
-            if 'distance_cm' in fft_net_data.columns:
-                fft_net_data['distance_m'] = fft_net_data['distance_cm'] / 100.0
-            if 'pitch_rad' in fft_net_data.columns:
-                fft_net_data['pitch_deg'] = np.degrees(fft_net_data['pitch_rad'])
-            
-            # Handle timestamps - convert Unix timestamps to timezone-naive datetime
-            fft_timestamp_values = pd.to_numeric(fft_net_data['timestamp'], errors='coerce')
-            if fft_timestamp_values.min() > 1e9:
-                fft_net_data['timestamp'] = pd.to_datetime(fft_timestamp_values, unit='s', utc=True).dt.tz_localize(None)
-                print(f"✓ Converted Unix timestamps to timezone-naive")
         except Exception as e:
             print(f"✗ FFT loading error: {e}")
+            print("   Continuing without FFT data (two-system mode: DVL + Sonar)")
             fft_net_data = None
     elif fft_csv_path:
         print(f"✗ FFT file not found: {fft_csv_path.name}")
+        print("   Continuing without FFT data (two-system mode: DVL + Sonar)")
+    else:
+        print("ℹ️  No FFT data path provided")
+        print("   Running in two-system mode: DVL + Sonar only")
     
     # STEP 2: Use notebook 08's synchronization approach if available
     if fft_net_data is not None and use_notebook08_sync:
@@ -154,6 +141,8 @@ def prepare_three_system_data(
                 fft_net_data_sync['timestamp'] = fft_net_data_sync['timestamp'].dt.tz_localize(None)
     
     print(f"✓ Fallback synchronization completed")
+    print(f"   Systems active: DVL + Sonar" + (" + FFT" if fft_net_data is not None else ""))
+    
     return net_analysis_sync, fft_net_data_sync
 
 def export_optimized_sonar_video(
@@ -508,16 +497,14 @@ def export_optimized_sonar_video(
                             elif "distance_cm" in fft_rec and pd.notna(fft_rec["distance_cm"]):
                                 fft_distance_m = float(fft_rec["distance_cm"]) / 100.0  # cm -> m
                             elif "distance" in fft_rec and pd.notna(fft_rec["distance"]):
-                                # Assume cm if no unit specified (common FFT format)
                                 fft_distance_m = float(fft_rec["distance"]) / 100.0  # cm -> m
                                 
                             if "pitch_deg" in fft_rec and pd.notna(fft_rec["pitch_deg"]):
                                 fft_pitch_deg = float(fft_rec["pitch_deg"])
                             elif "pitch_rad" in fft_rec and pd.notna(fft_rec["pitch_rad"]):
-                                fft_pitch_deg = float(np.degrees(fft_rec["pitch_rad"]))  # rad -> deg
+                                fft_pitch_deg = float(np.degrees(fft_rec["pitch_rad"]))
                             elif "pitch" in fft_rec and pd.notna(fft_rec["pitch"]):
-                                # Assume radians if no unit specified (common FFT format)
-                                fft_pitch_deg = float(np.degrees(fft_rec["pitch"]))  # rad -> deg
+                                fft_pitch_deg = float(np.degrees(fft_rec["pitch"]))
                             
                             # Update sync status
                             if fft_distance_m is not None:
@@ -688,81 +675,17 @@ def export_optimized_sonar_video(
                         cv2.circle(cone_bgr, (center_px, center_py), center_radius, sonar_center_color, -1)
                         cv2.circle(cone_bgr, (center_px, center_py), center_radius, (255, 255, 255), center_outline)
 
-                    # --- AOI / Corridor mask overlay (if available and enabled) ---
-                    from utils.sonar_config import VIDEO_CONFIG
-                    if VIDEO_CONFIG.get('show_aoi_corridor', False):
-                        # Attempt to locate mask data in sonar_rec (or global SONAR_RESULTS)
-                        try:
-                            # Sonar analysis may include raw masks (ellipse_mask, corridor_mask)
-                            mask_ell = sonar_rec.get('ellipse_mask', None) if 'sonar_rec' in locals() else None
-                            mask_corr = sonar_rec.get('corridor_mask', None) if 'sonar_rec' in locals() else None
-                        except Exception:
-                            mask_ell = None
-                            mask_corr = None
+            # Create status text with all three systems
+            status_lines = []
+            if net_distance is not None:
+                status_lines.append(dvl_label if 'dvl_label' in locals() else f"DVL: {net_distance:.2f}m")
+            if fft_distance_m is not None:
+                status_lines.append(fft_label)
+            if sonar_distance_m is not None:
+                status_lines.append(sonar_label if 'sonar_label' in locals() else f"SONAR: {sonar_distance_m:.2f}m")
+            if status_lines:
+                status_text = " | ".join(status_lines)
 
-                        # If masks are not present but SONAR_RESULTS contains blobs as arrays,
-                        # skip gracefully. The analysis module populates masks in `current_aoi` when running live.
-                        if mask_ell is not None and isinstance(mask_ell, (np.ndarray,)):
-                            # Convert single-channel mask to colored overlay and alpha blend
-                            a_color = VIDEO_CONFIG.get('aoi_mask_color', (0,255,0))
-                            a_alpha = float(VIDEO_CONFIG.get('aoi_mask_alpha', 0.25))
-                            mask_bool = (mask_ell > 0).astype(np.uint8)
-                            color_layer = np.zeros_like(cone_bgr, dtype=np.uint8)
-                            color_layer[mask_bool > 0] = a_color
-                            cone_bgr = cv2.addWeighted(cone_bgr.astype(np.float32), 1.0, color_layer.astype(np.float32), a_alpha, 0)
-
-                        if mask_corr is not None and isinstance(mask_corr, (np.ndarray,)):
-                            c_color = VIDEO_CONFIG.get('corridor_mask_color', (0,128,255))
-                            c_alpha = float(VIDEO_CONFIG.get('corridor_mask_alpha', 0.25))
-                            mask_bool = (mask_corr > 0).astype(np.uint8)
-                            color_layer = np.zeros_like(cone_bgr, dtype=np.uint8)
-                            color_layer[mask_bool > 0] = c_color
-                            cone_bgr = cv2.addWeighted(cone_bgr.astype(np.float32), 1.0, color_layer.astype(np.float32), c_alpha, 0)
-
-                    # Create status text with all three systems
-                    status_lines = []
-                    if net_distance is not None:
-                        status_lines.append(dvl_label if 'dvl_label' in locals() else f"DVL: {net_distance:.2f}m")
-                    if fft_distance_m is not None:
-                        status_lines.append(fft_label)
-                    if sonar_distance_m is not None:
-                        status_lines.append(sonar_label if 'sonar_label' in locals() else f"SONAR: {sonar_distance_m:.2f}m")
-                    if status_lines:
-                        status_text = " | ".join(status_lines)
-
-                else:
-                    if INCLUDE_NET or SONAR_RESULTS is not None or FFT_NET_DATA is not None:
-                        status_text = f"NET: NO SYNC DATA (tol: {NET_DISTANCE_TOLERANCE}s)"
-                        line_color = (128, 128, 128)
-
-            # grid rings and bearings
-            for r_m in [1.0, 2.0, 3.0, 4.0, 5.0, 7.5, 10.0]:
-                if r_m <= DISPLAY_RANGE_MAX_M:
-                    ring_y = y_px(r_m)
-                    radius_px = abs(vehicle_center[1] - ring_y)
-                    cv2.circle(cone_bgr, vehicle_center, radius_px, grid_blue, 1)
-                    if r_m in [2.0, 5.0, 10.0]:
-                        label_pos = (vehicle_center[0] + 15, ring_y + 5)
-                        cv2.putText(cone_bgr, f"{r_m:.0f}m", label_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.4, grid_blue, 1)
-
-            for bearing_deg in [-60, -45, -30, -15, 0, 15, 30, 45, 60]:
-                if abs(bearing_deg) <= FOV_DEG / 2:
-                    bearing_rad = np.radians(bearing_deg)
-                    x_end = np.sin(bearing_rad) * DISPLAY_RANGE_MAX_M
-                    y_end = np.cos(bearing_rad) * DISPLAY_RANGE_MAX_M
-                    px_end, py_end = x_px(x_end), y_px(y_end)
-                    cv2.line(cone_bgr, vehicle_center, (px_end, py_end), grid_blue, 1)
-                    if bearing_deg % 30 == 0:
-                        label_pos = (x_px(x_end * 0.85), y_px(y_end * 0.85))
-                        cv2.putText(cone_bgr, f"{bearing_deg:+d}", label_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.4, grid_blue, 1)
-
-            # annotate status if net considered
-            if (INCLUDE_NET or SONAR_RESULTS is not None or FFT_NET_DATA is not None) and status_text:
-                # Updated Legend for three systems
-                legend_y = 15
-                cv2.putText(cone_bgr, "DVL: Yellow/Orange | FFT: Cyan | SONAR: Magenta", (10, legend_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2, cv2.LINE_AA)
-                cv2.putText(cone_bgr, "DVL: Yellow/Orange | FFT: Cyan | SONAR: Magenta", (10, legend_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
-                
                 # Status with black outline for better visibility
                 cv2.putText(cone_bgr, status_text, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3, cv2.LINE_AA)
                 cv2.putText(cone_bgr, status_text, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
@@ -771,6 +694,11 @@ def export_optimized_sonar_video(
             frame_info = f"Frame {frame_idx}/{len(frame_indices)} | {TARGET_BAG} | 3-Sys.Sync"
             cv2.putText(cone_bgr, frame_info, (10, CONE_H - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2, cv2.LINE_AA)
             cv2.putText(cone_bgr, frame_info, (10, CONE_H - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
+
+            # CRITICAL FIX: After all alpha blending operations, ensure uint8
+            # The alpha blend operations return float32, but VideoWriter needs uint8
+            if cone_bgr.dtype != np.uint8:
+                cone_bgr = np.clip(cone_bgr, 0, 255).astype(np.uint8)
 
             return cone_bgr
 
@@ -784,6 +712,10 @@ def export_optimized_sonar_video(
         cone_frame = make_cone_frame(frame_idx)
         if cone_frame is None:
             continue
+
+        # CRITICAL FIX: Ensure cone_frame is uint8 before compositing
+        if cone_frame.dtype != np.uint8:
+            cone_frame = np.clip(cone_frame, 0, 255).astype(np.uint8)
 
         # compose (camera optional)
         if VIDEO_SEQ_DIR is not None and dfv is not None and video_idx is not None:
@@ -836,6 +768,10 @@ def export_optimized_sonar_video(
             if not writer.isOpened():
                 raise RuntimeError(f"Could not open writer: {out_path}")
 
+        # FINAL CHECK: Ensure uint8 before writing
+        if composite.dtype != np.uint8:
+            composite = np.clip(composite, 0, 255).astype(np.uint8)
+            
         writer.write(composite)
         frames_written += 1
 
@@ -896,24 +832,12 @@ def generate_three_system_video(
 ) -> Path:
     """
     Simplified three-system video generation with automatic synchronization.
-    
-    Args:
-        target_bag: Bag identifier
-        exports_folder: Path to exports folder
-        net_analysis_results: Sonar analysis results
-        raw_data: Raw data dictionary (with 'navigation' key)
-        fft_csv_path: Path to FFT CSV file
-        start_idx: Start frame index
-        end_idx: End frame index
-        **video_kwargs: Additional arguments for export_optimized_sonar_video
-    
-    Returns:
-        Path to generated video file
+    Falls back gracefully to two-system mode if FFT data is not available.
     """
-    print("GENERATING THREE-SYSTEM VIDEO")
+    print("GENERATING THREE-SYSTEM VIDEO" if fft_csv_path and fft_csv_path.exists() else "GENERATING TWO-SYSTEM VIDEO")
     print("=" * 50)
     
-    # Prepare synchronized data
+    # Prepare synchronized data (handles missing FFT gracefully)
     net_analysis_sync, fft_net_data_sync = prepare_three_system_data(
         target_bag=target_bag,
         exports_folder=exports_folder,
@@ -932,17 +856,199 @@ def generate_three_system_video(
         AUTO_DETECT_VIDEO=True,
         INCLUDE_NET=True,
         SONAR_RESULTS=net_analysis_sync,
-        FFT_NET_DATA=fft_net_data_sync,
+        FFT_NET_DATA=fft_net_data_sync,  # Can be None
         NET_DISTANCE_TOLERANCE=0.5,
         NET_PITCH_TOLERANCE=2.0,
         **video_kwargs
     )
     
-    print(f"\nTHREE-SYSTEM VIDEO GENERATED: {video_path}")
+    systems_count = 2 + (1 if fft_net_data_sync is not None else 0)
+    print(f"\n{systems_count}-SYSTEM VIDEO GENERATED: {video_path}")
     print(f"   Systems synchronized:")
     print(f"   - DVL: Navigation-based robot position relative to net")
-    print(f"   - FFT: High-precision signal processing net detection")
+    if fft_net_data_sync is not None:
+        print(f"   - FFT: High-precision signal processing net detection")
     print(f"   - Sonar: Image analysis of sonar returns")
-    print(f"   - Uniform styling: All systems use consistent visual appearance")
     
     return video_path
+
+def create_enhanced_contour_detection_video_with_processor(
+    npz_file_index=0, frame_start=0, frame_count=100,
+    frame_step=5, output_path='enhanced_video.mp4',
+    processor=None
+):
+    """Create video using the SonarDataProcessor - SHOWS AOI/corridor masks for detailed analysis."""
+    from utils.sonar_image_analysis import (
+        SonarDataProcessor, get_available_npz_files, 
+        load_cone_run_npz, to_uint8_gray
+    )
+    from utils.sonar_config import VIDEO_CONFIG
+    
+    print("=== ENHANCED VIDEO CREATION WITH AOI/CORRIDOR VISUALIZATION ===")
+    
+    if processor is None:
+        processor = SonarDataProcessor()
+        
+    files = get_available_npz_files()
+    if npz_file_index >= len(files):
+        print(f"Error: NPZ file index {npz_file_index} not available")
+        return None
+
+    cones, timestamps, extent, _ = load_cone_run_npz(files[npz_file_index])
+    T = len(cones)
+    actual = int(min(frame_count, max(0, (T - frame_start)) // max(1, frame_step)))
+    if actual <= 0:
+        print("Error: Not enough frames to process")
+        return None
+
+    first = to_uint8_gray(cones[frame_start])
+    H, W = first.shape
+    outp = Path(output_path)
+    
+    outp.parent.mkdir(parents=True, exist_ok=True)
+
+    vw = cv2.VideoWriter(str(outp), cv2.VideoWriter_fourcc(*'mp4v'), VIDEO_CONFIG['fps'], (W, H))
+    if not vw.isOpened():
+        fallback_path = outp.with_suffix('.avi')
+        vw = cv2.VideoWriter(str(fallback_path), cv2.VideoWriter_fourcc(*'XVID'), VIDEO_CONFIG['fps'], (W, H))
+        if vw.isOpened():
+            print(f"Fallback: Using {fallback_path} (AVI format)")
+            outp = fallback_path
+        else:
+            print("Error: Could not initialize video writer")
+            return None
+
+    processor.reset_tracking()
+    
+    print(f"Processing {actual} frames...")
+    print(f"AOI/Corridor visualization: ENABLED (Green ellipse + Orange corridor)")
+    
+    for i in range(actual):
+        idx = frame_start + i * frame_step
+        frame_u8 = to_uint8_gray(cones[idx])
+        
+        result = processor.analyze_frame(frame_u8, extent)
+        
+        vis = cv2.cvtColor(frame_u8, cv2.COLOR_GRAY2BGR)
+        
+        # CRITICAL: Draw AOI/corridor masks FIRST (filled regions)
+        if processor.current_aoi is not None:
+            try:
+                # Get masks directly from processor's current_aoi
+                ell_mask = processor.current_aoi.get('ellipse_mask')
+                corr_mask = processor.current_aoi.get('corridor_mask')
+                
+                # Draw ellipse AOI mask (green overlay)
+                if ell_mask is not None and isinstance(ell_mask, np.ndarray):
+                    a_color = tuple(int(c) for c in VIDEO_CONFIG.get('aoi_mask_color', (0,255,0)))
+                    a_alpha = float(VIDEO_CONFIG.get('aoi_mask_alpha', 0.25))
+                    
+                    color_layer = np.zeros_like(vis, dtype=np.uint8)
+                    color_layer[ell_mask > 0] = a_color
+                    
+                    # Alpha blend and ensure uint8
+                    vis = cv2.addWeighted(
+                        vis.astype(np.float32), 1.0, 
+                        color_layer.astype(np.float32), a_alpha, 
+                        0
+                    ).astype(np.uint8)
+                    
+                    # Draw ellipse outline
+                    ell_contours, _ = cv2.findContours(ell_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    if ell_contours:
+                        cv2.drawContours(vis, ell_contours, -1, a_color, 2)
+                
+                # Draw corridor mask (orange overlay)
+                if corr_mask is not None and isinstance(corr_mask, np.ndarray):
+                    c_color = tuple(int(c) for c in VIDEO_CONFIG.get('corridor_mask_color', (0,128,255)))
+                    c_alpha = float(VIDEO_CONFIG.get('corridor_mask_alpha', 0.25))
+                    
+                    color_layer = np.zeros_like(vis, dtype=np.uint8)
+                    color_layer[corr_mask > 0] = c_color
+                    
+                    # Alpha blend and ensure uint8
+                    vis = cv2.addWeighted(
+                        vis.astype(np.float32), 1.0, 
+                        color_layer.astype(np.float32), c_alpha, 
+                        0
+                    ).astype(np.uint8)
+                    
+                    # Draw corridor outline
+                    corr_contours, _ = cv2.findContours(corr_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    if corr_contours:
+                        cv2.drawContours(vis, corr_contours, -1, c_color, 2)
+                        
+            except Exception as e:
+                if i == frame_start:
+                    print(f"Warning: Could not render AOI/corridor masks: {e}")
+        
+        # Draw AOI ellipse outline (yellow) on top
+        if processor.current_aoi is not None:
+            aoi_mask = processor.current_aoi.get('mask')
+            if aoi_mask is not None:
+                aoi_contours, _ = cv2.findContours(aoi_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                if aoi_contours:
+                    cv2.drawContours(vis, aoi_contours, -1, (0, 255, 255), 2)
+                
+                ellipse_center = processor.current_aoi.get('center')
+                if ellipse_center:
+                    cv2.circle(vis, (int(ellipse_center[0]), int(ellipse_center[1])), 3, (0, 255, 255), -1)
+                
+                smoothed = processor.current_aoi.get('smoothed_center')
+                if smoothed:
+                    cv2.circle(vis, (int(smoothed[0]), int(smoothed[1])), 5, (0, 0, 255), -1)
+                    cv2.putText(vis, 'TRACK', (int(smoothed[0]) + 8, int(smoothed[1]) - 8),
+                               cv2.FONT_HERSHEY_SIMPLEX, VIDEO_CONFIG['text_scale']*0.7, (0,0,255), 1)
+        
+        # Draw best contour and features
+        if result.detection_success and result.best_contour is not None:
+            best_contour = result.best_contour
+            cv2.drawContours(vis, [best_contour], -1, (0, 255, 0), 2)
+            
+            if VIDEO_CONFIG.get('show_ellipse', True) and len(best_contour) >= 5:
+                try:
+                    ellipse = cv2.fitEllipse(best_contour)
+                    (cx, cy), (minor, major), ang = ellipse
+                    
+                    cv2.ellipse(vis, ellipse, (255, 0, 255), 1)
+                    
+                    ang_r = np.radians(ang + 90.0)
+                    half = major * 0.5
+                    p1 = (int(cx + half*np.cos(ang_r)), int(cy + half*np.sin(ang_r)))
+                    p2 = (int(cx - half*np.cos(ang_r)), int(cy - half*np.sin(ang_r)))
+                    cv2.line(vis, p1, p2, (0,0,255), 2)
+                    
+                    if result.distance_pixels is not None:
+                        center_x = W // 2
+                        dot_y = int(result.distance_pixels)
+                        cv2.circle(vis, (center_x, dot_y), 4, (255, 0, 0), -1)
+                        
+                        if result.distance_meters is not None:
+                            dist_text = f"Dist: {result.distance_meters:.2f}m"
+                        else:
+                            dist_text = f"Dist: {result.distance_pixels:.1f}px"
+                        cv2.putText(vis, dist_text, (center_x + 10, dot_y - 10),
+                                   cv2.FONT_HERSHEY_SIMPLEX, VIDEO_CONFIG['text_scale'], (255, 0, 0), 1)
+                except:
+                    pass
+        
+        # Add legend
+        legend_y = 20
+        cv2.putText(vis, "Green: Ellipse AOI | Orange: Corridor | Yellow: Tracking", (10, legend_y), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(vis, "Green: Ellipse AOI | Orange: Corridor | Yellow: Tracking", (10, legend_y), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
+        
+        frame_info = f'Frame: {idx} | {result.tracking_status}'
+        cv2.putText(vis, frame_info, (10, H - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1)
+        
+        vw.write(vis)
+        
+        if (i+1) % 10 == 0:
+            print(f"Processed {i+1}/{actual} frames")
+
+    vw.release()
+    print(f"\nVideo saved to: {output_path}")
+    print(f"Shows: Green contour + Magenta ellipse + Red axis + Green AOI fill + Orange corridor fill")
+    
+    return output_path

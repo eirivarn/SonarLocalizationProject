@@ -163,11 +163,12 @@ TRACKING_CONFIG: Dict = {
 
 # Corridor AOI tuning (used by sonar_image_analysis)
 TRACKING_CONFIG.update({
-    'corridor_band_k': 0.75,          # Half-width of corridor as fraction of ellipse semi-minor (b)
-    'corridor_length_px': None,       # Absolute corridor length in pixels (None -> uses length_factor*a)
-    'corridor_length_factor': 1.25,   # Corridor length as multiple of ellipse semi-major (a)
-    'corridor_widen': 1.0,            # Widening factor (1.0 = rectangle; >1.0 = trapezoid)
-    'corridor_both_directions': True, # Build corridors along ±major-axis
+    'use_corridor_splitting': True,     # ✓ MUST BE TRUE
+    'corridor_band_k': 0.75,          
+    'corridor_length_px': None,       
+    'corridor_length_factor': 1.25,   
+    'corridor_widen': 1.0,            
+    'corridor_both_directions': True, 
 })
 
 # Video output configuration
@@ -191,11 +192,11 @@ VIDEO_CONFIG: Dict = {
     'show_bounding_box': False,
     'text_scale': 0.6,
     # AOI / corridor overlay options
-    'show_aoi_corridor': True,         # Draw AOI ellipse + corridor mask on the cone overlay when sonar analysis is available
-    'aoi_mask_color': (0, 255, 0),      # BGR color for ellipse AOI mask overlay
-    'corridor_mask_color': (0, 128, 255),
+    'show_aoi_corridor': True,         # ✓ MUST BE TRUE for bands to show
+    'aoi_mask_color': (0, 255, 0),      # BGR color for ellipse AOI mask overlay (GREEN)
+    'corridor_mask_color': (0, 128, 255),  # BGR color for corridor mask (ORANGE)
     'aoi_mask_alpha': 0.25,             # Alpha blend for AOI mask
-    'corridor_mask_alpha': 0.25,
+    'corridor_mask_alpha': 0.25,        # Alpha blend for corridor mask
     
     # === VIDEO SYNCHRONIZATION ===
     'max_sync_tolerance_seconds': 5.0,     # Maximum time difference for camera/sonar sync
@@ -234,6 +235,5 @@ __all__ = [
     'CONE_W_DEFAULT', 'CONE_H_DEFAULT', 'CONE_FLIP_VERTICAL_DEFAULT', 'CMAP_NAME_DEFAULT',
     'SONAR_VIS_DEFAULTS', 'ENHANCE_DEFAULTS', 'ConeGridSpec',
     'IMAGE_PROCESSING_CONFIG', 'TRACKING_CONFIG', 'VIDEO_CONFIG',
-    'NAVIGATION_ANALYSIS_CONFIG',
-    'EXPORTS_DIR_DEFAULT', 'EXPORTS_SUBDIRS',
+    'EXPORTS_DIR_DEFAULT', 'EXPORTS_SUBDIRS'
 ]
