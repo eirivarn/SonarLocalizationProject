@@ -910,7 +910,7 @@ def generate_three_system_video(
     Returns:
         Path to generated video file
     """
-    print("🎬 GENERATING THREE-SYSTEM VIDEO")
+    print("GENERATING THREE-SYSTEM VIDEO")
     print("=" * 50)
     
     # Prepare synchronized data
@@ -938,11 +938,11 @@ def generate_three_system_video(
         **video_kwargs
     )
     
-    print(f"\n✅ THREE-SYSTEM VIDEO GENERATED: {video_path}")
+    print(f"\nTHREE-SYSTEM VIDEO GENERATED: {video_path}")
     print(f"   Systems synchronized:")
-    print(f"   - 🟡 DVL: Navigation-based robot position relative to net")
-    print(f"   - 🔵 FFT: High-precision signal processing net detection")
-    print(f"   - 🟣 Sonar: Image analysis of sonar returns")
-    print(f"   - 🎨 Uniform styling: All systems use consistent visual appearance")
+    print(f"   - DVL: Navigation-based robot position relative to net")
+    print(f"   - FFT: High-precision signal processing net detection")
+    print(f"   - Sonar: Image analysis of sonar returns")
+    print(f"   - Uniform styling: All systems use consistent visual appearance")
     
     return video_path
