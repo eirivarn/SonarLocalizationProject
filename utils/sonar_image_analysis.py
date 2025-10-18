@@ -8,8 +8,6 @@ import json
 import numpy as np
 import pandas as pd
 import cv2
-from scipy.signal import savgol_filter
-from scipy.ndimage import uniform_filter1d
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 

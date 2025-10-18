@@ -110,63 +110,6 @@ class NetRelativePositionCalculator:
         
         position_df = pd.DataFrame(positions, index=result_df.index)
         return pd.concat([result_df, position_df], axis=1)
-    
-    def calculate_fft_net_position(self, df: pd.DataFrame,
-                                 distance_col: str = 'distance',
-                                 pitch_col: str = 'pitch',
-                                 x_col: str = 'x_m',
-                                 y_col: str = 'y_m') -> pd.DataFrame:
-        """
-        Calculate net relative position from FFT measurements.
-        
-        Args:
-            df: DataFrame with FFT measurements
-            distance_col: Column name for distance measurements (default: 'distance')
-            pitch_col: Column name for pitch measurements in radians (default: 'pitch')
-            x_col: Column name for existing X coordinates (if available)
-            y_col: Column name for existing Y coordinates (if available)
-            
-        Returns:
-            DataFrame with added/verified fft_x_m and fft_y_m columns
-        """
-        result_df = df.copy()
-        
-        # Handle timestamp conversion for Unix timestamps
-        if 'time' in result_df.columns:
-            result_df['timestamp'] = pd.to_datetime(result_df['time'], unit='s')
-        
-        # Check if X,Y coordinates already exist
-        if x_col in result_df.columns and y_col in result_df.columns:
-            # Use existing coordinates, just rename for consistency
-            result_df['fft_x_m'] = result_df[x_col]
-            result_df['fft_y_m'] = result_df[y_col]
-        else:
-            # Calculate from distance and pitch
-            # Note: pitch in FFT data appears to be in radians, not degrees
-            positions = []
-            for _, row in result_df.iterrows():
-                distance = row.get(distance_col, np.nan)
-                pitch_rad = row.get(pitch_col, np.nan)  # Already in radians
-                
-                if not pd.isna(distance) and not pd.isna(pitch_rad):
-                    x = distance * np.cos(pitch_rad)
-                    y = distance * np.sin(pitch_rad)
-                    pitch_deg = np.degrees(pitch_rad)  # Convert to degrees for consistency
-                else:
-                    x, y, pitch_deg = np.nan, np.nan, np.nan
-                
-                positions.append({
-                    'fft_x_m': x, 
-                    'fft_y_m': y,
-                    'distance_m': distance,
-                    'pitch_deg': pitch_deg
-                })
-            
-            position_df = pd.DataFrame(positions, index=result_df.index)
-            result_df = pd.concat([result_df, position_df], axis=1)
-        
-        return result_df
-
 
 class MultiSystemSynchronizer:
     """Synchronize measurements across multiple systems with timestamp alignment."""

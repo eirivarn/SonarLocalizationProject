@@ -40,7 +40,7 @@ def load_all_distance_data_for_bag(target_bag: str, exports_folder: str | None =
     raw_data = {}
     
     # 1. Load Navigation Data
-    print("📡 1. Loading Navigation Data...")
+    print(" 1. Loading Navigation Data...")
     try:
         nav_file = data_folder / f"navigation_plane_approximation__{target_bag}_data.csv"
         if nav_file.exists():
@@ -81,7 +81,7 @@ def load_all_distance_data_for_bag(target_bag: str, exports_folder: str | None =
         raw_data['navigation'] = None
 
     # 2. Load Guidance Data  
-    print("📡 2. Loading Guidance Data...")
+    print(" 2. Loading Guidance Data...")
     try:
         guidance_file = data_folder / f"guidance__{target_bag}_data.csv"
         if guidance_file.exists():
@@ -102,7 +102,7 @@ def load_all_distance_data_for_bag(target_bag: str, exports_folder: str | None =
         raw_data['guidance'] = None
 
     # 3. Load DVL Altimeter
-    print("📡 3. Loading DVL Altimeter...")
+    print(" 3. Loading DVL Altimeter...")
     try:
         dvl_alt_file = data_folder / f"nucleus1000dvl_altimeter__{target_bag}_data.csv"
         if dvl_alt_file.exists():
@@ -153,7 +153,7 @@ def load_all_distance_data_for_bag(target_bag: str, exports_folder: str | None =
         print(f"    Error loading USBL: {e}")
 
     # 5. Load DVL Position
-    print("📡 5. Loading DVL Position...")
+    print(" 5. Loading DVL Position...")
     try:
         dvl_pos_file = data_folder / f"sensor_dvl_position__{target_bag}_data.csv"
         if dvl_pos_file.exists():
@@ -199,7 +199,7 @@ def load_all_distance_data_for_bag(target_bag: str, exports_folder: str | None =
         print(f"    Error loading navigation position: {e}")
 
     # 7. Load INS Z Position
-    print("📡 7. Loading INS Z Position...")
+    print(" 7. Loading INS Z Position...")
     try:
         ins_file = data_folder / f"nucleus1000dvl_ins__{target_bag}_data.csv"
         if ins_file.exists():
@@ -563,7 +563,7 @@ def process_sonar_data_and_visualize(
                 # Invert sign of NetPitch coming from direct file as well
                 net_angle_rad = -direct_nav_df.loc[direct_idx, 'NetPitch']
                 net_angle_deg = np.degrees(net_angle_rad)
-                angle_source = "direct navigation file"
+                
 
     # Create enhanced visualization - HORIZONTAL LINE ROTATED BY NET PITCH (LOCAL)
     fig, ax = plt.subplots(figsize=(18, 14))

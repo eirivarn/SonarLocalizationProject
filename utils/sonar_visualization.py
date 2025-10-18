@@ -12,7 +12,7 @@ shared utility functions:
 """
 
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -27,7 +27,7 @@ from utils.sonar_utils import (
     enhance_intensity,
     cone_raster_like_display_cell,
 )
-from utils.sonar_config import SONAR_VIS_DEFAULTS, ConeGridSpec, EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
+from utils.sonar_config import SONAR_VIS_DEFAULTS, EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
 
 class SonarVisualizer:
     """
