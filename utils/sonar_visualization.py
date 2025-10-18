@@ -20,14 +20,14 @@ import matplotlib.pyplot as plt
 
 
 # ---- Pull in the heavy-lifters from your utilities ----------------------------
+from utils.io_utils import load_df
 from utils.sonar_utils import (
-    load_df,
     get_sonoptix_frame,
     apply_flips,
     enhance_intensity,
     cone_raster_like_display_cell,
 )
-from utils.sonar_config import SONAR_VIS_DEFAULTS, EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
+from utils.config import SONAR_VIS_DEFAULTS, EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
 
 class SonarVisualizer:
     """
@@ -279,7 +279,7 @@ def find_sonar_files(search_root: Union[str, Path] = None) -> List[Path]:
     Find candidate sonar files in the exports directory.
     If search_root is None, use the configured exports dir + 'by_bag'.
     """
-    from utils.sonar_config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
+    from utils.config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
     if search_root is None:
         search_root = Path(EXPORTS_DIR_DEFAULT) / EXPORTS_SUBDIRS.get('by_bag', 'by_bag')
     else:

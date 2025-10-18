@@ -67,11 +67,8 @@ ENHANCE_DEFAULTS: Dict = {
     "eps_log": 1e-3,
 }
 
-# Cone grid default (for rasterization)
-@dataclass
-class ConeGridSpec:
-    img_w: int = CONE_W_DEFAULT
-    img_h: int = CONE_H_DEFAULT
+# Note: ConeGridSpec is defined in utils.rendering and imported by utils.sonar_utils
+# It's re-exported from sonar_utils for backward compatibility
 
 # --- Image-analysis / contour-detection defaults (moved from sonar_image_analysis) ---
 IMAGE_PROCESSING_CONFIG: Dict = {

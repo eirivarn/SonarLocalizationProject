@@ -23,7 +23,7 @@ def load_all_distance_data_for_bag(target_bag: str, exports_folder: str | None =
     print(f" LOADING ALL DISTANCE DATA FOR BAG: {target_bag}")
     print("=" * 60)
     
-    from utils.sonar_config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
+    from utils.config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
     if exports_folder is None:
         data_folder = Path(EXPORTS_DIR_DEFAULT) / EXPORTS_SUBDIRS.get('by_bag', 'by_bag')
     else:
@@ -432,7 +432,7 @@ def extract_raw_sonar_data_with_configurable_rmax(
     print(f"    Description: {sonar_params['description']}")
     
     # 2. Load raw sonar data
-    from utils.sonar_config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
+    from utils.config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
     exports_root = Path(exports_folder) if exports_folder is not None else Path(EXPORTS_DIR_DEFAULT)
     sonar_csv_file = exports_root / EXPORTS_SUBDIRS.get('by_bag', 'by_bag') / f"sensor_sonoptix_echo_image__{target_bag}_video.csv"
     
@@ -514,7 +514,7 @@ def process_sonar_data_and_visualize(
         return
 
     # Resolve exports folder from config if needed and get synchronized distance measurements
-    from utils.sonar_config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
+    from utils.config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
     exports_root = Path(exports_folder) if exports_folder is not None else Path(EXPORTS_DIR_DEFAULT)
     sonar_csv_file = exports_root / EXPORTS_SUBDIRS.get('by_bag', 'by_bag') / f"sensor_sonoptix_echo_image__{target_bag}_video.csv"
     if not sonar_csv_file.exists():

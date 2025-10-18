@@ -28,7 +28,7 @@ from matplotlib.patches import Rectangle
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from utils.sonar_image_analysis import (
+from utils.contour_analysis import (
     create_elliptical_kernel_fast, 
     create_circular_kernel_fast,
     create_oriented_gradient_kernel_fast,
@@ -38,7 +38,7 @@ from utils.sonar_image_analysis import (
     load_cone_run_npz,
     to_uint8_gray
 )
-from utils.sonar_config import IMAGE_PROCESSING_CONFIG
+from utils.config import IMAGE_PROCESSING_CONFIG
 
 
 class SimpleKernelVisualizer:

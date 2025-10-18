@@ -1,40 +1,32 @@
 # Copyright (c) 2025 Eirik Varnes
 # Licensed under the MIT License. See LICENSE file for details.
-from __future__ import annotations
-from matplotlib.backends.backend_agg import FigureCanvasAgg
 
+"""
+Core Sonar Utilities
+
+Frame extraction, intensity enhancement, and cone operations.
+This module focuses on core sonar data processing.
+"""
+
+from __future__ import annotations
 import json
-import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Optional, Tuple
+from typing import Iterable, Optional, Tuple, Dict, List
 
 import cv2
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from datetime import datetime, timezone
-import json
-from typing import Dict, List
+
+# Import from our new modular structure
+from utils.io_utils import (
+    load_df, parse_json_cell, load_png_rgb, ensure_ts_col,
+    read_video_index, normalize_ts_utc, nearest_video_index
+)
+from utils.rendering import ConeGridSpec, rasterize_cone
 
 
-# --------------------------- I/O + parsing helpers ---------------------------
-
-def load_df(path: Path) -> pd.DataFrame:
-    """Load CSV or Parquet into a DataFrame."""
-    path = Path(path)
-    return pd.read_parquet(path) if path.suffix.lower() == ".parquet" else pd.read_csv(path)
-
-
-def parse_json_cell(v):
-    """Parse a JSON-encoded cell if it's a string, else pass through."""
-    if isinstance(v, str):
-        try:
-            return json.loads(v)
-        except Exception:
-            return None
-    return v
-
+# --------------------------- Frame extraction --------------------------------
 
 def infer_hw(labels: Optional[Iterable[str]], sizes: Optional[Iterable[int]], data_len: int) -> Tuple[Optional[int], Optional[int]]:
     """Infer [H,W] from dim labels/sizes or brute-force pairs whose product equals len(data)."""
@@ -90,64 +82,6 @@ def apply_flips(M: np.ndarray, *, flip_range: bool = False, flip_beams: bool = F
     if flip_beams:
         M = M[:, ::-1]
     return M
-
-
-def load_png_rgb(path: Path) -> np.ndarray:
-    """Load a PNG (or any OpenCV-readable image) as RGB numpy array."""
-    bgr = cv2.imread(str(Path(path)), cv2.IMREAD_COLOR)
-    if bgr is None:
-        raise FileNotFoundError(path)
-    return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-
-
-def ensure_ts_col(dfs: pd.DataFrame, *, src_col: str = "t") -> pd.DataFrame:
-    """
-    Ensure a tz-aware UTC timestamp column 'ts_utc' exists.
-    If missing, derive from 't' seconds epoch.
-    """
-    dfs = dfs.copy()
-    if "ts_utc" not in dfs.columns:
-        if src_col not in dfs.columns:
-            raise RuntimeError("Sonar DataFrame missing both 'ts_utc' and epoch seconds column.")
-        dfs["ts_utc"] = pd.to_datetime(dfs[src_col], unit="s", utc=True)
-    else:
-        dfs["ts_utc"] = pd.to_datetime(dfs["ts_utc"], utc=True, errors="coerce")
-    return dfs
-
-
-def read_video_index(seq_dir: Path) -> pd.DataFrame:
-    """
-    Return DataFrame with at least ['file','ts_utc'] from a frames folder.
-    Uses index.csv if present; otherwise attempts to parse timestamps from filenames
-    like YYYYmmdd_HHMMSS_micro+ZZZZ.png.
-    """
-    seq_dir = Path(seq_dir)
-    idx_path = seq_dir / "index.csv"
-    if idx_path.exists():
-        dfv = pd.read_csv(idx_path)
-        if "ts_utc" in dfv.columns:
-            dfv["ts_utc"] = pd.to_datetime(dfv["ts_utc"], utc=True)
-        elif "t_use" in dfv.columns:  # seconds epoch
-            dfv["ts_utc"] = pd.to_datetime(dfv["t_use"], unit="s", utc=True)
-        else:
-            raise RuntimeError("index.csv missing ts_utc/t_use columns.")
-        if "file" not in dfv.columns:
-            dfv["file"] = [p.name for p in seq_dir.glob("*.png")]
-        return dfv[["file", "ts_utc"]].dropna().sort_values("ts_utc").reset_index(drop=True)
-
-    # Fallback: parse from filenames
-    rows = []
-    rx = re.compile(r"(\d{8})_(\d{6})_(\d{6})([+\-]\d{4})")
-    for p in sorted(seq_dir.glob("*.png")):
-        m = rx.search(p.stem)
-        if not m:
-            continue
-        ymd, hms, micro, tz = m.groups()
-        dt = datetime.strptime(ymd + hms + micro + tz, "%Y%m%d%H%M%S%f%z")
-        rows.append({"file": p.name, "ts_utc": dt.astimezone(timezone.utc)})
-    if not rows:
-        raise FileNotFoundError("No index.csv and could not parse timestamps from filenames.")
-    return pd.DataFrame(rows).sort_values("ts_utc").reset_index(drop=True)
 
 
 # --------------------------- Processing / scaling ----------------------------
@@ -209,419 +143,9 @@ def enhance_intensity(
     return Y
 
 
-# --------------------------- Timestamp matching ------------------------------
+# --------------------------- Cone operations ---------------------------------
 
-def normalize_ts_utc(ts) -> pd.Timestamp:
-    """Ensure a pandas Timestamp is tz-aware UTC."""
-    ts = pd.to_datetime(ts, utc=True, errors="coerce")
-    if ts.tz is None:
-        ts = ts.tz_localize("UTC")
-    return ts
-
-
-def nearest_video_index(
-    dfv: pd.DataFrame,
-    ts_target,
-    *,
-    tolerance: Optional[pd.Timedelta] = None
-) -> Tuple[int, Optional[pd.Timedelta]]:
-    """
-    Find nearest frame index in dfv (expects 'ts_utc' tz-aware). Returns (idx, |dt|).
-    If tolerance is given and nearest exceeds it, returns the index but you may treat
-    it as a soft failure by checking the returned dt.
-    """
-    dfv = dfv.copy()
-    dfv["ts_utc"] = pd.to_datetime(dfv["ts_utc"], utc=True, errors="coerce")
-    dfv = dfv.dropna(subset=["ts_utc"]).sort_values("ts_utc").reset_index(drop=True)
-    if dfv.empty:
-        raise RuntimeError("Video index has no valid timestamps.")
-
-    ts_target = normalize_ts_utc(ts_target)
-    idx_near = pd.Index(dfv["ts_utc"]).get_indexer([ts_target], method="nearest")[0]
-    if idx_near < 0:
-        raise RuntimeError("Could not find a nearest video frame (indexer returned -1).")
-    dt_best = abs(dfv.loc[idx_near, "ts_utc"] - ts_target)
-    if tolerance is not None and dt_best > tolerance:
-        # not raising—caller can decide; we still return the nearest + dt.
-        pass
-    return int(idx_near), pd.Timedelta(dt_best)
-
-
-# --------------------------- Cone rasterization ------------------------------
-
-@dataclass
-class ConeGridSpec:
-    img_w: int = 900
-    img_h: int = 700
-
-
-def rasterize_cone(
-    Z: np.ndarray,
-    *,
-    fov_deg: float,
-    rmin: float,
-    rmax: float,
-    y_zoom: Optional[float] = None,
-    grid: ConeGridSpec = ConeGridSpec(),
-) -> Tuple[np.ndarray, Tuple[float, float, float, float]]:
-    """
-    Rasterize a polar fan (rows=range, cols=beams) into Cartesian (x,y) with forward +Y,
-    starboard +X, returning (cone_image, extent=(x_min,x_max,y_min,y_max)).
-    """
-    H, W = map(int, Z.shape)
-    half = np.deg2rad(0.5 * float(fov_deg))
-    y_min = max(0.0, float(rmin))
-    y_max = float(y_zoom if y_zoom is not None else rmax)
-    x_max = np.sin(half) * y_max
-    x_min = -x_max
-
-    x = np.linspace(x_min, x_max, grid.img_w)
-    y = np.linspace(y_min, y_max, grid.img_h)
-    Xg, Yg = np.meshgrid(x, y)
-
-    theta = np.arctan2(Xg, Yg)   # angle from +Y axis
-    r = np.hypot(Xg, Yg)
-
-    mask = (r >= rmin) & (r <= y_max) & (theta >= -half) & (theta <= +half)
-
-    # map (r,theta) -> (row, col)
-    rowf = (r - rmin) / max((rmax - rmin), 1e-12) * (H - 1)
-    colf = (theta + half) / max((2 * half), 1e-12) * (W - 1)
-    rows = np.rint(np.clip(rowf, 0, H - 1)).astype(np.int32)
-    cols = np.rint(np.clip(colf, 0, W - 1)).astype(np.int32)
-
-    cone = np.full((grid.img_h, grid.img_w), np.nan, dtype=float)
-    mflat = mask.ravel()
-    cone.ravel()[mflat] = Z[rows.ravel()[mflat], cols.ravel()[mflat]]
-    extent = (x_min, x_max, y_min, y_max)
-    return cone, extent
-
-
-# --------------------------- Plotting helpers --------------------------------
-
-def plot_video_and_sonar(
-    img_rgb: np.ndarray,
-    Z: np.ndarray,
-    *,
-    fov_deg: float,
-    rmin: float,
-    rmax: float,
-    y_zoom: Optional[float] = None,
-    cmap: str = "viridis",
-    enhanced: bool = True,
-    ts_video_oslo: Optional[pd.Timestamp] = None,
-    ts_sonar_oslo: Optional[pd.Timestamp] = None,
-    frame_index: Optional[int] = None,
-    vmin_raw: Optional[float] = None,
-    vmax_raw: Optional[float] = None,
-    figsize: Tuple[float, float] = (13.2, 5.8),
-) -> None:
-    """
-    Side-by-side: video frame and sonar (polar image with beam angle on X, range on Y).
-    Z should be in [0,1] if enhanced=True; otherwise provide vmin_raw/vmax_raw.
-    """
-    theta_min_deg = -0.5 * float(fov_deg)
-    theta_max_deg = +0.5 * float(fov_deg)
-    extent_xy = (theta_min_deg, theta_max_deg, rmin, rmax)
-
-    fig, axes = plt.subplots(1, 2, figsize=figsize, constrained_layout=True)
-
-    # Left: video
-    axes[0].imshow(img_rgb)
-    title_video = "Video"
-    if ts_video_oslo is not None:
-        try:
-            title_video += f" @ {pd.to_datetime(ts_video_oslo).tz_convert('Europe/Oslo'):%Y-%m-%d %H:%M:%S.%f %Z}"
-        except Exception:
-            title_video += f" @ {ts_video_oslo}"
-    axes[0].set_title(title_video)
-    axes[0].axis("off")
-
-    # Right: sonar
-    if enhanced:
-        im = axes[1].imshow(Z, origin="lower", aspect="auto", extent=extent_xy, vmin=0, vmax=1, cmap=cmap)
-        cb_label = "Echo (norm.)"
-        mode_name = "Enhanced"
-    else:
-        vmin = float(np.nanmin(Z)) if vmin_raw is None else vmin_raw
-        vmax = float(np.nanmax(Z)) if vmax_raw is None else vmax_raw
-        im = axes[1].imshow(Z, origin="lower", aspect="auto", extent=extent_xy, vmin=vmin, vmax=vmax, cmap=cmap)
-        cb_label = "Echo (raw)"
-        mode_name = "Raw"
-
-    title_sonar = f"Sonar — {mode_name}"
-    if frame_index is not None:
-        title_sonar += f" (frame {frame_index})"
-    if ts_sonar_oslo is not None:
-        try:
-            title_sonar += f" @ {pd.to_datetime(ts_sonar_oslo).tz_convert('Europe/Oslo'):%H:%M:%S.%f %Z}"
-        except Exception:
-            title_sonar += f" @ {ts_sonar_oslo}"
-    axes[1].set_title(title_sonar)
-    axes[1].set_xlabel("Beam angle [deg]")
-    axes[1].set_ylabel("Range [m]")
-    axes[1].set_ylim(rmin, y_zoom if y_zoom is not None else rmax)
-    fig.colorbar(im, ax=axes[1], label=cb_label)
-    plt.show()
-
-
-def plot_video_and_cone(
-    img_rgb: np.ndarray,
-    Z: np.ndarray,
-    *,
-    fov_deg: float,
-    rmin: float,
-    rmax: float,
-    y_zoom: Optional[float] = None,
-    cmap: str = "viridis",
-    enhanced: bool = True,
-    frame_index: Optional[int] = None,
-    ts_video_oslo: Optional[pd.Timestamp] = None,
-    ts_sonar_oslo: Optional[pd.Timestamp] = None,
-    grid: ConeGridSpec = ConeGridSpec(),
-    n_spokes: int = 5,
-    figsize: Tuple[float, float] = (13.6, 6.8),
-) -> None:
-    """
-    Video + Cartesian rasterized sonar cone. Z should be [0,1] if enhanced=True.
-    """
-    cone, extent = rasterize_cone(Z, fov_deg=fov_deg, rmin=rmin, rmax=rmax, y_zoom=y_zoom, grid=grid)
-
-    fig, axes = plt.subplots(1, 2, figsize=figsize, constrained_layout=True)
-
-    # Left: video
-    axes[0].imshow(img_rgb)
-    title_video = "Video"
-    if ts_video_oslo is not None:
-        try:
-            title_video += f" @ {pd.to_datetime(ts_video_oslo).tz_convert('Europe/Oslo'):%Y-%m-%d %H:%M:%S.%f %Z}"
-        except Exception:
-            title_video += f" @ {ts_video_oslo}"
-    axes[0].set_title(title_video)
-    axes[0].axis("off")
-
-    # Right: cone
-    cmap_obj = plt.get_cmap(cmap).copy()
-    cmap_obj.set_bad("black")
-    vmin, vmax = (0.0, 1.0) if enhanced else (float(np.nanmin(Z)), float(np.nanmax(Z)))
-
-    im = axes[1].imshow(cone, origin="lower", extent=extent, aspect="equal", cmap=cmap_obj, vmin=vmin, vmax=vmax)
-
-    # Spokes
-    half = 0.5 * fov_deg
-    y_max = extent[3]
-    for a in np.linspace(-half, half, n_spokes):
-        th = np.deg2rad(a)
-        axes[1].plot([0, y_max * np.sin(th)], [0, y_max * np.cos(th)], color="k", lw=0.9, alpha=0.85)
-        axes[1].text(1.02 * y_max * np.sin(th), 1.02 * y_max * np.cos(th), f"{a:.0f}", ha="center", va="center", fontsize=9)
-
-    title_cone = "Sonar Cone"
-    if enhanced:
-        title_cone += " — Enhanced"
-    if frame_index is not None:
-        title_cone += f" (frame {frame_index})"
-    if ts_sonar_oslo is not None:
-        try:
-            title_cone += f" @ {pd.to_datetime(ts_sonar_oslo).tz_convert('Europe/Oslo'):%H:%M:%S.%f %Z}"
-        except Exception:
-            title_cone += f" @ {ts_sonar_oslo}"
-    axes[1].set_title(title_cone)
-
-    axes[1].set_xlabel("Starboard X [m] (+)")
-    axes[1].set_ylabel("Forward Y [m]")
-
-    fig.colorbar(im, ax=axes[1], pad=0.02, shrink=0.9, label=("Echo (normalized)" if enhanced else "Echo (raw units)"))
-    plt.show()
-
-
-# --------------------------- Video writing ------------------------------------
-from matplotlib.backends.backend_agg import FigureCanvasAgg
-
-def _render_array_with_matplotlib(fig, axes) -> np.ndarray:
-    canvas = FigureCanvasAgg(fig)
-    canvas.draw()
-    w, h = fig.canvas.get_width_height()
-    buf = np.frombuffer(canvas.buffer_rgba(), dtype=np.uint8).reshape(h, w, 4)
-    rgb = buf[..., :3].copy()
-    plt.close(fig)
-    return rgb
-
-def render_cone_side_by_side_frame(
-    img_rgb: np.ndarray,
-    Z: np.ndarray,
-    *,
-    fov_deg: float,
-    rmin: float,
-    rmax: float,
-    y_zoom: float,
-    cmap: str = "viridis",
-    enhanced: bool = True,
-    ts_video_oslo=None,
-    ts_sonar_oslo=None,
-    frame_index: int | None = None,
-    figsize=(12.8, 7.2),
-    n_spokes: int = 5,
-    grid: ConeGridSpec = ConeGridSpec(img_w=900, img_h=700),
-) -> np.ndarray:
-    """Render one frame (left: video, right: sonar cone) to an RGB array."""
-    cone, extent = rasterize_cone(
-        Z, fov_deg=fov_deg, rmin=rmin, rmax=rmax, y_zoom=y_zoom, grid=grid
-    )
-
-    fig, axes = plt.subplots(1, 2, figsize=figsize, constrained_layout=True)
-
-    # Left: video
-    axes[0].imshow(img_rgb)
-    title_video = "Video"
-    if ts_video_oslo is not None:
-        try:
-            title_video += f" @ {pd.to_datetime(ts_video_oslo).tz_convert('Europe/Oslo'):%Y-%m-%d %H:%M:%S.%f %Z}"
-        except Exception:
-            title_video += f" @ {ts_video_oslo}"
-    axes[0].set_title(title_video)
-    axes[0].axis("off")
-
-    # Right: cone
-    cmap_obj = plt.get_cmap(cmap).copy()
-    cmap_obj.set_bad("black")
-    vmin, vmax = (0.0, 1.0) if enhanced else (float(np.nanmin(Z)), float(np.nanmax(Z)))
-    im = axes[1].imshow(cone, origin="lower", extent=extent, aspect="equal",
-                        cmap=cmap_obj, vmin=vmin, vmax=vmax)
-
-    # Spokes
-    half = 0.5 * fov_deg
-    y_max = extent[3]
-    for a in np.linspace(-half, half, n_spokes):
-        th = np.deg2rad(a)
-        axes[1].plot([0, y_max*np.sin(th)], [0, y_max*np.cos(th)],
-                     color="k", lw=0.9, alpha=0.85)
-        axes[1].text(1.02*y_max*np.sin(th), 1.02*y_max*np.cos(th), f"{a:.0f}",
-                     ha="center", va="center", fontsize=9)
-
-    title_cone = "Sonar Cone"
-    if enhanced:
-        title_cone += " — Enhanced"
-    if frame_index is not None:
-        title_cone += f" (frame {frame_index})"
-    if ts_sonar_oslo is not None:
-        try:
-            title_cone += f" @ {pd.to_datetime(ts_sonar_oslo).tz_convert('Europe/Oslo'):%H:%M:%S.%f %Z}"
-        except Exception:
-            title_cone += f" @ {ts_sonar_oslo}"
-    axes[1].set_title(title_cone)
-    axes[1].set_xlabel("Starboard X [m] (+)")
-    axes[1].set_ylabel("Forward Y [m]")
-
-    fig.colorbar(im, ax=axes[1], pad=0.02, shrink=0.9,
-                 label=("Echo (normalized)" if enhanced else "Echo (raw units)"))
-
-    return _render_array_with_matplotlib(fig, axes)
-
-
-def save_alignment_video_cone(
-    sonar_df: pd.DataFrame,
-    video_idx: pd.DataFrame,
-    video_dir: Path,
-    *,
-    out_path: Path,
-    fov_deg: float,
-    rmin: float,
-    rmax: float,
-    y_zoom: float,
-    time_tolerance: pd.Timedelta = pd.Timedelta("75ms"),
-    flip_range: bool = False,
-    flip_beams: bool = False,
-    enhanced: bool = True,
-    cmap: str = "viridis",
-    fps: float = 15.0,
-    frame_range: tuple[int, int] | None = None,  # e.g. (0, 500)
-    figsize=(12.8, 7.2),
-    n_spokes: int = 5,
-    grid: ConeGridSpec = ConeGridSpec(img_w=900, img_h=700),
-    progress: bool = True,
-) -> dict:
-    """
-    Create an MP4 of (video + sonar cone) for each sonar timestamp (nearest-matched).
-    Skips sonar frames with no video match inside the tolerance.
-    """
-    video_dir = Path(video_dir)
-    out_path = Path(out_path)
-
-    sonar_df = ensure_ts_col(sonar_df)
-    video_idx = video_idx.copy()
-    video_idx["ts_utc"] = pd.to_datetime(video_idx["ts_utc"], utc=True, errors="coerce")
-    video_idx = video_idx.dropna(subset=["ts_utc"]).sort_values("ts_utc").reset_index(drop=True)
-    if video_idx.empty:
-        raise RuntimeError("Video index has no valid timestamps.")
-
-    # helper to build one output frame
-    def build_frame(i):
-        M = get_sonoptix_frame(sonar_df, i)
-        if M is None:
-            return None
-        M = apply_flips(M, flip_range=flip_range, flip_beams=flip_beams)
-        Z = enhance_intensity(M, rmin, rmax) if enhanced else M
-
-        ts_target = sonar_df.loc[i, "ts_utc"]
-        try:
-            j_best, dt = nearest_video_index(video_idx, ts_target, tolerance=time_tolerance)
-        except Exception:
-            return None
-        if dt is None or dt > time_tolerance:
-            return None
-
-        img_rgb = load_png_rgb(video_dir / video_idx.loc[j_best, "file"])
-        frame = render_cone_side_by_side_frame(
-            img_rgb, Z,
-            fov_deg=fov_deg, rmin=rmin, rmax=rmax, y_zoom=y_zoom,
-            cmap=cmap, enhanced=enhanced,
-            ts_video_oslo=video_idx.loc[j_best, "ts_utc"],
-            ts_sonar_oslo=ts_target, frame_index=i,
-            figsize=figsize, n_spokes=n_spokes, grid=grid,
-        )
-        return frame
-
-    # Find size via first renderable match
-    start_i = 0 if frame_range is None else max(0, int(frame_range[0]))
-    end_i   = len(sonar_df) if frame_range is None else min(len(sonar_df), int(frame_range[1]))
-
-    first = None
-    for i in range(start_i, end_i):
-        first = build_frame(i)
-        if first is not None:
-            break
-    if first is None:
-        raise RuntimeError("No frames matched within tolerance; nothing to write.")
-
-    H, W = first.shape[:2]
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    writer = cv2.VideoWriter(str(out_path), fourcc, fps, (W, H))
-
-    written = 0
-    skipped = 0
-    if progress:
-        print(f"[save_alignment_video_cone] Writing {out_path} at {fps:.1f} fps, size={W}x{H} ...")
-
-    writer.write(cv2.cvtColor(first, cv2.COLOR_RGB2BGR))
-    written += 1
-
-    for j in range(i + 1, end_i):
-        frame = build_frame(j)
-        if frame is None:
-            skipped += 1
-            continue
-        if frame.shape[:2] != (H, W):
-            frame = cv2.resize(frame, (W, H), interpolation=cv2.INTER_AREA)
-        writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
-        written += 1
-        if progress and (written % 50 == 0):
-            print(f"  wrote {written} frames (+{skipped} skipped)")
-
-    writer.release()
-    if progress:
-        print(f"[done] wrote={written}, skipped={skipped}, output='{out_path}'")
-    return {"written": written, "skipped": skipped, "out_path": out_path}
+# ConeGridSpec is imported from utils.rendering and re-exported via __all__
 
 def iter_cone_frames(
     sonar_df: pd.DataFrame,
@@ -855,180 +379,85 @@ def cone_raster_like_display_cell(Z: np.ndarray,
     cone.ravel()[flat] = Z[rows.ravel()[flat], cols.ravel()[flat]]
     return cone, (x_min, x_max, y_min, y_max)
 
+
+def to_uint8_gray(frame01: np.ndarray) -> np.ndarray:
+    """Convert normalized frame to uint8 grayscale."""
+    safe = np.nan_to_num(frame01, nan=0.0, posinf=1.0, neginf=0.0)
+    safe = np.clip(safe, 0.0, 1.0)
+    return (safe * 255.0).astype(np.uint8)
+
+
+def get_pixel_to_meter_mapping(npz_file_path: Path) -> Dict[str, any]:
+    """Auto-detect pixel->meter mapping from NPZ file metadata."""
+    npz_file_path = Path(npz_file_path)
+    
+    try:
+        cones, ts, extent, meta = load_cone_run_npz(npz_file_path)
+        T, H, W = cones.shape
+        x_min, x_max, y_min, y_max = extent
+        width_m = float(x_max - x_min)
+        height_m = float(y_max - y_min)
+        px2m_x = width_m / float(W)
+        px2m_y = height_m / float(H)
+        
+        return {
+            'pixels_to_meters_avg': 0.5 * (px2m_x + px2m_y),
+            'px2m_x': px2m_x,
+            'px2m_y': px2m_y,
+            'image_shape': (H, W),
+            'sonar_coverage_meters': max(width_m, height_m),
+            'extent': extent,
+            'source': 'npz_metadata',
+            'success': True
+        }
+    except Exception as e:
+        from utils.config import CONE_H_DEFAULT, CONE_W_DEFAULT, DISPLAY_RANGE_MAX_M_DEFAULT
+        image_shape = (CONE_H_DEFAULT, CONE_W_DEFAULT)
+        sonar_coverage_meters = DISPLAY_RANGE_MAX_M_DEFAULT * 2
+        pixels_to_meters_avg = sonar_coverage_meters / max(image_shape)
+        
+        return {
+            'pixels_to_meters_avg': pixels_to_meters_avg,
+            'image_shape': image_shape,
+            'source': 'config_defaults',
+            'success': False,
+            'error': str(e)
+        }
+
+
 # --------------------------- Public API --------------------------------------
 
 __all__ = [
-    # I/O & parsing
-    "load_df",
-    "parse_json_cell",
+    # Frame extraction
     "infer_hw",
     "get_sonoptix_frame",
     "apply_flips",
-    "load_png_rgb",
-    "ensure_ts_col",
-    "read_video_index",
-    # processing
+    # Intensity processing
     "enhance_intensity",
+    # Cone operations
+    "ConeGridSpec",
+    "iter_cone_frames",
+    "save_cone_run_npz",
+    "load_cone_run_npz",
     "box_blur",
     "cone_raster_like_display_cell",
-    # matching
-    "nearest_video_index",
-    # cone
-    "ConeGridSpec",
-    "rasterize_cone",
-    # plotting
-    "plot_video_and_sonar",
-    "plot_video_and_cone",
-    # video writing
-    "render_cone_side_by_side_frame", 
-    "save_alignment_video_cone",
-    # cone run saving/loading
-    "iter_cone_frames", 
-    "save_cone_run_npz", 
-    "load_cone_run_npz",
-    # utility functions
+    "to_uint8_gray",
+    "get_pixel_to_meter_mapping",
+    # Video utilities
     "load_png_bgr",
     "to_local_tz",
     "ts_for_filename",
-    "put_text_overlay"
+    "put_text_overlay",
+    "find_video_files_for_bag",
+    "get_video_overlay_info",
+    # Re-exported from io_utils for backward compatibility
+    "load_df",
+    "parse_json_cell",
+    "load_png_rgb",
+    "ensure_ts_col",
+    "read_video_index",
+    "normalize_ts_utc",
+    "nearest_video_index",
+    # Re-exported from rendering for backward compatibility
+    "rasterize_cone",
 ]
-
-
-# Additional utility functions for video generation
-def load_png_bgr(path) -> np.ndarray:
-    """Load PNG image as BGR array."""
-    img = cv2.imread(str(path), cv2.IMREAD_COLOR)
-    if img is None:
-        raise FileNotFoundError(path)
-    return img
-
-
-def to_local_tz(ts, tz_name="Europe/Oslo"):
-    """Convert timestamp to local timezone."""
-    try: 
-        return ts.tz_convert(tz_name)
-    except Exception: 
-        return ts
-
-
-def ts_for_filename(ts, tz_name="Europe/Oslo"):
-    """Format timestamp for filename."""
-    if pd.isna(ts): 
-        ts = pd.Timestamp.utcnow().tz_localize("UTC")
-    return to_local_tz(ts, tz_name).strftime("%Y%m%d_%H%M%S_%f%z")
-
-
-def put_text_overlay(bgr, text, y, x=10, scale=0.55):
-    """Add text overlay with white text and black outline."""
-    cv2.putText(bgr, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, (255,255,255), 2, cv2.LINE_AA)
-    cv2.putText(bgr, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, (0,0,0), 1, cv2.LINE_AA)
-
-
-def find_video_files_for_bag(bag_name: str, exports_dir: Optional[Path] = None) -> Dict[str, Optional[Path]]:
-    """
-    Automatically find video CSV and PNG frame directories for a given bag name.
-    
-    Args:
-        bag_name: Bag name (e.g., "2024-08-20_13-39-34")
-        exports_dir: Path to exports directory (uses default if None)
-        
-    Returns:
-        Dictionary with keys:
-        - 'sonar_csv': Path to sonar CSV file or None
-        - 'video_frames_dir': Path to best matching PNG frames directory or None
-        - 'available_frame_dirs': List of all available frame directories for this bag
-    """
-    from utils.sonar_config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS, VIDEO_CONFIG
-    
-    if exports_dir is None:
-        exports_dir = Path(EXPORTS_DIR_DEFAULT)
-    
-    # Clean bag name (remove _data or _video suffix if present)
-    clean_bag_name = bag_name.replace('_data', '').replace('_video', '')
-    
-    result = {
-        'sonar_csv': None,
-        'video_frames_dir': None,
-        'available_frame_dirs': []
-    }
-    
-    # Find sonar CSV file
-    csv_dir = exports_dir / EXPORTS_SUBDIRS.get('by_bag', 'by_bag')
-    csv_pattern = f"sensor_sonoptix_echo_image__{clean_bag_name}_video.csv"
-    csv_file = csv_dir / csv_pattern
-    
-    if csv_file.exists():
-        result['sonar_csv'] = csv_file
-    else:
-        # Try alternative patterns
-        for csv_candidate in csv_dir.glob(f"*{clean_bag_name}*video*.csv"):
-            if 'sonoptix' in csv_candidate.name:
-                result['sonar_csv'] = csv_candidate
-                break
-    
-    # Find PNG frame directories
-    frames_dir = exports_dir / EXPORTS_SUBDIRS.get('frames', 'frames')
-    if frames_dir.exists():
-        # Look for frame directories matching this bag
-        for frame_dir in frames_dir.iterdir():
-            if frame_dir.is_dir() and clean_bag_name in frame_dir.name:
-                # Verify it has PNG frames and index.csv
-                if (frame_dir / 'index.csv').exists() or list(frame_dir.glob('*.png')):
-                    result['available_frame_dirs'].append(frame_dir)
-        
-        # Select best frame directory based on topic preference
-        if result['available_frame_dirs']:
-            topic_preferences = VIDEO_CONFIG.get('video_topic_preference', [
-                'image_compressed_image_data',
-                'ted_image', 
-                'camera_image'
-            ])
-            
-            # Try to find preferred topic
-            for preferred_topic in topic_preferences:
-                for frame_dir in result['available_frame_dirs']:
-                    if preferred_topic in frame_dir.name:
-                        result['video_frames_dir'] = frame_dir
-                        break
-                if result['video_frames_dir']:
-                    break
-            
-            # If no preferred topic found, use the first available
-            if not result['video_frames_dir'] and result['available_frame_dirs']:
-                result['video_frames_dir'] = result['available_frame_dirs'][0]
-    
-    return result
-
-
-def get_video_overlay_info(bag_name: str) -> Optional[Dict[str, Path]]:
-    """
-    Get video overlay information if enabled in configuration.
-    
-    Args:
-        bag_name: Bag name to find video files for
-        
-    Returns:
-        Dictionary with 'sonar_csv' and 'video_frames_dir' paths if video overlay
-        is enabled and files are found, None otherwise.
-    """
-    from utils.sonar_config import VIDEO_CONFIG
-    
-    if not VIDEO_CONFIG.get('enable_video_overlay', False):
-        return None
-    
-    video_files = find_video_files_for_bag(bag_name)
-    
-    if video_files['sonar_csv'] and video_files['video_frames_dir']:
-        return {
-            'sonar_csv': video_files['sonar_csv'],
-            'video_frames_dir': video_files['video_frames_dir']
-        }
-    else:
-        print(f"Warning: Video overlay enabled but files not found for bag '{bag_name}'")
-        if not video_files['sonar_csv']:
-            print(f"  Missing sonar CSV file")
-        if not video_files['video_frames_dir']:
-            print(f"  Missing video frames directory")
-            if video_files['available_frame_dirs']:
-                print(f"  Available frame dirs: {[v.name for v in video_files['available_frame_dirs']]}")
-        return None

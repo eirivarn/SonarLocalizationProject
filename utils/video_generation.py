@@ -7,13 +7,13 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 from datetime import datetime, timezone
+from typing import Optional
 
+from utils.io_utils import load_df, read_video_index
 from utils.sonar_utils import (
-    load_df, get_sonoptix_frame,
-    enhance_intensity, read_video_index, apply_flips, cone_raster_like_display_cell,
-    get_video_overlay_info
+    get_sonoptix_frame, enhance_intensity, apply_flips, cone_raster_like_display_cell
 )
-from utils.sonar_config import (
+from utils.config import (
     SONAR_VIS_DEFAULTS,
     CONE_W_DEFAULT, CONE_H_DEFAULT, CONE_FLIP_VERTICAL_DEFAULT,
     CMAP_NAME_DEFAULT, DISPLAY_RANGE_MAX_M_DEFAULT, FOV_DEG_DEFAULT,
@@ -41,6 +41,115 @@ def put_text(bgr, s, y, x=10, scale=0.55):
     cv2.putText(bgr, s, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, (255,255,255), 2, cv2.LINE_AA)
     cv2.putText(bgr, s, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, (0,0,0),   1, cv2.LINE_AA)
 
+def find_video_files_for_bag(bag_name: str, exports_dir: Optional[Path] = None) -> dict:
+    """
+    Automatically find video CSV and PNG frame directories for a given bag name.
+    
+    Args:
+        bag_name: Bag name (e.g., "2024-08-20_13-39-34")
+        exports_dir: Path to exports directory (uses default if None)
+        
+    Returns:
+        Dictionary with keys:
+        - 'sonar_csv': Path to sonar CSV file or None
+        - 'video_frames_dir': Path to best matching PNG frames directory or None
+        - 'available_frame_dirs': List of all available frame directories for this bag
+    """
+    from utils.config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS, VIDEO_CONFIG
+    
+    if exports_dir is None:
+        exports_dir = Path(EXPORTS_DIR_DEFAULT)
+    
+    # Clean bag name (remove _data or _video suffix if present)
+    clean_bag_name = bag_name.replace('_data', '').replace('_video', '')
+    
+    result = {
+        'sonar_csv': None,
+        'video_frames_dir': None,
+        'available_frame_dirs': []
+    }
+    
+    # Find sonar CSV file
+    csv_dir = exports_dir / EXPORTS_SUBDIRS.get('by_bag', 'by_bag')
+    csv_pattern = f"sensor_sonoptix_echo_image__{clean_bag_name}_video.csv"
+    csv_file = csv_dir / csv_pattern
+    
+    if csv_file.exists():
+        result['sonar_csv'] = csv_file
+    else:
+        # Try alternative patterns
+        for csv_candidate in csv_dir.glob(f"*{clean_bag_name}*video*.csv"):
+            if 'sonoptix' in csv_candidate.name:
+                result['sonar_csv'] = csv_candidate
+                break
+    
+    # Find PNG frame directories
+    frames_dir = exports_dir / EXPORTS_SUBDIRS.get('frames', 'frames')
+    if frames_dir.exists():
+        # Look for frame directories matching this bag
+        for frame_dir in frames_dir.iterdir():
+            if frame_dir.is_dir() and clean_bag_name in frame_dir.name:
+                # Verify it has PNG frames and index.csv
+                if (frame_dir / 'index.csv').exists() or list(frame_dir.glob('*.png')):
+                    result['available_frame_dirs'].append(frame_dir)
+        
+        # Select best frame directory based on topic preference
+        if result['available_frame_dirs']:
+            topic_preferences = VIDEO_CONFIG.get('video_topic_preference', [
+                'image_compressed_image_data',
+                'ted_image', 
+                'camera_image'
+            ])
+            
+            # Try to find preferred topic
+            for preferred_topic in topic_preferences:
+                for frame_dir in result['available_frame_dirs']:
+                    if preferred_topic in frame_dir.name:
+                        result['video_frames_dir'] = frame_dir
+                        break
+                if result['video_frames_dir']:
+                    break
+            
+            # If no preferred topic found, use the first available
+            if not result['video_frames_dir'] and result['available_frame_dirs']:
+                result['video_frames_dir'] = result['available_frame_dirs'][0]
+    
+    return result
+
+
+def get_video_overlay_info(bag_name: str) -> Optional[dict]:
+    """
+    Get video overlay information if enabled in configuration.
+    
+    Args:
+        bag_name: Bag name to find video files for
+        
+    Returns:
+        Dictionary with 'sonar_csv' and 'video_frames_dir' paths if video overlay
+        is enabled and files are found, None otherwise.
+    """
+    from utils.config import VIDEO_CONFIG
+    
+    if not VIDEO_CONFIG.get('enable_video_overlay', False):
+        return None
+    
+    video_files = find_video_files_for_bag(bag_name)
+    
+    if video_files['sonar_csv'] and video_files['video_frames_dir']:
+        return {
+            'sonar_csv': video_files['sonar_csv'],
+            'video_frames_dir': video_files['video_frames_dir']
+        }
+    else:
+        print(f"Warning: Video overlay enabled but files not found for bag '{bag_name}'")
+        if not video_files['sonar_csv']:
+            print(f"  Missing sonar CSV file")
+        if not video_files['video_frames_dir']:
+            print(f"  Missing video frames directory")
+            if video_files['available_frame_dirs']:
+                print(f"  Available frame dirs: {[v.name for v in video_files['available_frame_dirs']]}")
+        return None
+
 def prepare_three_system_data(
     target_bag: str,
     exports_folder: Path,
@@ -62,7 +171,7 @@ def prepare_three_system_data(
     fft_net_data = None
     if fft_csv_path and fft_csv_path.exists():
         try:
-            from utils.relative_fft_analysis import load_relative_fft_data, convert_fft_to_xy_coordinates
+            from utils.fft_processing import load_relative_fft_data, convert_fft_to_xy_coordinates
             
             print("✓ Using notebook 08's FFT loading methods...")
             fft_net_data = load_relative_fft_data(fft_csv_path)
@@ -84,7 +193,7 @@ def prepare_three_system_data(
     if fft_net_data is not None and use_notebook08_sync:
         try:
             # Import notebook 08's synchronization utilities
-            from utils.net_relative_utils import run_complete_three_system_analysis
+            from utils.multi_system_sync import run_complete_three_system_analysis
             
             print("✓ Using notebook 08's three-system synchronization...")
             
@@ -209,7 +318,7 @@ def export_optimized_sonar_video(
     
     # --- Auto-detect video files if enabled ---
     if VIDEO_SEQ_DIR is None and AUTO_DETECT_VIDEO:
-        from utils.sonar_config import VIDEO_CONFIG
+        from utils.config import VIDEO_CONFIG
         
         # Check if video overlay is globally enabled
         if VIDEO_CONFIG.get('enable_video_overlay', False):
@@ -255,7 +364,7 @@ def export_optimized_sonar_video(
     if DVL_NAV_DATA is None and INCLUDE_NET:
         try:
             # Use same loading method as comparison analysis
-            import utils.net_distance_analysis as sda
+            import utils.distance_measurement as sda
             BY_BAG_FOLDER = exports_root / EXPORTS_SUBDIRS.get('by_bag', 'by_bag')
             raw_data, _ = sda.load_all_distance_data_for_bag(TARGET_BAG, BY_BAG_FOLDER)
             
@@ -733,7 +842,7 @@ def export_optimized_sonar_video(
                 dt = abs(ts_cam - ts_target)
                 
                 # Check if the time difference is reasonable (configurable tolerance)
-                from utils.sonar_config import VIDEO_CONFIG
+                from utils.config import VIDEO_CONFIG
                 max_sync_tolerance_s = VIDEO_CONFIG.get('max_sync_tolerance_seconds', 5.0)
                 max_sync_tolerance = pd.Timedelta(seconds=max_sync_tolerance_s)
                 if dt > max_sync_tolerance:
@@ -878,11 +987,11 @@ def create_enhanced_contour_detection_video_with_processor(
     processor=None
 ):
     """Create video using the SonarDataProcessor - SHOWS AOI/corridor masks for detailed analysis."""
-    from utils.sonar_image_analysis import (
+    from utils.contour_analysis import (
         SonarDataProcessor, get_available_npz_files, 
         load_cone_run_npz, to_uint8_gray
     )
-    from utils.sonar_config import VIDEO_CONFIG
+    from utils.config import VIDEO_CONFIG
     
     print("=== ENHANCED VIDEO CREATION WITH AOI/CORRIDOR VISUALIZATION ===")
     

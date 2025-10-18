@@ -2,20 +2,25 @@
 # Import from available modules only
 
 try:
-    # Import from sonar_utils as needed by other modules
-    from .sonar_utils import *
-except ImportError:
+    # Import specific items from sonar_utils to avoid AttributeError
+    from .sonar_utils import (
+        load_sonar_csv,
+        get_frame_data,
+        compute_enhanced_intensity,
+        # Add other specific functions as needed
+    )
+except (ImportError, AttributeError):
     pass
 
 try:
     # Import from new sonar visualization module
-    from .sonar_visualization import *
+    from .sonar_visualization import SonarVisualizer
 except ImportError:
     pass
 
 try:
     # Export video utilities (including optimized sonar video generator)
-    from .sonar_and_foto_generation import *
+    from .video_generation import *
 except ImportError:
     pass
 
@@ -26,7 +31,7 @@ except ImportError:
     pass
 
 try:
-    from .sonar_image_analysis import *
+    from .contour_analysis import *
 except ImportError:
     pass
 
@@ -41,7 +46,12 @@ except ImportError:
     pass
 
 try:
-    from .net_distance_analysis import *
+    from .distance_measurement import *
+except ImportError:
+    pass
+
+try:
+    from .config import SONAR_VIS_DEFAULTS, EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
 except ImportError:
     pass
 

@@ -52,7 +52,7 @@ from utils.dataset_export_utils import (
     find_video_bags,
 )
 import utils.sonar_utils as sonar_utils
-from utils.sonar_config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
+from utils.config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
 
 
 # ------------------------------ Convenience listings ------------------------------

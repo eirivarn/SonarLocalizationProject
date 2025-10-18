@@ -11,12 +11,14 @@ import cv2
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from utils.sonar_config import IMAGE_PROCESSING_CONFIG, TRACKING_CONFIG
-from utils.sonar_processing import preprocess_edges  # Use full version instead of simple
+from utils.config import IMAGE_PROCESSING_CONFIG, TRACKING_CONFIG
+from utils.image_enhancement import preprocess_edges  # Use full version instead of simple
 from utils.sonar_tracking import (
     smooth_center_position, create_smooth_elliptical_aoi,
     split_contour_by_corridor, build_aoi_corridor_mask
 )
+from utils.sonar_utils import load_cone_run_npz, to_uint8_gray, get_pixel_to_meter_mapping  # Import from canonical location
+from utils.io_utils import get_available_npz_files  # Import from I/O module
 
 # ============================ CORE DATA STRUCTURES ============================
 
@@ -302,100 +304,6 @@ class SonarDataProcessor:
         except Exception:
             return None, None
 
-# ============================ NPZ I/O ============================
-
-def load_cone_run_npz(path: str | Path):
-    """Load NPZ file with cones data."""
-    path = Path(path)
-    with np.load(path, allow_pickle=True) as z:
-        keys = set(z.files)
-        if "cones" not in keys or "extent" not in keys:
-            raise KeyError(f"NPZ must contain 'cones' and 'extent'")
-        
-        cones = np.asarray(z["cones"], dtype=np.float32)
-        extent = tuple(np.asarray(z["extent"], dtype=np.float64).tolist())
-
-        # meta
-        meta = {}
-        if "meta_json" in keys:
-            raw = z["meta_json"]
-            meta = json.loads(raw.item() if getattr(raw, "ndim", 0) else raw.tolist())
-        elif "meta" in keys:
-            m = z["meta"]
-            try:
-                meta = m.item() if hasattr(m, "item") else m.tolist()
-                if isinstance(meta, (bytes,str)): 
-                    meta = json.loads(meta)
-            except Exception:
-                meta = {}
-
-        ts = None
-        if "ts_unix_ns" in keys:
-            ts = pd.to_datetime(np.asarray(z["ts_unix_ns"], dtype=np.int64), utc=True)
-        elif "ts" in keys:
-            ts = pd.to_datetime(z["ts"], utc=True, errors='coerce')
-
-        T = cones.shape[0]
-        if ts is None or isinstance(ts, pd.Timestamp):
-            ts = pd.DatetimeIndex([ts or pd.Timestamp.utcnow()]*T)
-        else:
-            ts = pd.DatetimeIndex(pd.to_datetime(ts, utc=True))
-            if len(ts) != T:
-                ts = pd.DatetimeIndex([ts[0]]*T) if len(ts)==1 else pd.to_datetime(range(T), unit="s", utc=True)
-
-    return cones, ts, extent, meta
-
-def get_available_npz_files(npz_dir: str | None = None) -> List[Path]:
-    """Get list of available NPZ files."""
-    from utils.sonar_config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
-    npz_dir = Path(npz_dir) if npz_dir is not None else Path(EXPORTS_DIR_DEFAULT) / EXPORTS_SUBDIRS.get('outputs', 'outputs')
-    if not npz_dir.exists():
-        return []
-    return [f for f in npz_dir.glob("*_cones.npz") if not f.name.startswith('._')]
-
-def to_uint8_gray(frame01: np.ndarray) -> np.ndarray:
-    """Convert normalized frame to uint8 grayscale."""
-    safe = np.nan_to_num(frame01, nan=0.0, posinf=1.0, neginf=0.0)
-    safe = np.clip(safe, 0.0, 1.0)
-    return (safe * 255.0).astype(np.uint8)
-
-def get_pixel_to_meter_mapping(npz_file_path: Union[str, Path]) -> Dict[str, Any]:
-    """Auto-detect pixel->meter mapping from NPZ file metadata."""
-    npz_file_path = Path(npz_file_path)
-    
-    try:
-        cones, ts, extent, meta = load_cone_run_npz(npz_file_path)
-        T, H, W = cones.shape
-        x_min, x_max, y_min, y_max = extent
-        width_m = float(x_max - x_min)
-        height_m = float(y_max - y_min)
-        px2m_x = width_m / float(W)
-        px2m_y = height_m / float(H)
-        
-        return {
-            'pixels_to_meters_avg': 0.5 * (px2m_x + px2m_y),
-            'px2m_x': px2m_x,
-            'px2m_y': px2m_y,
-            'image_shape': (H, W),
-            'sonar_coverage_meters': max(width_m, height_m),
-            'extent': extent,
-            'source': 'npz_metadata',
-            'success': True
-        }
-    except Exception as e:
-        from utils.sonar_config import CONE_H_DEFAULT, CONE_W_DEFAULT, DISPLAY_RANGE_MAX_M_DEFAULT
-        image_shape = (CONE_H_DEFAULT, CONE_W_DEFAULT)
-        sonar_coverage_meters = DISPLAY_RANGE_MAX_M_DEFAULT * 2
-        pixels_to_meters_avg = sonar_coverage_meters / max(image_shape)
-        
-        return {
-            'pixels_to_meters_avg': pixels_to_meters_avg,
-            'image_shape': image_shape,
-            'source': 'config_defaults',
-            'success': False,
-            'error': str(e)
-        }
-
 # ============================ ANALYSIS ENGINE ============================
 
 class DistanceAnalysisEngine:
@@ -443,7 +351,7 @@ class DistanceAnalysisEngine:
         self._print_analysis_summary(df)
         
         if save_outputs:
-            from utils.sonar_config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
+            from utils.config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
             outputs_dir = Path(EXPORTS_DIR_DEFAULT) / EXPORTS_SUBDIRS.get('outputs', 'outputs')
             outputs_dir.mkdir(parents=True, exist_ok=True)
             
