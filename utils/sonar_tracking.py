@@ -67,46 +67,50 @@ class NetTracker:
         
         return best
     
-    def calculate_distance(self, image_width: int, image_height: int) -> Optional[float]:
-        """Calculate distance to net along center line."""
-        if self.center is None:
-            return self.last_distance
+    def calculate_distance(self, image_width: int, image_height: int) -> Tuple[Optional[float], Optional[float]]:
+        """Calculate distance and angle from contour."""
+        if self.center is None or self.angle is None:
+            return self.last_distance, None
         
-        cx, cy = self.center
-        center_x = image_width / 2
-        
-        # Use major axis angle
-        if self.angle is None:
-            return None
-        
-        major_angle = self.angle
-        if self.size is not None:
-            w, h = self.size
-            if h > w:  # Height is major axis
-                major_angle = (self.angle + 90.0) % 360.0
-        
-        # Intersect with center line
-        ang_r = np.radians(major_angle)
-        cos_a = np.cos(ang_r)
-        
-        if abs(cos_a) > 1e-6:
-            t = (center_x - cx) / cos_a
-            distance = cy + t * np.sin(ang_r)
-        else:
-            distance = cy
-        
-        # Clamp
-        distance = np.clip(distance, 0, image_height - 1)
-        
-        # Smooth distance changes
-        if self.last_distance is not None:
-            max_change = self.config.get('max_distance_change_pixels', 20)
-            if abs(distance - self.last_distance) > max_change:
-                direction = 1 if distance > self.last_distance else -1
-                distance = self.last_distance + direction * max_change
-        
-        self.last_distance = distance
-        return distance
+        try:
+            cx, cy = self.center
+            w, h = self.size if self.size else (1, 1)
+            
+            # Return the raw angle directly - this is the major axis angle
+            major_axis_angle = self.angle
+            
+            # CRITICAL FIX: The red line is perpendicular to major axis
+            # So the red line angle is major_axis_angle + 90°
+            red_line_angle = (major_axis_angle + 90.0) % 360.0
+            
+            # Calculate intersection with center line using RED LINE angle (not major axis)
+            center_x = image_width / 2
+            ang_r = np.radians(red_line_angle)
+            cos_ang = np.cos(ang_r)
+            
+            if abs(cos_ang) > 1e-6:
+                t = (center_x - cx) / cos_ang
+                intersect_y = cy + t * np.sin(ang_r)
+                distance = intersect_y
+            else:
+                distance = cy
+            
+            distance = np.clip(distance, 0, image_height - 1)
+            
+            # Smooth distance
+            if self.last_distance is not None:
+                max_change = self.config.get('max_distance_change_pixels', 20)
+                change = abs(distance - self.last_distance)
+                if change > max_change:
+                    direction = 1 if distance > self.last_distance else -1
+                    distance = self.last_distance + (direction * max_change)
+            
+            self.last_distance = distance
+            
+            # Return the red line angle (already perpendicular)
+            return float(distance), float(red_line_angle)
+        except:
+            return self.last_distance, None
     
     def _get_search_mask(self, image_shape: Tuple[int, int]) -> Optional[np.ndarray]:
         """Get search mask (ellipse + corridor)."""

@@ -101,7 +101,7 @@ def analyze_npz_sequence(
         
         # Track
         contour = tracker.find_and_update(edges, (H, W))
-        distance_px = tracker.calculate_distance(W, H)
+        distance_px, angle_deg = tracker.calculate_distance(W, H)
         
         # Convert to meters
         distance_m = None
@@ -109,17 +109,15 @@ def analyze_npz_sequence(
             px2m = (extent[3] - extent[2]) / H
             distance_m = extent[2] + distance_px * px2m
         
-        # Angle
-        angle_deg = None
-        if tracker.angle is not None:
-            angle_deg = (tracker.angle + 90.0) % 360.0
+        # CRITICAL FIX: Don't add 90° here - angle_deg is already the major axis angle
+        # Just use the angle directly from the tracker
         
         results.append({
             'frame_index': frame_idx,
             'timestamp': pd.Timestamp(timestamps[frame_idx]),
             'distance_pixels': distance_px,
             'distance_meters': distance_m,
-            'angle_degrees': angle_deg,
+            'angle_degrees': angle_deg,  # Use directly - no modification needed
             'detection_success': (contour is not None),
             'tracking_status': tracker.get_status(),
             'area': float(cv2.contourArea(contour)) if contour is not None else 0.0

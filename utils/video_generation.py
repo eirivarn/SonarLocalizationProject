@@ -1112,7 +1112,8 @@ def create_enhanced_contour_detection_video(
     first_u8 = to_uint8_gray(cones[frame_start])
     H, W = first_u8.shape
     
-    grid_h = H * 3
+    # CRITICAL FIX: Grid is 2 rows x 3 columns
+    grid_h = H * 2
     grid_w = W * 3
     
     outp = Path(output_path)
@@ -1127,10 +1128,10 @@ def create_enhanced_contour_detection_video(
         return None
     
     print(f"Processing {actual} frames...")
-    print(f"Grid layout (3x3):")
+    print(f"Grid layout (2x3):")
     print(f"  Row 1: Raw | Momentum-Merged | Edges")
-    print(f"  Row 2: Dilated | Morphology | Search Mask")
-    print(f"  Row 3: Best Contour | Tracking Info | Distance")
+    print(f"  Row 2: Search Mask | Best Contour | Distance")
+    print(f"Output grid size: {grid_w}x{grid_h}")
     
     # Initialize NetTracker (same as analysis)
     config = {**IMAGE_PROCESSING_CONFIG, **TRACKING_CONFIG}
@@ -1181,25 +1182,7 @@ def create_enhanced_contour_detection_video(
         
         cv2.putText(edges_display, "3. Edges", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
-        # 4. Dilated (if enabled)
-        dilated = edges
-        if config.get('edge_dilation_iterations', 0) > 0:
-            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
-            dilated = cv2.dilate(edges, k, iterations=config['edge_dilation_iterations'])
-        
-        dilated_display = cv2.cvtColor(dilated, cv2.COLOR_GRAY2BGR)
-        cv2.putText(dilated_display, "4. Dilated", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        
-        # 5. Morphology
-        morph = dilated
-        if config.get('morph_close_kernel', 0) > 0:
-            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (config['morph_close_kernel'],) * 2)
-            morph = cv2.morphologyEx(dilated, cv2.MORPH_CLOSE, k)
-        
-        morph_display = cv2.cvtColor(morph, cv2.COLOR_GRAY2BGR)
-        cv2.putText(morph_display, "5. Morphology", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        
-        # 6. Search mask (from tracker)
+        # 4. Search mask (from tracker) - RENUMBERED
         search_mask_display = cv2.cvtColor(frame_u8, cv2.COLOR_GRAY2BGR)
         search_mask = tracker._get_search_mask((H, W))
         if search_mask is not None:
@@ -1215,10 +1198,11 @@ def create_enhanced_contour_detection_video(
                        tracker.angle)
                 cv2.ellipse(search_mask_display, ell, (255, 0, 255), 2)
         
-        cv2.putText(search_mask_display, "6. Search Mask", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        cv2.putText(search_mask_display, "4. Search Mask", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
-        # 7. Track using NetTracker
-        contour = tracker.find_and_update(morph, (H, W))
+        # 5. Track using NetTracker - RENUMBERED
+        # CRITICAL FIX: Use edges directly (not morph) since we removed morphology panel
+        contour = tracker.find_and_update(edges, (H, W))
         
         best_display = cv2.cvtColor(frame_u8, cv2.COLOR_GRAY2BGR)
         if contour is not None:
@@ -1230,53 +1214,30 @@ def create_enhanced_contour_detection_video(
                 except:
                     pass
         
-        cv2.putText(best_display, "7. Best Contour", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        cv2.putText(best_display, "5. Best Contour", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
-        # 8. Tracking info
-        info_display = np.zeros((H, W, 3), dtype=np.uint8)
-        y_offset = 30
-        
-        cv2.putText(info_display, "8. Tracking Info", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        
-        if tracker.center:
-            cv2.putText(info_display, f"Center: ({tracker.center[0]:.1f}, {tracker.center[1]:.1f})",
-                       (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-            y_offset += 25
-        
-        if tracker.size:
-            cv2.putText(info_display, f"Size: ({tracker.size[0]:.1f}, {tracker.size[1]:.1f})",
-                       (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-            y_offset += 25
-        
-        if tracker.angle is not None:
-            cv2.putText(info_display, f"Angle: {tracker.angle:.1f}°",
-                       (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-            y_offset += 25
-        
-        status = tracker.get_status()
-        color = (0, 255, 0) if status == "TRACKED" else (0, 165, 255) if "SEARCHING" in status else (0, 0, 255)
-        cv2.putText(info_display, f"Status: {status}",
-                   (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
-        
-        # 9. Distance visualization
+        # 6. Distance visualization - RENUMBERED
         distance_display = cv2.cvtColor(frame_u8, cv2.COLOR_GRAY2BGR)
-        distance_px = tracker.calculate_distance(W, H)
+        distance_result = tracker.calculate_distance(W, H)
+        
+        if distance_result is not None:
+            distance_px, angle_deg = distance_result
+        else:
+            distance_px, angle_deg = None, None
         
         if distance_px is not None:
             # Draw center line
             cv2.line(distance_display, (W//2, 0), (W//2, H), (128, 128, 128), 1)
             
-            # Draw distance point
+            # CRITICAL FIX: Draw distance point at the intersection of red line with center line
+            # The angle_deg is already the red line angle (perpendicular to major axis)
             cv2.circle(distance_display, (W//2, int(distance_px)), 8, (0, 0, 255), -1)
             cv2.circle(distance_display, (W//2, int(distance_px)), 8, (255, 255, 255), 2)
             
-            # Draw net line if we have tracking
+            # Draw the red line itself (perpendicular to major axis)
             if tracker.center and tracker.size and tracker.angle is not None:
-                major_angle = tracker.angle
-                if tracker.size[1] > tracker.size[0]:
-                    major_angle = (tracker.angle + 90) % 360
-                
-                ang_r = np.radians(major_angle + 90)
+                # The angle_deg from calculate_distance is already the red line angle
+                ang_r = np.radians(angle_deg)
                 half_len = max(tracker.size) / 2
                 
                 p1x = int(tracker.center[0] + half_len * np.cos(ang_r))
@@ -1293,17 +1254,27 @@ def create_enhanced_contour_detection_video(
                 cv2.putText(distance_display, f"{dist_m:.2f}m", (W//2 + 15, int(distance_px)),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
         
-        cv2.putText(distance_display, "9. Distance", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        cv2.putText(distance_display, "6. Distance", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
-        # Assemble grid
+        # Assemble grid - CRITICAL: Make sure frames are right size
         row0 = np.hstack([raw_display, momentum_display, edges_display])
-        row1 = np.hstack([dilated_display, morph_display, search_mask_display])
-        row2 = np.hstack([best_display, info_display, distance_display])
-        grid_frame = np.vstack([row0, row1, row2])
+        row1 = np.hstack([search_mask_display, best_display, distance_display])
+        grid_frame = np.vstack([row0, row1])
+        
+        # CRITICAL FIX: Verify grid size before writing
+        if grid_frame.shape != (grid_h, grid_w, 3):
+            print(f"ERROR: Grid frame size {grid_frame.shape} doesn't match expected {(grid_h, grid_w, 3)}")
+            print(f"  Row 0 shape: {row0.shape}")
+            print(f"  Row 1 shape: {row1.shape}")
+            continue
+        
+        # CRITICAL FIX: Ensure uint8
+        if grid_frame.dtype != np.uint8:
+            grid_frame = np.clip(grid_frame, 0, 255).astype(np.uint8)
         
         # Frame info
         frame_info = f'Frame: {idx} | {tracker.get_status()}'
-        cv2.putText(grid_frame, frame_info, (10, grid_h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        cv2.putText(grid_frame, frame_info, (10, grid_frame.shape[0] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
         vw.write(grid_frame)
         
@@ -1313,7 +1284,6 @@ def create_enhanced_contour_detection_video(
     vw.release()
     print(f"\n✓ Video saved to: {output_path}")
     print(f"Grid layout: Raw | Momentum | Edges")
-    print(f"             Dilated | Morphology | Search Mask")
-    print(f"             Best Contour | Tracking Info | Distance")
+    print(f"             Search Mask | Best Contour | Distance")
     
     return output_path
