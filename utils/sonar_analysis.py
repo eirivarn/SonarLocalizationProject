@@ -216,7 +216,7 @@ def update_tracking_state(
         'corridor_mask': None,
     }
     
-    if tracking_config.get('use_corridor_splitting', False):
+    if tracking_config.get('use_corridor_splitting', True):
         try:
             inside_c, corridor_c, other_c, ell_mask, corr_mask = split_contour_by_corridor(
                 best_contour, new_ellipse, (H, W),

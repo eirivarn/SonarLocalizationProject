@@ -346,6 +346,33 @@ def adaptive_linear_momentum_merge_fast(
     
     return np.clip(final_result, 0.0, 255.0).astype(np.uint8)
 
+def get_momentum_merged_frame(frame_u8: np.ndarray, config: Dict) -> np.ndarray:
+    """
+    Returns the momentum-merged frame (after adaptive linear momentum merging).
+    This is the frame you want to visualize after the raw frame.
+    """
+    binary_threshold = config.get('binary_threshold', 128)
+    binary_frame = (frame_u8 > binary_threshold).astype(np.uint8) * 255
+
+    use_advanced = config.get('use_advanced_momentum_merging', True)
+    if use_advanced:
+        merged = adaptive_linear_momentum_merge_fast(
+            binary_frame,
+            angle_steps=config.get('adaptive_angle_steps', 36),
+            base_radius=config.get('adaptive_base_radius', 3),
+            max_elongation=config.get('adaptive_max_elongation', 3.0),
+            momentum_boost=config.get('momentum_boost', 0.8),
+            linearity_threshold=config.get('adaptive_linearity_threshold', 0.15),
+        )
+    else:
+        kernel_size = config.get('basic_gaussian_kernel_size', 5)
+        gaussian_sigma = config.get('basic_gaussian_sigma', 1.0)
+        momentum_boost = config.get('basic_momentum_boost', 0.5)
+        enhanced = cv2.GaussianBlur(binary_frame, (kernel_size, kernel_size), gaussian_sigma)
+        merged = binary_frame + momentum_boost * enhanced
+        merged = np.clip(merged, 0, 255).astype(np.uint8)
+    return merged
+
 def preprocess_edges(frame_u8: np.ndarray, config: Dict) -> Tuple[np.ndarray, np.ndarray]:
     """
     Preprocess sonar frame for edge detection with optional advanced enhancement.

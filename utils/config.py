@@ -159,13 +159,38 @@ TRACKING_CONFIG: Dict = {
 }
 
 # Corridor AOI tuning (used by sonar_image_analysis)
+# This configuration controls how the corridor mask is built around the detected net ellipse.
+# The corridor represents the region where contours are accepted (in addition to the ellipse itself).
 TRACKING_CONFIG.update({
-    'use_corridor_splitting': True,     # ✓ MUST BE TRUE
-    'corridor_band_k': 0.75,          
-    'corridor_length_px': None,       
-    'corridor_length_factor': 1.25,   
-    'corridor_widen': 1.0,            
-    'corridor_both_directions': True, 
+    'use_corridor_splitting': True,     # ✓ MUST BE TRUE - Enable corridor-based contour filtering
+                                         # When True: contours are split into inside/corridor/other regions
+                                         # When False: only simple ellipse-based filtering is used
+    
+    'corridor_band_k': 0.75,            # Half-width of corridor band as fraction of minor axis (b)
+                                         # Higher values = wider corridor (0.5 = 50% of b, 1.0 = 100% of b)
+                                         # Typical range: 0.5-1.0
+                                         # Used in: build_aoi_corridor_mask() to define band thickness
+    
+    'corridor_length_px': None,         # Fixed length of corridor in pixels (None = auto-calculate)
+                                         # When None: length_px = length_factor * major_axis_length
+                                         # When set: overrides auto-calculation for consistent corridor length
+    
+    'corridor_length_factor': 1.25,     # Multiplier for corridor length if corridor_length_px is None
+                                         # length_px = length_factor * major_axis_length
+                                         # Typical range: 1.0-2.0
+                                         # 1.0 = corridor extends exactly along major axis
+                                         # 1.25 = extends 25% beyond ellipse endpoints
+    
+    'corridor_widen': 1.0,              # Widening factor for far end of corridor
+                                         # 1.0 = constant width along entire corridor (rectangle)
+                                         # >1.0 = corridor widens at far end (trapezoid shape)
+                                         # 2.0 = far end is twice as wide as near end
+                                         # Typical range: 1.0-1.5
+    
+    'corridor_both_directions': True,   # Extend corridor in both directions along major axis
+                                         # True = corridor extends forward AND backward from ellipse center
+                                         # False = corridor extends only in one direction
+                                         # Should always be True for symmetric net detection
 })
 
 # Video output configuration
