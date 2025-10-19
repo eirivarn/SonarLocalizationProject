@@ -1073,6 +1073,7 @@ class TrackingState:
     smoothed_center: Optional[Tuple[float, float]] = None
     previous_ellipse: Optional[Tuple] = None
     previous_distance_pixels: Optional[float] = None
+    current_aoi: Optional[dict] = None
 
 def create_enhanced_contour_detection_video(
     npz_file_index=0, 
@@ -1267,24 +1268,59 @@ def create_enhanced_contour_detection_video(
                 # Update tracking state
                 tracking_state.previous_ellipse = smoothed_ellipse
                 
+                # Build corridor mask for panel 7
+                try:
+                    corridor_mask = build_aoi_corridor_mask(
+                        (H, W), smoothed_ellipse,
+                        band_k=TRACKING_CONFIG.get('corridor_band_k', 0.75),
+                        length_factor=TRACKING_CONFIG.get('corridor_length_factor', 1.25),
+                        widen=TRACKING_CONFIG.get('corridor_widen', 1.0),
+                        both_directions=TRACKING_CONFIG.get('corridor_both_directions', True)
+                    )
+                    
+                    # Store in tracking state for panel 7
+                    tracking_state.current_aoi = {
+                        'aoi_mask': aoi_mask,
+                        'corridor_mask': corridor_mask,
+                        'center': aoi_center,
+                        'ellipse': smoothed_ellipse
+                    }
+                    
+                except Exception as e:
+                    print(f"Warning: Could not build corridor mask: {e}")
+                    tracking_state.current_aoi = None
+                
             except Exception as e:
                 print(f"Warning: Could not create smoothed AOI: {e}")
                 # Fallback: draw a simple ellipse around the contour
                 if best_ellipse is not None:
                     cv2.ellipse(contours_aoi_display, best_ellipse, (255, 0, 255), 2)
+                tracking_state.current_aoi = None
         
         cv2.putText(contours_aoi_display, "6. Contours+Smoothed Elliptical AOI", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
-        # 7. Best contour
+        # 7. Corridor mask visualization
+        corridor_display = cv2.cvtColor(frame_u8, cv2.COLOR_GRAY2BGR)
+        
+        if tracking_state.current_aoi and 'corridor_mask' in tracking_state.current_aoi:
+            mask = tracking_state.current_aoi['corridor_mask']
+            # Overlay corridor mask in blue
+            overlay = corridor_display.copy()
+            overlay[mask > 0] = [255, 0, 0]  # Blue
+            corridor_display = cv2.addWeighted(corridor_display, 0.7, overlay, 0.3, 0)
+        
+        cv2.putText(corridor_display, "7. Corridor Mask", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        
+        # 8. Best contour (moved from panel 7)
         best_display = cv2.cvtColor(frame_u8, cv2.COLOR_GRAY2BGR)
         if best_contour is not None:
             cv2.drawContours(best_display, [best_contour], -1, (0, 255, 0), 2)
             if best_ellipse is not None:
                 cv2.ellipse(best_display, best_ellipse, (255, 0, 255), 2)
         
-        cv2.putText(best_display, "7. Best Contour", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        cv2.putText(best_display, "8. Best Contour", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
-        # 8. Net placement (smoothed with center line and intersection)
+        # 9. Net placement (moved from panel 8)
         net_display = cv2.cvtColor(frame_u8, cv2.COLOR_GRAY2BGR)
         
         if best_contour is not None and len(best_contour) >= 5:
@@ -1357,16 +1393,12 @@ def create_enhanced_contour_detection_video(
             
             cv2.circle(net_display, (int(cx), int(cy)), 5, (0, 255, 255), -1)
         
-        cv2.putText(net_display, "8. Net Placement (Center Line)", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        
-        # 9. Empty
-        empty_display = np.zeros((H, W, 3), dtype=np.uint8)
-        cv2.putText(empty_display, "[Empty]", (W//2-30, H//2), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (128, 128, 128), 2)
+        cv2.putText(net_display, "9. Net Placement (Center Line)", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
         # Assemble 3x3 grid
         row0 = np.hstack([raw_display, momentum_display, edges_display])
         row1 = np.hstack([diluted_display, morph_display, contours_aoi_display])
-        row2 = np.hstack([best_display, net_display, empty_display])
+        row2 = np.hstack([corridor_display, best_display, net_display])
         grid_frame = np.vstack([row0, row1, row2])
         
         # Frame info
@@ -1375,7 +1407,7 @@ def create_enhanced_contour_detection_video(
         
         vw.write(grid_frame)
         
-        if (i+1) % 50 == 0:
+        if (i+1) % 50 ==  0:
             print(f"Processed {i+1}/{actual} frames")
     
     vw.release()
@@ -1383,7 +1415,7 @@ def create_enhanced_contour_detection_video(
     print(f"\nGrid layout (3x3):")
     print(f"  Row 1: Raw | Momentum-Merged | Edges (of Momentum)")
     print(f"  Row 2: Diluted Edges | After Morphology | Contours+Smoothed Elliptical AOI")
-    print(f"  Row 3: Best Contour | Net Placement (Center Line) | [Empty]")
+    print(f"  Row 3: Corridor Mask | Best Contour | Net Placement (Center Line)")
     
     
     return output_path
