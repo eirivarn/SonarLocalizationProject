@@ -50,7 +50,7 @@ def analyze_npz_sequence(
     frame_step: int = 1,
     save_outputs: bool = False,
 ) -> pd.DataFrame:
-    """Clean analysis using NetTracker."""
+    """Clean analysis using NetTracker - matches create_enhanced_contour_detection_video pipeline exactly."""
     files = get_available_npz_files(npz_dir)
     npz_path = files[npz_file_index]
     
@@ -74,11 +74,14 @@ def analyze_npz_sequence(
         frame_u8 = to_uint8_gray(cones[frame_idx])
         H, W = frame_u8.shape[:2]
         
-        # Preprocess
+        # === EXACT PIPELINE MATCH ===
+        
+        # 1. Binary conversion
         binary = (frame_u8 > config['binary_threshold']).astype(np.uint8) * 255
         
+        # 2. Momentum merging
         try:
-            from utils.image_enhancement import adaptive_linear_momentum_merge_fast, preprocess_edges
+            from utils.image_enhancement import adaptive_linear_momentum_merge_fast
             momentum = adaptive_linear_momentum_merge_fast(binary, 
                 angle_steps=config['adaptive_angle_steps'],
                 base_radius=config['adaptive_base_radius'],
@@ -90,34 +93,32 @@ def analyze_npz_sequence(
                 min_coverage_percent=config['min_coverage_percent'],
                 gaussian_sigma=config['gaussian_sigma']
             )
+        except:
+            momentum = binary
+        
+        # 3. Edge detection
+        try:
             _, edges = preprocess_edges(momentum, config)
         except:
             edges = binary
         
-        # Morphology
-        if config.get('morph_close_kernel', 0) > 0:
-            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (config['morph_close_kernel'],) * 2)
-            edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, k)
-        
-        # Track
+        # 4. Track using NetTracker on edges (NO morphology - matches video pipeline)
         contour = tracker.find_and_update(edges, (H, W))
         distance_px, angle_deg = tracker.calculate_distance(W, H)
         
-        # Convert to meters
+        # 5. Convert to meters
         distance_m = None
         if distance_px is not None and extent is not None:
             px2m = (extent[3] - extent[2]) / H
             distance_m = extent[2] + distance_px * px2m
         
-        # CRITICAL FIX: Don't add 90° here - angle_deg is already the major axis angle
-        # Just use the angle directly from the tracker
-        
+        # Store result
         results.append({
             'frame_index': frame_idx,
             'timestamp': pd.Timestamp(timestamps[frame_idx]),
             'distance_pixels': distance_px,
             'distance_meters': distance_m,
-            'angle_degrees': angle_deg,  # Use directly - no modification needed
+            'angle_degrees': angle_deg,
             'detection_success': (contour is not None),
             'tracking_status': tracker.get_status(),
             'area': float(cv2.contourArea(contour)) if contour is not None else 0.0
