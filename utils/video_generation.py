@@ -1143,7 +1143,7 @@ def create_enhanced_contour_detection_video(
     print(f"Grid layout (3x3):")
     print(f"  Row 1: Raw | Momentum-Merged | Edges (of Momentum)")
     print(f"  Row 2: Diluted Edges | After Morphology | Contours+Smoothed Elliptical AOI")
-    print(f"  Row 3: Best Contour | Net Placement (Smoothed) | [Empty]")
+    print(f"  Row 3: Corridor+AOI | Best Contour | Net Placement (Center Line)")
     
     # Initialize tracking state for distance smoothing
     tracking_state = TrackingState()
@@ -1164,19 +1164,32 @@ def create_enhanced_contour_detection_video(
             binary_threshold = IMAGE_PROCESSING_CONFIG.get('binary_threshold', 128)
             binary_frame = (frame_u8 > binary_threshold).astype(np.uint8) * 255
             
-            # Only pass the parameters that the function accepts
-            momentum_params = {
-                'angle_steps': IMAGE_PROCESSING_CONFIG.get('adaptive_angle_steps', 36),
-                'base_radius': IMAGE_PROCESSING_CONFIG.get('adaptive_base_radius', 3),
-                'max_elongation': IMAGE_PROCESSING_CONFIG.get('adaptive_max_elongation', 3.0),
-                'momentum_boost': IMAGE_PROCESSING_CONFIG.get('momentum_boost', 0.8),
-                'linearity_threshold': IMAGE_PROCESSING_CONFIG.get('adaptive_linearity_threshold', 0.15),
-                'downscale_factor': IMAGE_PROCESSING_CONFIG.get('downscale_factor', 2),
-                'top_k_bins': IMAGE_PROCESSING_CONFIG.get('top_k_bins', 8),
-                'min_coverage_percent': IMAGE_PROCESSING_CONFIG.get('min_coverage_percent', 0.5),
-                'gaussian_sigma': IMAGE_PROCESSING_CONFIG.get('gaussian_sigma', 1.0)
-            }
-            momentum_merged = adaptive_linear_momentum_merge_fast(binary_frame, **momentum_params)
+            use_advanced = IMAGE_PROCESSING_CONFIG.get('use_advanced_momentum_merging', True)
+            
+            if use_advanced:
+                # Use advanced adaptive linear momentum merging
+                momentum_params = {
+                    'angle_steps': IMAGE_PROCESSING_CONFIG.get('adaptive_angle_steps', 36),
+                    'base_radius': IMAGE_PROCESSING_CONFIG.get('adaptive_base_radius', 3),
+                    'max_elongation': IMAGE_PROCESSING_CONFIG.get('adaptive_max_elongation', 3.0),
+                    'momentum_boost': IMAGE_PROCESSING_CONFIG.get('momentum_boost', 0.8),
+                    'linearity_threshold': IMAGE_PROCESSING_CONFIG.get('adaptive_linearity_threshold', 0.15),
+                    'downscale_factor': IMAGE_PROCESSING_CONFIG.get('downscale_factor', 2),
+                    'top_k_bins': IMAGE_PROCESSING_CONFIG.get('top_k_bins', 8),
+                    'min_coverage_percent': IMAGE_PROCESSING_CONFIG.get('min_coverage_percent', 0.5),
+                    'gaussian_sigma': IMAGE_PROCESSING_CONFIG.get('gaussian_sigma', 1.0)
+                }
+                momentum_merged = adaptive_linear_momentum_merge_fast(binary_frame, **momentum_params)
+            else:
+                # Use basic Gaussian blur enhancement (faster)
+                kernel_size = IMAGE_PROCESSING_CONFIG.get('basic_gaussian_kernel_size', 5)
+                gaussian_sigma = IMAGE_PROCESSING_CONFIG.get('basic_gaussian_sigma', 1.0)
+                momentum_boost = IMAGE_PROCESSING_CONFIG.get('basic_momentum_boost', 0.5)
+                
+                enhanced = cv2.GaussianBlur(binary_frame, (kernel_size, kernel_size), gaussian_sigma)
+                momentum_merged = binary_frame + momentum_boost * enhanced
+                momentum_merged = np.clip(momentum_merged, 0, 255).astype(np.uint8)
+            
             momentum_display = cv2.cvtColor(momentum_merged, cv2.COLOR_GRAY2BGR)
         except Exception as e:
             momentum_display = cv2.cvtColor(frame_u8, cv2.COLOR_GRAY2BGR)
@@ -1299,17 +1312,22 @@ def create_enhanced_contour_detection_video(
         
         cv2.putText(contours_aoi_display, "6. Contours+Smoothed Elliptical AOI", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
-        # 7. Corridor mask visualization
+        # 7. Corridor mask with AOI ellipse overlay
         corridor_display = cv2.cvtColor(frame_u8, cv2.COLOR_GRAY2BGR)
         
         if tracking_state.current_aoi and 'corridor_mask' in tracking_state.current_aoi:
             mask = tracking_state.current_aoi['corridor_mask']
             # Overlay corridor mask in blue
             overlay = corridor_display.copy()
-            overlay[mask > 0] = [255, 0, 0]  # Blue
+            overlay[mask > 0] = [255, 0, 0]  # Blue for corridor
             corridor_display = cv2.addWeighted(corridor_display, 0.7, overlay, 0.3, 0)
+            
+            # Also draw the AOI ellipse in magenta to show the difference
+            if 'ellipse' in tracking_state.current_aoi:
+                ellipse = tracking_state.current_aoi['ellipse']
+                cv2.ellipse(corridor_display, ellipse, (255, 0, 255), 2)  # Magenta AOI ellipse
         
-        cv2.putText(corridor_display, "7. Corridor Mask", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        cv2.putText(corridor_display, "7. Corridor (Blue) + AOI (Magenta)", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
         # 8. Best contour (moved from panel 7)
         best_display = cv2.cvtColor(frame_u8, cv2.COLOR_GRAY2BGR)
@@ -1388,7 +1406,7 @@ def create_enhanced_contour_detection_video(
             cv2.line(net_display, (p1x, p1y), (p2x, p2y), (0, 0, 255), 3)
             
             # Draw intersection point on center line (yellow circle)
-            cv2.circle(net_display, (int(center_x), int(distance_pixels)), 8, (0, 255, 255), -1)
+            cv2.circle(net_display, (int(center_x), int(distance_pixels)), 8, (100, 0, 255), -1)
             cv2.circle(net_display, (int(center_x), int(distance_pixels)), 8, (0, 0, 0), 2)
             
             cv2.circle(net_display, (int(cx), int(cy)), 5, (0, 255, 255), -1)
@@ -1415,7 +1433,7 @@ def create_enhanced_contour_detection_video(
     print(f"\nGrid layout (3x3):")
     print(f"  Row 1: Raw | Momentum-Merged | Edges (of Momentum)")
     print(f"  Row 2: Diluted Edges | After Morphology | Contours+Smoothed Elliptical AOI")
-    print(f"  Row 3: Corridor Mask | Best Contour | Net Placement (Center Line)")
+    print(f"  Row 3: Corridor+AOI | Best Contour | Net Placement (Center Line)")
     
     
     return output_path
