@@ -2,298 +2,306 @@
 # Licensed under the MIT License. See LICENSE file for details.
 
 """
-Sonar Tracking Utilities
-
-This module contains tracking and AOI (Area of Interest) management functions:
-- Elliptical AOI creation with temporal smoothing
-- Center position smoothing
-- Corridor-based region segmentation
+Clean slate: Simple net tracker with explicit smoothing.
 """
 
 import cv2
 import numpy as np
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Dict
 
-def smooth_center_position(current_center: Optional[Tuple[float, float]], 
-                          new_center: Tuple[float, float], 
-                          smoothing_alpha: float) -> Tuple[float, float]:
+class NetTracker:
     """
-    Smooth center position using exponential moving average.
+    Simple net tracker. One class, clear logic.
     
-    Args:
-        current_center: Current smoothed center (None for first frame)
-        new_center: New detected center
-        smoothing_alpha: 0.0 = instant jump, 1.0 = maximum smoothing
+    Smoothing formula (same for all parameters):
+        new = old * (1 - alpha) + measured * alpha
         
-    Returns:
-        New smoothed center position
+    Alpha interpretation:
+        alpha = 0.0 → 100% old (infinite smoothing)
+        alpha = 0.5 → 50/50 blend
+        alpha = 1.0 → 100% new (no smoothing)
     """
-    if current_center is None:
-        return new_center
     
-    curr_x, curr_y = current_center
-    new_x, new_y = new_center
-    
-    smoothed_x = curr_x + (1 - smoothing_alpha) * (new_x - curr_x)
-    smoothed_y = curr_y + (1 - smoothing_alpha) * (new_y - curr_y)
-    
-    return (smoothed_x, smoothed_y)
-
-def create_smooth_elliptical_aoi(
-    contour: np.ndarray, 
-    expansion_factor: float, 
-    image_shape: Tuple[int, int], 
-    previous_ellipse: Optional[Tuple] = None, 
-    position_smoothing_alpha: float = 0.3,
-    size_smoothing_alpha: float = 0.1, 
-    orientation_smoothing_alpha: float = 0.1, 
-    max_movement_pixels: float = 4.0
-) -> Tuple[np.ndarray, Tuple[float, float], Tuple]:
-    """
-    Create elliptical AOI with temporal smoothing.
-    
-    Args:
-        contour: Input contour
-        expansion_factor: Ellipse expansion (e.g., 0.3 = 30% larger)
-        image_shape: (height, width)
-        previous_ellipse: Previous ellipse parameters or None
-        position_smoothing_alpha: Position smoothing factor
-        size_smoothing_alpha: Size smoothing factor
-        orientation_smoothing_alpha: Orientation smoothing factor
-        max_movement_pixels: Maximum center movement per frame
+    def __init__(self, config: Dict):
+        self.config = config
         
-    Returns:
-        Tuple of (ellipse_mask, center, ellipse_params)
-    """
-    H, W = image_shape
-    
-    # Fit ellipse to current contour
-    if len(contour) >= 5:
-        current_ellipse = cv2.fitEllipse(contour)
-        (curr_center_x, curr_center_y), (curr_width, curr_height), curr_angle = current_ellipse
-    else:
-        # Fallback to circular AOI
-        moments = cv2.moments(contour)
-        if moments['m00'] != 0:
-            curr_center_x = int(moments['m10'] / moments['m00'])
-            curr_center_y = int(moments['m01'] / moments['m00'])
+        # Current ellipse state (smoothed)
+        self.center: Optional[Tuple[float, float]] = None
+        self.size: Optional[Tuple[float, float]] = None  # (width, height)
+        self.angle: Optional[float] = None  # degrees
+        
+        # Tracking
+        self.last_distance: Optional[float] = None
+        self.frames_lost: int = 0
+        
+    def find_and_update(self, edges: np.ndarray, image_shape: Tuple[int, int]) -> Optional[np.ndarray]:
+        """
+        Find net in edges, update tracking state.
+        Returns best contour or None.
+        """
+        H, W = image_shape
+        
+        # Get search mask
+        search_mask = self._get_search_mask((H, W))
+        
+        # Apply mask to edges
+        if search_mask is not None:
+            masked_edges = cv2.bitwise_and(edges, search_mask)
         else:
-            curr_center_x, curr_center_y = W//2, H//2
+            masked_edges = edges
         
-        area = cv2.contourArea(contour)
-        radius = max(10, np.sqrt(area) * 2)
-        curr_width = curr_height = radius * 2
-        curr_angle = 0
+        # Find contours
+        contours, _ = cv2.findContours(masked_edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+        
+        # Find best
+        best = self._find_best_contour(contours)
+        
+        # Update state
+        if best is not None and len(best) >= 5:
+            self._update_from_contour(best)
+            self.frames_lost = 0
+        else:
+            self.frames_lost += 1
+            if self.frames_lost > self.config.get('max_frames_without_detection', 30):
+                self._reset()
+        
+        return best
     
-    # Apply temporal smoothing if previous ellipse exists
-    if previous_ellipse is not None:
-        (prev_center, prev_axes, prev_angle) = previous_ellipse
-        prev_center_x, prev_center_y = prev_center
-        prev_width, prev_height = prev_axes
+    def calculate_distance(self, image_width: int, image_height: int) -> Optional[float]:
+        """Calculate distance to net along center line."""
+        if self.center is None:
+            return self.last_distance
         
-        # Smooth center with movement limit
-        center_dx = curr_center_x - prev_center_x
-        center_dy = curr_center_y - prev_center_y
-        center_distance = np.sqrt(center_dx**2 + center_dy**2)
+        cx, cy = self.center
+        center_x = image_width / 2
         
-        if center_distance > max_movement_pixels:
-            scale = max_movement_pixels / center_distance
-            center_dx *= scale
-            center_dy *= scale
+        # Use major axis angle
+        if self.angle is None:
+            return None
         
-        smoothed_center_x = prev_center_x + (1 - position_smoothing_alpha) * center_dx
-        smoothed_center_y = prev_center_y + (1 - position_smoothing_alpha) * center_dy
+        major_angle = self.angle
+        if self.size is not None:
+            w, h = self.size
+            if h > w:  # Height is major axis
+                major_angle = (self.angle + 90.0) % 360.0
+        
+        # Intersect with center line
+        ang_r = np.radians(major_angle)
+        cos_a = np.cos(ang_r)
+        
+        if abs(cos_a) > 1e-6:
+            t = (center_x - cx) / cos_a
+            distance = cy + t * np.sin(ang_r)
+        else:
+            distance = cy
+        
+        # Clamp
+        distance = np.clip(distance, 0, image_height - 1)
+        
+        # Smooth distance changes
+        if self.last_distance is not None:
+            max_change = self.config.get('max_distance_change_pixels', 20)
+            if abs(distance - self.last_distance) > max_change:
+                direction = 1 if distance > self.last_distance else -1
+                distance = self.last_distance + direction * max_change
+        
+        self.last_distance = distance
+        return distance
+    
+    def _get_search_mask(self, image_shape: Tuple[int, int]) -> Optional[np.ndarray]:
+        """Get search mask (ellipse + corridor)."""
+        if self.center is None or self.size is None or self.angle is None:
+            return None
+        
+        H, W = image_shape
+        
+        # Get expansion
+        expansion = self.config.get('ellipse_expansion_factor', 0.5)
+        
+        # Expand if losing track
+        if self.frames_lost > 0:
+            decay = self.config.get('aoi_decay_factor', 0.98)
+            growth = 1.0 + (1.0 - decay) * self.frames_lost
+            expansion *= growth
+        
+        # Create ellipse mask
+        w, h = self.size
+        expanded_size = (w * (1 + expansion), h * (1 + expansion))
+        
+        mask = np.zeros((H, W), dtype=np.uint8)
+        
+        try:
+            ellipse = (
+                (int(self.center[0]), int(self.center[1])),
+                (int(expanded_size[0]), int(expanded_size[1])),
+                self.angle
+            )
+            cv2.ellipse(mask, ellipse, 255, -1)
+        except:
+            return None
+        
+        # Add corridor
+        if self.config.get('use_corridor_splitting', True):
+            try:
+                corridor = self._make_corridor_mask((H, W))
+                if corridor is not None:
+                    mask = cv2.bitwise_or(mask, corridor)
+            except:
+                pass
+        
+        return mask
+    
+    def _make_corridor_mask(self, image_shape: Tuple[int, int]) -> Optional[np.ndarray]:
+        """Make corridor mask along major axis."""
+        if self.center is None or self.size is None or self.angle is None:
+            return None
+        
+        H, W = image_shape
+        cx, cy = self.center
+        w, h = self.size
+        
+        # Corridor parameters
+        band_k = self.config.get('corridor_band_k', 2.0)
+        length_factor = self.config.get('corridor_length_factor', 2.0)
+        
+        # Dimensions
+        half_width = band_k * min(w, h) / 2.0
+        half_length = length_factor * max(w, h) / 2.0
+        
+        # Rectangle in local coordinates
+        local_pts = np.array([
+            [-half_length, -half_width],
+            [+half_length, -half_width],
+            [+half_length, +half_width],
+            [-half_length, +half_width],
+        ], dtype=np.float32)
+        
+        # Rotate by major axis angle
+        major_angle = self.angle
+        if h > w:
+            major_angle = (self.angle + 90.0) % 360.0
+        
+        ang_r = np.radians(major_angle)
+        cos_a, sin_a = np.cos(ang_r), np.sin(ang_r)
+        
+        # Rotation matrix
+        R = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
+        rotated = local_pts @ R.T
+        
+        # Translate to center
+        world_pts = rotated + np.array([cx, cy])
+        
+        # Draw
+        mask = np.zeros((H, W), dtype=np.uint8)
+        cv2.fillPoly(mask, [world_pts.astype(np.int32)], 255)
+        
+        return mask
+    
+    def _find_best_contour(self, contours) -> Optional[np.ndarray]:
+        """Find best contour by area."""
+        min_area = self.config.get('min_contour_area', 200)
+        if self.center is not None:
+            min_area *= 0.3  # Lower threshold when tracking
+        
+        best = None
+        best_score = 0.0
+        
+        for c in contours:
+            if c is None or len(c) < 5:
+                continue
+            
+            try:
+                area = cv2.contourArea(c)
+                if area < min_area:
+                    continue
+                
+                score = area
+                
+                # Proximity bonus
+                if self.center is not None:
+                    M = cv2.moments(c)
+                    if M['m00'] > 0:
+                        cx = M['m10'] / M['m00']
+                        cy = M['m01'] / M['m00']
+                        dist = np.sqrt((cx - self.center[0])**2 + (cy - self.center[1])**2)
+                        proximity = max(0.1, 1.0 - dist / 100.0)
+                        score *= proximity
+                
+                if score > best_score:
+                    best = c
+                    best_score = score
+            except:
+                continue
+        
+        return best
+    
+    def _update_from_contour(self, contour: np.ndarray):
+        """Update ellipse state from detected contour with smoothing."""
+        # Fit ellipse to contour
+        try:
+            (cx, cy), (w, h), angle = cv2.fitEllipse(contour)
+        except:
+            return
+        
+        # Get alphas from config
+        alpha_center = self.config.get('center_smoothing_alpha', 0.4)
+        alpha_size = self.config.get('ellipse_size_smoothing_alpha', 0.01)
+        alpha_angle = self.config.get('ellipse_orientation_smoothing_alpha', 0.2)
+        
+        # Smooth center
+        if self.center is None:
+            self.center = (cx, cy)
+        else:
+            old_cx, old_cy = self.center
+            new_cx = old_cx * (1 - alpha_center) + cx * alpha_center
+            new_cy = old_cy * (1 - alpha_center) + cy * alpha_center
+            
+            # Limit movement
+            max_move = self.config.get('ellipse_max_movement_pixels', 30.0)
+            dx = new_cx - old_cx
+            dy = new_cy - old_cy
+            dist = np.sqrt(dx*dx + dy*dy)
+            if dist > max_move:
+                scale = max_move / dist
+                new_cx = old_cx + dx * scale
+                new_cy = old_cy + dy * scale
+            
+            self.center = (new_cx, new_cy)
         
         # Smooth size
-        smoothed_width = prev_width + (1 - size_smoothing_alpha) * (curr_width - prev_width)
-        smoothed_height = prev_height + (1 - size_smoothing_alpha) * (curr_height - prev_height)
+        if self.size is None:
+            self.size = (w, h)
+        else:
+            old_w, old_h = self.size
+            new_w = old_w * (1 - alpha_size) + w * alpha_size
+            new_h = old_h * (1 - alpha_size) + h * alpha_size
+            self.size = (new_w, new_h)
         
-        # Smooth angle (handle wraparound)
-        angle_diff = curr_angle - prev_angle
-        while angle_diff > 180:
-            angle_diff -= 360
-        while angle_diff < -180:
-            angle_diff += 360
-        smoothed_angle = prev_angle + (1 - orientation_smoothing_alpha) * angle_diff
-        
-        center_x, center_y = smoothed_center_x, smoothed_center_y
-        width, height = smoothed_width, smoothed_height
-        angle = smoothed_angle
-    else:
-        center_x, center_y = curr_center_x, curr_center_y
-        width, height = curr_width, curr_height
-        angle = curr_angle
+        # Smooth angle (handle wrap-around)
+        if self.angle is None:
+            self.angle = angle
+        else:
+            angle_diff = angle - self.angle
+            if angle_diff > 90:
+                angle_diff -= 180
+            elif angle_diff < -90:
+                angle_diff += 180
+            self.angle = self.angle + angle_diff * alpha_angle
     
-    # Expand ellipse
-    expanded_width = width * (1 + expansion_factor)
-    expanded_height = height * (1 + expansion_factor)
-    expanded_ellipse = ((center_x, center_y), (expanded_width, expanded_height), angle)
+    def _reset(self):
+        """Reset to initial state."""
+        self.center = None
+        self.size = None
+        self.angle = None
+        self.last_distance = None
+        self.frames_lost = 0
     
-    # Create mask
-    mask = np.zeros((H, W), dtype=np.uint8)
-    cv2.ellipse(mask, expanded_ellipse, 255, -1)
-    
-    ellipse_params = ((center_x, center_y), (width, height), angle)
-    
-    return mask, (center_x, center_y), ellipse_params
-
-# Corridor helper functions
-def _ellipse_params_from_cv2(ellipse):
-    """Normalize cv2.fitEllipse to (cx, cy, a, b, theta_rad)."""
-    (cx, cy), (w, h), ang_deg = ellipse
-    if h > w:
-        w, h = h, w
-        ang_deg = ang_deg + 90.0
-    a = 0.5 * float(w)
-    b = 0.5 * float(h)
-    theta = np.deg2rad(ang_deg % 180.0)
-    return float(cx), float(cy), a, b, theta
-
-def _unit_axes(theta):
-    """Get major and minor axis unit vectors."""
-    u = np.array([np.cos(theta), np.sin(theta)], dtype=np.float32)
-    v = np.array([-np.sin(theta), np.cos(theta)], dtype=np.float32)
-    return u, v
-
-def _poly_mask(shape_hw, poly_xy):
-    """Create filled polygon mask."""
-    H, W = shape_hw
-    mask = np.zeros((H, W), dtype=np.uint8)
-    poly_i32 = np.round(poly_xy).astype(np.int32).reshape(-1, 1, 2)
-    cv2.fillPoly(mask, [poly_i32], 255)
-    return mask
-
-def _oriented_rect_polygon(p0, u, v, half_width, length):
-    """Create oriented rectangle polygon."""
-    p1 = p0 + length * u
-    n = half_width * v
-    return np.stack([p0 + n, p0 - n, p1 - n, p1 + n], axis=0)
-
-def _oriented_trapezoid_polygon(p0, u, v, half_w_near, half_w_far, length):
-    """Create oriented trapezoid polygon."""
-    p1 = p0 + length * u
-    n0 = half_w_near * v
-    n1 = half_w_far * v
-    return np.stack([p0 + n0, p0 - n0, p1 - n1, p1 + n1], axis=0)
-
-def build_aoi_corridor_mask(
-    image_shape_hw,
-    ellipse,
-    *,
-    band_k=0.55,
-    length_px=None,
-    length_factor=1.25,
-    widen=1.0,
-    both_directions=True,
-    include_inside_ellipse=True
-):
-    """Build corridor mask around ellipse major axis."""
-    if isinstance(ellipse, tuple) and len(ellipse) == 3:
-        cx, cy, a, b, theta = _ellipse_params_from_cv2(ellipse)
-    else:
-        cx, cy, a, b, theta = ellipse
-    u, v = _unit_axes(theta)
-
-    p_plus = np.array([cx, cy], dtype=np.float32) + a * u
-    p_minus = np.array([cx, cy], dtype=np.float32) - a * u
-
-    half_w_near = band_k * max(b, 1.0)
-    if length_px is None:
-        length_px = float(length_factor * max(a, 1.0))
-    half_w_far = float(widen * half_w_near)
-
-    H, W = image_shape_hw
-    out = np.zeros((H, W), dtype=np.uint8)
-
-    if include_inside_ellipse:
-        ell_mask = np.zeros((H, W), dtype=np.uint8)
-        cv2.ellipse(
-            ell_mask,
-            (int(round(cx)), int(round(cy))),
-            (int(round(a)), int(round(b))),
-            np.rad2deg(theta),
-            0, 360, 255, thickness=-1
-        )
-        out = cv2.bitwise_or(out, ell_mask)
-
-    if widen > 1.0:
-        poly_plus = _oriented_trapezoid_polygon(p_plus, u, v, half_w_near, half_w_far, length_px)
-        mask_plus = _poly_mask((H, W), poly_plus)
-        out = cv2.bitwise_or(out, mask_plus)
-        if both_directions:
-            poly_minus = _oriented_trapezoid_polygon(p_minus, -u, v, half_w_near, half_w_far, length_px)
-            mask_minus = _poly_mask((H, W), poly_minus)
-            out = cv2.bitwise_or(out, mask_minus)
-    else:
-        poly_plus = _oriented_rect_polygon(p_plus, u, v, half_w_near, length_px)
-        mask_plus = _poly_mask((H, W), poly_plus)
-        out = cv2.bitwise_or(out, mask_plus)
-        if both_directions:
-            poly_minus = _oriented_rect_polygon(p_minus, -u, v, half_w_near, length_px)
-            mask_minus = _poly_mask((H, W), poly_minus)
-            out = cv2.bitwise_or(out, mask_minus)
-
-    return out
-
-def split_contour_by_corridor(
-    contour,
-    ellipse,
-    image_shape_hw,
-    *,
-    band_k=0.55,
-    length_px=None,
-    length_factor=1.25,
-    widen=1.0,
-    both_directions=True
-):
-    """Split contour into inside ellipse, corridor, and other regions."""
-    H, W = image_shape_hw
-
-    if isinstance(ellipse, tuple) and len(ellipse) == 3:
-        (cx, cy), (w, h), ang = ellipse
-        a = 0.5 * float(w)
-        b = 0.5 * float(h)
-        theta = np.deg2rad(ang % 180.0)
-    else:
-        cx, cy, a, b, theta = ellipse
-
-    # Ellipse mask
-    ell_mask = np.zeros((H, W), dtype=np.uint8)
-    cv2.ellipse(
-        ell_mask,
-        (int(round(cx)), int(round(cy))),
-        (int(round(a)), int(round(b))),
-        np.rad2deg(theta),
-        0, 360, 255, thickness=-1
-    )
-
-    # Corridor mask
-    corr_mask = build_aoi_corridor_mask(
-        image_shape_hw, ellipse,
-        band_k=band_k,
-        length_px=length_px,
-        length_factor=length_factor,
-        widen=widen,
-        both_directions=both_directions,
-        include_inside_ellipse=False
-    )
-
-    P = contour.reshape(-1, 2).astype(np.float32)
-    xs = np.clip(np.round(P[:, 0]).astype(int), 0, W-1)
-    ys = np.clip(np.round(P[:, 1]).astype(int), 0, H-1)
-
-    inside_mask_pts = ell_mask[ys, xs] > 0
-    corridor_mask_pts = (corr_mask[ys, xs] > 0) & (~inside_mask_pts)
-    other_mask_pts = ~(inside_mask_pts | corridor_mask_pts)
-
-    def _pts_to_contour(pts_bool):
-        pts = P[pts_bool]
-        if pts.size == 0:
-            return np.zeros((0, 1, 2), dtype=contour.dtype)
-        return pts.reshape(-1, 1, 2).astype(contour.dtype)
-
-    inside_contour = _pts_to_contour(inside_mask_pts)
-    corridor_contour = _pts_to_contour(corridor_mask_pts)
-    other_contour = _pts_to_contour(other_mask_pts)
-
-    return inside_contour, corridor_contour, other_contour, ell_mask, corr_mask
+    def get_status(self) -> str:
+        """Get tracking status."""
+        if self.center is None:
+            return "LOST"
+        elif self.frames_lost == 0:
+            return "TRACKED"
+        else:
+            max_frames = self.config.get('max_frames_without_detection', 30)
+            return f"SEARCHING ({self.frames_lost}/{max_frames})"

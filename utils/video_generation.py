@@ -1083,29 +1083,24 @@ def create_enhanced_contour_detection_video(
     output_path='enhanced_video.mp4'
 ):
     """
-    Create video showing contour detection pipeline.
-    3x3 grid showing: Raw → Momentum-Merged → Edges → Diluted Edges → After Morphology → Contours+Smoothed Elliptical AOI → Best Contour → Net Placement (Smoothed) → Empty
+    Create video showing contour detection pipeline using NetTracker.
+    Now matches the analysis pipeline exactly.
     """
     import cv2
     import numpy as np
     from pathlib import Path
     
-    from utils.sonar_utils import (
-        load_cone_run_npz,
-        to_uint8_gray,
-        apply_flips,
-        enhance_intensity
-    )
+    from utils.sonar_utils import load_cone_run_npz, to_uint8_gray
     from utils.io_utils import get_available_npz_files
+    from utils.sonar_tracking import NetTracker
     
-    print("=== CONTOUR DETECTION PIPELINE VIDEO (3x3 Grid) ===")
+    print("=== CONTOUR DETECTION PIPELINE VIDEO (3x3 Grid with NetTracker) ===")
     
     files = get_available_npz_files()
     if npz_file_index >= len(files):
         print(f"Error: NPZ file index {npz_file_index} not available")
         return None
     
-    # Load cone data
     cones, timestamps, extent, _ = load_cone_run_npz(files[npz_file_index])
     T = len(cones)
     actual = int(min(frame_count, max(0, (T - frame_start) // max(1, frame_step))))
@@ -1114,11 +1109,9 @@ def create_enhanced_contour_detection_video(
         print("Error: Not enough frames to process")
         return None
     
-    # Get first frame dimensions
     first_u8 = to_uint8_gray(cones[frame_start])
     H, W = first_u8.shape
     
-    # Setup output - 3x3 grid
     grid_h = H * 3
     grid_w = W * 3
     
@@ -1126,13 +1119,7 @@ def create_enhanced_contour_detection_video(
     outp.parent.mkdir(parents=True, exist_ok=True)
     
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    
-    # Handle VIDEO_CONFIG gracefully - use default if not available
-    try:
-        fps = VIDEO_CONFIG.get('fps', 30)
-    except NameError:
-        fps = 30  # Default FPS
-    
+    fps = VIDEO_CONFIG.get('fps', 30)
     vw = cv2.VideoWriter(str(outp), fourcc, fps, (grid_w, grid_h))
     
     if not vw.isOpened():
@@ -1141,299 +1128,192 @@ def create_enhanced_contour_detection_video(
     
     print(f"Processing {actual} frames...")
     print(f"Grid layout (3x3):")
-    print(f"  Row 1: Raw | Momentum-Merged | Edges (of Momentum)")
-    print(f"  Row 2: Diluted Edges | After Morphology | Contours+Smoothed Elliptical AOI")
-    print(f"  Row 3: Corridor+AOI | Best Contour | Net Placement (Center Line)")
+    print(f"  Row 1: Raw | Momentum-Merged | Edges")
+    print(f"  Row 2: Dilated | Morphology | Search Mask")
+    print(f"  Row 3: Best Contour | Tracking Info | Distance")
     
-    # Initialize tracking state for distance smoothing
-    tracking_state = TrackingState()
+    # Initialize NetTracker (same as analysis)
+    config = {**IMAGE_PROCESSING_CONFIG, **TRACKING_CONFIG}
+    tracker = NetTracker(config)
+    
+    print(f"Tracker config:")
+    print(f"  expansion: {config['ellipse_expansion_factor']}")
+    print(f"  center_alpha: {config['center_smoothing_alpha']}")
+    print(f"  size_alpha: {config['ellipse_size_smoothing_alpha']}")
+    print(f"  angle_alpha: {config['ellipse_orientation_smoothing_alpha']}")
     
     for i in range(actual):
         idx = frame_start + i * frame_step
         frame_u8 = to_uint8_gray(cones[idx])
-        
-        # --- COMPUTE ALL INTERMEDIATE STEPS ---
         
         # 1. Raw frame
         raw_display = cv2.cvtColor(frame_u8, cv2.COLOR_GRAY2BGR)
         cv2.putText(raw_display, "1. Raw", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
         # 2. Momentum-merged
+        binary = (frame_u8 > config['binary_threshold']).astype(np.uint8) * 255
         try:
-            # Convert to binary frame first (same as get_momentum_merged_frame)
-            binary_threshold = IMAGE_PROCESSING_CONFIG.get('binary_threshold', 128)
-            binary_frame = (frame_u8 > binary_threshold).astype(np.uint8) * 255
-            
-            use_advanced = IMAGE_PROCESSING_CONFIG.get('use_advanced_momentum_merging', True)
-            
-            if use_advanced:
-                # Use advanced adaptive linear momentum merging
-                momentum_params = {
-                    'angle_steps': IMAGE_PROCESSING_CONFIG.get('adaptive_angle_steps', 36),
-                    'base_radius': IMAGE_PROCESSING_CONFIG.get('adaptive_base_radius', 3),
-                    'max_elongation': IMAGE_PROCESSING_CONFIG.get('adaptive_max_elongation', 3.0),
-                    'momentum_boost': IMAGE_PROCESSING_CONFIG.get('momentum_boost', 0.8),
-                    'linearity_threshold': IMAGE_PROCESSING_CONFIG.get('adaptive_linearity_threshold', 0.15),
-                    'downscale_factor': IMAGE_PROCESSING_CONFIG.get('downscale_factor', 2),
-                    'top_k_bins': IMAGE_PROCESSING_CONFIG.get('top_k_bins', 8),
-                    'min_coverage_percent': IMAGE_PROCESSING_CONFIG.get('min_coverage_percent', 0.5),
-                    'gaussian_sigma': IMAGE_PROCESSING_CONFIG.get('gaussian_sigma', 1.0)
-                }
-                momentum_merged = adaptive_linear_momentum_merge_fast(binary_frame, **momentum_params)
-            else:
-                # Use basic Gaussian blur enhancement (faster)
-                kernel_size = IMAGE_PROCESSING_CONFIG.get('basic_gaussian_kernel_size', 5)
-                gaussian_sigma = IMAGE_PROCESSING_CONFIG.get('basic_gaussian_sigma', 1.0)
-                momentum_boost = IMAGE_PROCESSING_CONFIG.get('basic_momentum_boost', 0.5)
-                
-                enhanced = cv2.GaussianBlur(binary_frame, (kernel_size, kernel_size), gaussian_sigma)
-                momentum_merged = binary_frame + momentum_boost * enhanced
-                momentum_merged = np.clip(momentum_merged, 0, 255).astype(np.uint8)
-            
-            momentum_display = cv2.cvtColor(momentum_merged, cv2.COLOR_GRAY2BGR)
-        except Exception as e:
-            momentum_display = cv2.cvtColor(frame_u8, cv2.COLOR_GRAY2BGR)
-            print(f"Warning: Momentum merging failed ({e}), using raw frame")
+            momentum = adaptive_linear_momentum_merge_fast(binary,
+                angle_steps=config['adaptive_angle_steps'],
+                base_radius=config['adaptive_base_radius'],
+                max_elongation=config['adaptive_max_elongation'],
+                momentum_boost=config['momentum_boost'],
+                linearity_threshold=config['adaptive_linearity_threshold'],
+                downscale_factor=config['downscale_factor'],
+                top_k_bins=config['top_k_bins'],
+                min_coverage_percent=config['min_coverage_percent'],
+                gaussian_sigma=config['gaussian_sigma']
+            )
+            momentum_display = cv2.cvtColor(momentum, cv2.COLOR_GRAY2BGR)
+        except:
+            momentum = binary
+            momentum_display = cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
         
-        cv2.putText(momentum_display, "2. Momentum-Merged", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        cv2.putText(momentum_display, "2. Momentum", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
-        # 3. Edges (from momentum-merged frame)
+        # 3. Edges
         try:
-            # Import preprocess_edges here to handle potential import errors
-            from utils.image_enhancement import preprocess_edges
-            raw_edges, processed_edges = preprocess_edges(momentum_merged, IMAGE_PROCESSING_CONFIG)
-            edges_display = cv2.cvtColor(raw_edges, cv2.COLOR_GRAY2BGR)
-        except (ImportError, NameError) as e:
-            print(f"Warning: preprocess_edges import failed ({e}), using momentum-merged frame")
-            edges_display = cv2.cvtColor(momentum_merged, cv2.COLOR_GRAY2BGR)
-        except Exception as e:
-            print(f"Warning: preprocess_edges failed ({e}), using momentum-merged frame")
-            edges_display = cv2.cvtColor(momentum_merged, cv2.COLOR_GRAY2BGR)
-    
-        cv2.putText(edges_display, "3. Edges (of Momentum)", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            _, edges = preprocess_edges(momentum, config)
+            edges_display = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
+        except:
+            edges = binary
+            edges_display = cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
         
-        # 4. Diluted edges (after dilation)
-        dil = int(IMAGE_PROCESSING_CONFIG.get('edge_dilation_iterations', 0))
-        if dil > 0:
-            kernel2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
-            diluted_edges = cv2.dilate(raw_edges, kernel2, iterations=dil)
-        else:
-            diluted_edges = raw_edges.copy()
+        cv2.putText(edges_display, "3. Edges", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
-        diluted_display = cv2.cvtColor(diluted_edges, cv2.COLOR_GRAY2BGR)
-        cv2.putText(diluted_display, "4. Diluted Edges", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        # 4. Dilated (if enabled)
+        dilated = edges
+        if config.get('edge_dilation_iterations', 0) > 0:
+            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
+            dilated = cv2.dilate(edges, k, iterations=config['edge_dilation_iterations'])
         
-        # 5. After morphology (after morphological closing)
-        mks = int(IMAGE_PROCESSING_CONFIG.get('morph_close_kernel', 0))
-        if mks > 0:
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (mks, mks))
-            morph_result = cv2.morphologyEx(diluted_edges, cv2.MORPH_CLOSE, kernel)
-        else:
-            morph_result = diluted_edges.copy()
+        dilated_display = cv2.cvtColor(dilated, cv2.COLOR_GRAY2BGR)
+        cv2.putText(dilated_display, "4. Dilated", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
-        morph_display = cv2.cvtColor(morph_result, cv2.COLOR_GRAY2BGR)
-        cv2.putText(morph_display, "5. After Morphology", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        # 5. Morphology
+        morph = dilated
+        if config.get('morph_close_kernel', 0) > 0:
+            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (config['morph_close_kernel'],) * 2)
+            morph = cv2.morphologyEx(dilated, cv2.MORPH_CLOSE, k)
         
-        # Find contours from morph_result
-        contours, _ = cv2.findContours(morph_result, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+        morph_display = cv2.cvtColor(morph, cv2.COLOR_GRAY2BGR)
+        cv2.putText(morph_display, "5. Morphology", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
-        # Find best contour (moved before Panel 6)
-        best_contour = None
-        best_score = 0.0
-        best_ellipse = None
-        min_area = float(IMAGE_PROCESSING_CONFIG.get('min_contour_area', 100))
-        
-        for c in contours:
-            area = cv2.contourArea(c)
-            if area < min_area or len(c) < 5:
-                continue
+        # 6. Search mask (from tracker)
+        search_mask_display = cv2.cvtColor(frame_u8, cv2.COLOR_GRAY2BGR)
+        search_mask = tracker._get_search_mask((H, W))
+        if search_mask is not None:
+            overlay = search_mask_display.copy()
+            overlay[search_mask > 0] = [0, 255, 0]  # Green
+            search_mask_display = cv2.addWeighted(search_mask_display, 0.7, overlay, 0.3, 0)
             
-            x, y, w, h = cv2.boundingRect(c)
-            ar = (max(w, h) / max(1, min(w, h))) if min(w, h) > 0 else 0.0
-            score = area * ar
-            
-            if score > best_score:
-                best_contour = c
-                best_score = score
-                best_ellipse = cv2.fitEllipse(c) if len(c) >= 5 else None
+            # Draw ellipse outline
+            if tracker.center and tracker.size and tracker.angle is not None:
+                ell = ((int(tracker.center[0]), int(tracker.center[1])),
+                       (int(tracker.size[0] * (1 + config['ellipse_expansion_factor'])),
+                        int(tracker.size[1] * (1 + config['ellipse_expansion_factor']))),
+                       tracker.angle)
+                cv2.ellipse(search_mask_display, ell, (255, 0, 255), 2)
         
-        # 6. Contours with smoothed elliptical AOI
-        contours_aoi_display = cv2.cvtColor(frame_u8, cv2.COLOR_GRAY2BGR)
+        cv2.putText(search_mask_display, "6. Search Mask", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
-        # Draw all contours
-        cv2.drawContours(contours_aoi_display, contours, -1, (0, 255, 0), 1)
+        # 7. Track using NetTracker
+        contour = tracker.find_and_update(morph, (H, W))
         
-        # Use smoothed elliptical AOI from best contour
-        if best_contour is not None and len(best_contour) >= 5:
-            try:
-                expansion = TRACKING_CONFIG.get('ellipse_expansion_factor', 0.3)
-                aoi_mask, aoi_center, smoothed_ellipse = create_smooth_elliptical_aoi(
-                    best_contour, expansion, (H, W), tracking_state.previous_ellipse,
-                    TRACKING_CONFIG.get('center_smoothing_alpha', 0.3),
-                    TRACKING_CONFIG.get('ellipse_size_smoothing_alpha', 0.1),
-                    TRACKING_CONFIG.get('ellipse_orientation_smoothing_alpha', 0.1),
-                    TRACKING_CONFIG.get('ellipse_max_movement_pixels', 4.0)
-                )
-                
-                # Draw the smoothed elliptical AOI (magenta, like in other panels)
-                cv2.ellipse(contours_aoi_display, smoothed_ellipse, (255, 0, 255), 2)
-                
-                # Update tracking state
-                tracking_state.previous_ellipse = smoothed_ellipse
-                
-                # Build corridor mask for panel 7
-                try:
-                    corridor_mask = build_aoi_corridor_mask(
-                        (H, W), smoothed_ellipse,
-                        band_k=TRACKING_CONFIG.get('corridor_band_k', 0.75),
-                        length_factor=TRACKING_CONFIG.get('corridor_length_factor', 1.25),
-                        widen=TRACKING_CONFIG.get('corridor_widen', 1.0),
-                        both_directions=TRACKING_CONFIG.get('corridor_both_directions', True)
-                    )
-                    
-                    # Store in tracking state for panel 7
-                    tracking_state.current_aoi = {
-                        'aoi_mask': aoi_mask,
-                        'corridor_mask': corridor_mask,
-                        'center': aoi_center,
-                        'ellipse': smoothed_ellipse
-                    }
-                    
-                except Exception as e:
-                    print(f"Warning: Could not build corridor mask: {e}")
-                    tracking_state.current_aoi = None
-                
-            except Exception as e:
-                print(f"Warning: Could not create smoothed AOI: {e}")
-                # Fallback: draw a simple ellipse around the contour
-                if best_ellipse is not None:
-                    cv2.ellipse(contours_aoi_display, best_ellipse, (255, 0, 255), 2)
-                tracking_state.current_aoi = None
-        
-        cv2.putText(contours_aoi_display, "6. Contours+Smoothed Elliptical AOI", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        
-        # 7. Corridor mask with AOI ellipse overlay
-        corridor_display = cv2.cvtColor(frame_u8, cv2.COLOR_GRAY2BGR)
-        
-        if tracking_state.current_aoi and 'corridor_mask' in tracking_state.current_aoi:
-            mask = tracking_state.current_aoi['corridor_mask']
-            # Overlay corridor mask in blue
-            overlay = corridor_display.copy()
-            overlay[mask > 0] = [255, 0, 0]  # Blue for corridor
-            corridor_display = cv2.addWeighted(corridor_display, 0.7, overlay, 0.3, 0)
-            
-            # Also draw the AOI ellipse in magenta to show the difference
-            if 'ellipse' in tracking_state.current_aoi:
-                ellipse = tracking_state.current_aoi['ellipse']
-                cv2.ellipse(corridor_display, ellipse, (255, 0, 255), 2)  # Magenta AOI ellipse
-        
-        cv2.putText(corridor_display, "7. Corridor (Blue) + AOI (Magenta)", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        
-        # 8. Best contour (moved from panel 7)
         best_display = cv2.cvtColor(frame_u8, cv2.COLOR_GRAY2BGR)
-        if best_contour is not None:
-            cv2.drawContours(best_display, [best_contour], -1, (0, 255, 0), 2)
-            if best_ellipse is not None:
-                cv2.ellipse(best_display, best_ellipse, (255, 0, 255), 2)
+        if contour is not None:
+            cv2.drawContours(best_display, [contour], -1, (0, 255, 0), 2)
+            if len(contour) >= 5:
+                try:
+                    ell = cv2.fitEllipse(contour)
+                    cv2.ellipse(best_display, ell, (255, 0, 255), 1)
+                except:
+                    pass
         
-        cv2.putText(best_display, "8. Best Contour", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        cv2.putText(best_display, "7. Best Contour", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
-        # 9. Net placement (moved from panel 8)
-        net_display = cv2.cvtColor(frame_u8, cv2.COLOR_GRAY2BGR)
+        # 8. Tracking info
+        info_display = np.zeros((H, W, 3), dtype=np.uint8)
+        y_offset = 30
         
-        if best_contour is not None and len(best_contour) >= 5:
-            ellipse = cv2.fitEllipse(best_contour)
-            
-            # Create smoothed ellipse (but don't draw it)
-            try:
-                expansion = TRACKING_CONFIG.get('ellipse_expansion_factor', 0.3)
-                aoi_mask, _, new_ellipse = create_smooth_elliptical_aoi(
-                    best_contour, expansion, (H, W), tracking_state.previous_ellipse,
-                    TRACKING_CONFIG.get('center_smoothing_alpha', 0.3),
-                    TRACKING_CONFIG.get('ellipse_size_smoothing_alpha', 0.1),
-                    TRACKING_CONFIG.get('ellipse_orientation_smoothing_alpha', 0.1),
-                    TRACKING_CONFIG.get('ellipse_max_movement_pixels', 4.0)
-                )
-                current_smoothed_ellipse = new_ellipse
-                tracking_state.previous_ellipse = new_ellipse
-            except:
-                current_smoothed_ellipse = ellipse
-            
-            # Calculate distance and angle from smoothed ellipse
-            (cx, cy), (w, h), angle = current_smoothed_ellipse
-            major_angle = angle if w >= h else angle + 90.0
-            center_x = W / 2
-            ang_r = np.radians(major_angle)
-            cos_ang = np.cos(ang_r)
-            
-            if abs(cos_ang) > 1e-6:
-                t = (center_x - cx) / cos_ang
-                intersect_y = cy + t * np.sin(ang_r)
-                distance_pixels = intersect_y
-            else:
-                distance_pixels = cy
-            
-            # Apply distance smoothing (similar to sonar_analysis.py)
-            if distance_pixels is not None and tracking_state.previous_distance_pixels is not None:
-                max_change = IMAGE_PROCESSING_CONFIG.get('max_distance_change_pixels', 20)
-                distance_change = abs(distance_pixels - tracking_state.previous_distance_pixels)
-                if distance_change > max_change:
-                    direction = 1 if distance_pixels > tracking_state.previous_distance_pixels else -1
-                    distance_pixels = tracking_state.previous_distance_pixels + (direction * max_change)
-            
-            # Update tracking state with smoothed distance
-            tracking_state.previous_distance_pixels = distance_pixels
-            
-            # Draw vertical center line (gray)
-            cv2.line(net_display, (int(center_x), 0), (int(center_x), H), (128, 128, 128), 1)
-            
-            # Draw major axis (red line) using smoothed distance
-            red_line_angle = (float(angle) + 90.0) % 360.0
-            ang_r = np.radians(red_line_angle)
-            cos_ang = np.cos(ang_r)
-            
-            if abs(cos_ang) > 1e-6:
-                t = (center_x - cx) / cos_ang
-                intersect_y = cy + t * np.sin(ang_r)
-                # Use smoothed distance_pixels instead of intersect_y
-                intersect_y = distance_pixels
-            
-            half_major = max(w, h) / 2.0
-            p1x = int(cx + half_major * np.cos(ang_r))
-            p1y = int(cy + half_major * np.sin(ang_r))
-            p2x = int(cx - half_major * np.cos(ang_r))
-            p2y = int(cy - half_major * np.sin(ang_r))
-            cv2.line(net_display, (p1x, p1y), (p2x, p2y), (0, 0, 255), 3)
-            
-            # Draw intersection point on center line (yellow circle)
-            cv2.circle(net_display, (int(center_x), int(distance_pixels)), 8, (100, 0, 255), -1)
-            cv2.circle(net_display, (int(center_x), int(distance_pixels)), 8, (0, 0, 0), 2)
-            
-            cv2.circle(net_display, (int(cx), int(cy)), 5, (0, 255, 255), -1)
+        cv2.putText(info_display, "8. Tracking Info", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
-        cv2.putText(net_display, "9. Net Placement (Center Line)", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        if tracker.center:
+            cv2.putText(info_display, f"Center: ({tracker.center[0]:.1f}, {tracker.center[1]:.1f})",
+                       (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+            y_offset += 25
         
-        # Assemble 3x3 grid
+        if tracker.size:
+            cv2.putText(info_display, f"Size: ({tracker.size[0]:.1f}, {tracker.size[1]:.1f})",
+                       (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+            y_offset += 25
+        
+        if tracker.angle is not None:
+            cv2.putText(info_display, f"Angle: {tracker.angle:.1f}°",
+                       (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+            y_offset += 25
+        
+        status = tracker.get_status()
+        color = (0, 255, 0) if status == "TRACKED" else (0, 165, 255) if "SEARCHING" in status else (0, 0, 255)
+        cv2.putText(info_display, f"Status: {status}",
+                   (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+        
+        # 9. Distance visualization
+        distance_display = cv2.cvtColor(frame_u8, cv2.COLOR_GRAY2BGR)
+        distance_px = tracker.calculate_distance(W, H)
+        
+        if distance_px is not None:
+            # Draw center line
+            cv2.line(distance_display, (W//2, 0), (W//2, H), (128, 128, 128), 1)
+            
+            # Draw distance point
+            cv2.circle(distance_display, (W//2, int(distance_px)), 8, (0, 0, 255), -1)
+            cv2.circle(distance_display, (W//2, int(distance_px)), 8, (255, 255, 255), 2)
+            
+            # Draw net line if we have tracking
+            if tracker.center and tracker.size and tracker.angle is not None:
+                major_angle = tracker.angle
+                if tracker.size[1] > tracker.size[0]:
+                    major_angle = (tracker.angle + 90) % 360
+                
+                ang_r = np.radians(major_angle + 90)
+                half_len = max(tracker.size) / 2
+                
+                p1x = int(tracker.center[0] + half_len * np.cos(ang_r))
+                p1y = int(tracker.center[1] + half_len * np.sin(ang_r))
+                p2x = int(tracker.center[0] - half_len * np.cos(ang_r))
+                p2y = int(tracker.center[1] - half_len * np.sin(ang_r))
+                
+                cv2.line(distance_display, (p1x, p1y), (p2x, p2y), (0, 0, 255), 2)
+            
+            dist_m = None
+            if extent:
+                px2m = (extent[3] - extent[2]) / H
+                dist_m = extent[2] + distance_px * px2m
+                cv2.putText(distance_display, f"{dist_m:.2f}m", (W//2 + 15, int(distance_px)),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+        
+        cv2.putText(distance_display, "9. Distance", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        
+        # Assemble grid
         row0 = np.hstack([raw_display, momentum_display, edges_display])
-        row1 = np.hstack([diluted_display, morph_display, contours_aoi_display])
-        row2 = np.hstack([corridor_display, best_display, net_display])
+        row1 = np.hstack([dilated_display, morph_display, search_mask_display])
+        row2 = np.hstack([best_display, info_display, distance_display])
         grid_frame = np.vstack([row0, row1, row2])
         
         # Frame info
-        frame_info = f'Frame: {idx}'
+        frame_info = f'Frame: {idx} | {tracker.get_status()}'
         cv2.putText(grid_frame, frame_info, (10, grid_h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
         vw.write(grid_frame)
         
-        if (i+1) % 50 ==  0:
+        if (i+1) % 50 == 0:
             print(f"Processed {i+1}/{actual} frames")
     
     vw.release()
     print(f"\n✓ Video saved to: {output_path}")
-    print(f"\nGrid layout (3x3):")
-    print(f"  Row 1: Raw | Momentum-Merged | Edges (of Momentum)")
-    print(f"  Row 2: Diluted Edges | After Morphology | Contours+Smoothed Elliptical AOI")
-    print(f"  Row 3: Corridor+AOI | Best Contour | Net Placement (Center Line)")
-    
+    print(f"Grid layout: Raw | Momentum | Edges")
+    print(f"             Dilated | Morphology | Search Mask")
+    print(f"             Best Contour | Tracking Info | Distance")
     
     return output_path

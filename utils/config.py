@@ -9,6 +9,8 @@ sonar-related modules use the same canonical values.
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict
+import hashlib
+import json
 
 # --- Geometry / display defaults ---
 FOV_DEG_DEFAULT: float = 120.0
@@ -70,161 +72,106 @@ ENHANCE_DEFAULTS: Dict = {
 # Note: ConeGridSpec is defined in utils.rendering and imported by utils.sonar_utils
 # It's re-exported from sonar_utils for backward compatibility
 
-# --- Image-analysis / contour-detection defaults (moved from sonar_image_analysis) ---
+# --- Image-analysis / contour-detection defaults ---
 IMAGE_PROCESSING_CONFIG: Dict = {
     
-    # === BINARY CONVERSION (NEW: SIGNAL-STRENGTH INDEPENDENT) ===
-    'binary_threshold': 1,            # Threshold for converting frame to binary (0-255)
-                                        # Pixels > threshold become white (255), others black (0)
-                                        # Makes pipeline completely signal-strength independent
-                                        # Focus on structural patterns only
+    # === BINARY CONVERSION ===
+    'binary_threshold': 1,              # Threshold for binary conversion (0-255)
+                                        # Pixels > threshold become 255, others 0
+                                        # Low threshold (1) means any non-zero signal is detected
     
-    # === ADAPTIVE LINEAR MERGING ===
-
-    'adaptive_base_radius': 3,          # Base circular merging radius 
-                                        # Starting radius for circular kernel before elongation
-                                        # Larger values = more aggressive base merging
-
-    'adaptive_max_elongation': 8,        # Maximum elongation factor
-                                         # 1.0 = always circular, 4.0 = ellipse can be 4x longer than wide
-                                         # Higher values = stronger linear feature enhancement
-
-    'adaptive_linearity_threshold': 1.0, # Minimum linearity to trigger elongation 
-                                         # Lower values = more pixels get elliptical kernels (more sensitive)
-                                         # Higher values = only very linear patterns get elongated (selective)
-
-    'adaptive_angle_steps': 20,          # Number of angles tested for linearity 
-                                         # Uses 20 increments for optimal speed/quality balance
-                                         # More steps = better angle resolution but slower processing
-
-    'momentum_boost': 100.0,              # Enhancement strength multiplier 
-                                         # Higher values = stronger directional feature enhancement
-                                         # Lower values = more subtle enhancement, preserves original intensities
-
-    'use_advanced_momentum_merging': True,  # Toggle between advanced momentum merging and basic Gaussian kernel
-                                             # True = use advanced structure tensor analysis with elliptical kernels
-                                             # False = use simple Gaussian blur for faster processing
-                                             # Advanced mode provides better linear feature detection but slower
-
-    # === BASIC GAUSSIAN KERNEL PARAMETERS (when use_advanced_momentum_merging=False) ===
-    'basic_gaussian_kernel_size': 3,        # Kernel size for basic Gaussian blur (odd integer)
-                                             # Larger values = more smoothing but slower processing
-                                             # Typical range: 3-9
-    'basic_gaussian_sigma': 5.0,            # Sigma for basic Gaussian blur
-                                             # Higher values = more aggressive smoothing
-                                             # Lower values = sharper enhancement
-    'basic_momentum_boost': 5.0,            # Enhancement strength for basic mode
-                                             # Multiplier for how much enhanced signal to add back
-                                             # Higher values = stronger enhancement
+    # === ADAPTIVE LINEAR MOMENTUM MERGING ===
+    'use_advanced_momentum_merging': True,  # Use structure tensor analysis vs basic Gaussian
     
-    # === EDGE DETECTION (SIMPLIFIED FOR BINARY DATA) ===
-    # Binary edge detection using gradient operators - no Canny parameters needed
-    # Binary frames use direct edge operators for cleaner, faster edge detection
+    # Advanced momentum parameters
+    'adaptive_angle_steps': 20,         # Number of angles tested for linearity
+    'adaptive_base_radius': 3,          # Base circular kernel radius
+    'adaptive_max_elongation': 1.0,     # Maximum kernel elongation (1.0 = circular)
+    'momentum_boost': 10.0,            # Enhancement strength multiplier
+    'adaptive_linearity_threshold': 1.0, # Minimum linearity to trigger elongation
+    'downscale_factor': 2,              # Downscaling for faster processing
+    'top_k_bins': 8,                    # Top bins for orientation histogram
+    'min_coverage_percent': 0.3,        # Minimum coverage for valid bins
+    'gaussian_sigma': 5.0,              # Sigma for Gaussian smoothing in tensor
     
-    # === CONTOUR FILTERING ===
-    'min_contour_area': 500,            # Minimum contour area in pixels to be considered valid
-                                        # Filters out small noise artifacts and debris
-                                        
+    # Basic Gaussian parameters (when use_advanced_momentum_merging=False)
+    'basic_gaussian_kernel_size': 3,    # Kernel size for basic mode (odd integer)
+    'basic_gaussian_sigma': 5.0,        # Sigma for basic Gaussian blur
+    'basic_momentum_boost': 5.0,        # Enhancement strength for basic mode
     
     # === MORPHOLOGICAL POST-PROCESSING ===
-    'morph_close_kernel': 3,            # Kernel size for morphological closing (connects nearby edges)
-                                        # 0 = no closing, 3-5 = light closing, >5 = aggressive closing
-                                        # Helps connect broken parts of net structures
+    'morph_close_kernel': 0,            # Kernel size for morphological closing
+                                        # 0 = disabled, 3-5 = light, >5 = aggressive
+    'edge_dilation_iterations': 0,      # Edge dilation iterations (0 = disabled)
+    
+    # === CONTOUR FILTERING ===
+    'min_contour_area': 200,            # Minimum contour area (pixels)
+                                        # Reduced by 70% when tracking (0.3x multiplier)
+    'aoi_boost_factor': 10.0,           # Score boost for contours inside AOI
     
     # === DISTANCE TRACKING STABILITY ===
-    'max_distance_change_pixels': 5,   # Maximum allowed distance change between frames (pixels)
-                                        # Prevents tracking jumps when contour detection fails
-                                        # Large jumps often indicate false positives or tracking loss
-    'distance_change_smoothing': 0.1,   # Smoothing factor when distance change exceeds threshold
-                                        # 0.0 = reject change completely, 1.0 = accept change fully
-                                        # Intermediate values blend new and previous distance
-    
-    'edge_dilation_iterations': 2,      # Number of dilation iterations on final edges (0-3 typical)
-                                        # Makes detected edges slightly thicker for better contour detection
-                                        # 0 = no dilation, 1 = thin edges, 2+ = thick edges
-}# Tracking and AOI configuration
-TRACKING_CONFIG: Dict = {
-    'aoi_boost_factor': 10.0,            # Reasonable boost for contours inside AOI
-    'aoi_expansion_pixels': 0,           # Expand AOI by this many pixels (was 2)
-    'center_smoothing_alpha': 0.3,       # Position smoothing: 0.0 = instant jump (no smoothing), 1.0 = maximum resistance (position never changes)
-                                         # Higher values = smoother position changes but slower adaptation
-                                         # Lower values = faster position adaptation but more jittery tracking
-    'ellipse_size_smoothing_alpha': 0.8, # Size smoothing: 0.0 = instant jump (no smoothing), 1.0 = maximum resistance (size never changes)
-                                          # Higher values = smoother size changes but slower adaptation
-                                          # Lower values = faster size adaptation but more jittery
-    'ellipse_orientation_smoothing_alpha': 0.5, # Orientation smoothing: 0.0 = instant jump (no smoothing), 1.0 = maximum resistance (orientation never changes)
-                                          # Higher values = smoother orientation changes but slower adaptation
-                                          # Lower values = faster orientation adaptation but more jittery
-    'use_elliptical_aoi': True,          # Use elliptical AOI instead of rectangular
+    'max_distance_change_pixels': 20,   # Max allowed distance change between frames
 }
 
-# Corridor AOI tuning (used by sonar_image_analysis)
-# This configuration controls how the corridor mask is built around the detected net ellipse.
-# The corridor represents the region where contours are accepted (in addition to the ellipse itself).
-TRACKING_CONFIG.update({
-    'use_corridor_splitting': True,     # ✓ MUST BE TRUE - Enable corridor-based contour filtering
-                                         # When True: contours are split into inside/corridor/other regions
-                                         # When False: only simple ellipse-based filtering is used
+# Tracking and AOI configuration
+TRACKING_CONFIG: Dict = {
+    # === ELLIPTICAL AOI SETTINGS ===
+    'use_elliptical_aoi': True,
+    'ellipse_expansion_factor': 0.5,  # AOI expansion (0.5 = 50% larger)
     
-    'corridor_band_k': 0.75,            # Half-width of corridor band as fraction of minor axis (b)
-                                         # Higher values = wider corridor (0.5 = 50% of b, 1.0 = 100% of b)
-                                         # Typical range: 0.5-1.0
-                                         # Used in: build_aoi_corridor_mask() to define band thickness
+    # === SMOOTHING PARAMETERS ===
+    # CRITICAL: Lower alpha = more smoothing
+    # Formula: new = old * (1 - alpha) + measured * alpha
+    # 
+    # Examples:
+    #   alpha = 0.01 → new = old * 0.99 + measured * 0.01  (99% old, 1% new - VERY SMOOTH)
+    #   alpha = 0.30 → new = old * 0.70 + measured * 0.30  (70% old, 30% new)
+    #   alpha = 1.00 → new = measured                      (0% old, 100% new - NO SMOOTHING)
     
-    'corridor_length_px': None,         # Fixed length of corridor in pixels (None = auto-calculate)
-                                         # When None: length_px = length_factor * major_axis_length
-                                         # When set: overrides auto-calculation for consistent corridor length
+    'center_smoothing_alpha': 0.3,                # 70% old, 30% new
+    'ellipse_size_smoothing_alpha': 0.01,         # 99% old, 1% new (VERY SMOOTH)
+    'ellipse_orientation_smoothing_alpha': 0.2,   # 80% old, 20% new
+    'ellipse_max_movement_pixels': 30.0,          # Max center jump per frame
     
-    'corridor_length_factor': 1.25,     # Multiplier for corridor length if corridor_length_px is None
-                                         # length_px = length_factor * major_axis_length
-                                         # Typical range: 1.0-2.0
-                                         # 1.0 = corridor extends exactly along major axis
-                                         # 1.25 = extends 25% beyond ellipse endpoints
+    # === CORRIDOR EXTENSION ===
+    'use_corridor_splitting': True,
+    'corridor_band_k': 2.0,           # Corridor width relative to minor axis
+    'corridor_length_px': None,       # Auto-calculate
+    'corridor_length_factor': 2.0,    # Length = major axis * factor
+    'corridor_widen': 1.0,
+    'corridor_both_directions': True,
     
-    'corridor_widen': 1.0,              # Widening factor for far end of corridor
-                                         # 1.0 = constant width along entire corridor (rectangle)
-                                         # >1.0 = corridor widens at far end (trapezoid shape)
-                                         # 2.0 = far end is twice as wide as near end
-                                         # Typical range: 1.0-1.5
-    
-    'corridor_both_directions': True,   # Extend corridor in both directions along major axis
-                                         # True = corridor extends forward AND backward from ellipse center
-                                         # False = corridor extends only in one direction
-                                         # Should always be True for symmetric net detection
-})
+    # === PERSISTENCE ===
+    'max_frames_without_detection': 30,  # Keep tracking for 30 frames without detection
+    'aoi_decay_factor': 0.98,            # Grow AOI by 2% per frame when losing track
+}
 
 # Video output configuration
 VIDEO_CONFIG: Dict = {
-    # === VIDEO GENERATION TOGGLE ===
-    'enable_video_overlay': True,      # Auto-find and overlay camera video with sonar analysis
-                                        # True = automatically locate video files based on bag name
-                                        # False = skip video overlay functionality
-                                        # Requires both CSV (sonar data) and MP4 (camera video) files
-    
-    'video_topic_preference': [         # Preferred video topics (in order of preference)
-        'image_compressed_image_data',  # Main camera feed (most common)
-        'ted_image',                    # Auxiliary camera
-        'camera_image',                 # Generic camera topic
+    # === VIDEO OVERLAY ===
+    'enable_video_overlay': True,       # Auto-find and overlay camera video
+    'video_topic_preference': [         # Preferred camera topics (in order)
+        'image_compressed_image_data',
+        'ted_image',
+        'camera_image',
     ],
     
     # === VIDEO OUTPUT SETTINGS ===
-    'fps': 15,
-    'show_all_contours': True,
-    'show_ellipse': True,
-    'show_bounding_box': False,
-    'text_scale': 0.6,
-    # AOI / corridor overlay options
-    'show_aoi_corridor': True,         # ✓ MUST BE TRUE for bands to show
-    'aoi_mask_color': (0, 255, 0),      # BGR color for ellipse AOI mask overlay (GREEN)
-    'corridor_mask_color': (0, 128, 255),  # BGR color for corridor mask (ORANGE)
-    'aoi_mask_alpha': 0.25,             # Alpha blend for AOI mask
-    'corridor_mask_alpha': 0.25,        # Alpha blend for corridor mask
+    'fps': 15,                          # Output framerate
+    'show_all_contours': True,          # Draw all detected contours
+    'show_ellipse': True,               # Draw ellipse fit
+    'show_bounding_box': False,         # Draw bounding box
+    'text_scale': 0.6,                  # Text size
     
-    # === VIDEO SYNCHRONIZATION ===
-    'max_sync_tolerance_seconds': 5.0,     # Maximum time difference for camera/sonar sync
-                                            # If camera is more than this many seconds away from
-                                            # sonar timestamp, fall back to sonar-only frame
-                                            # Prevents frozen camera frames when video ends early
+    # === AOI VISUALIZATION ===
+    'show_aoi_corridor': True,          # Show AOI and corridor masks
+    'aoi_mask_color': (0, 255, 0),      # BGR: Green
+    'corridor_mask_color': (0, 128, 255), # BGR: Orange
+    'aoi_mask_alpha': 0.25,             # Transparency for AOI overlay
+    'corridor_mask_alpha': 0.25,        # Transparency for corridor overlay
+    
+    # === SYNCHRONIZATION ===
+    'max_sync_tolerance_seconds': 5.0,  # Max time diff for camera/sonar sync
 }
 
 # --- Navigation analysis defaults ---
@@ -252,10 +199,103 @@ EXPORTS_SUBDIRS: Dict = {
     'index': ''  # index files live in the root exports dir
 }
 
+def validate_config_consistency():
+    """Validate that all config values are consistent and print warnings if not."""
+    required_image_keys = {
+        'binary_threshold', 'adaptive_angle_steps', 'adaptive_base_radius',
+        'adaptive_max_elongation', 'momentum_boost', 'adaptive_linearity_threshold',
+        'downscale_factor', 'top_k_bins', 'min_coverage_percent', 'gaussian_sigma',
+        'morph_close_kernel', 'edge_dilation_iterations', 'min_contour_area',
+        'max_distance_change_pixels', 'use_advanced_momentum_merging', 'aoi_boost_factor'
+    }
+    
+    required_tracking_keys = {
+        'ellipse_expansion_factor', 'center_smoothing_alpha', 'ellipse_size_smoothing_alpha',
+        'ellipse_orientation_smoothing_alpha', 'ellipse_max_movement_pixels',
+        'corridor_band_k', 'corridor_length_factor', 'corridor_widen', 'corridor_both_directions',
+        'use_corridor_splitting', 'use_elliptical_aoi'
+    }
+    
+    missing_image = required_image_keys - set(IMAGE_PROCESSING_CONFIG.keys())
+    missing_tracking = required_tracking_keys - set(TRACKING_CONFIG.keys())
+    
+    if missing_image or missing_tracking:
+        print(" CONFIG VALIDATION WARNING:")
+        if missing_image:
+            print(f"   Missing IMAGE_PROCESSING_CONFIG keys: {missing_image}")
+        if missing_tracking:
+            print(f"   Missing TRACKING_CONFIG keys: {missing_tracking}")
+        return False
+    
+    return True
+
+# Auto-validate on import
+validate_config_consistency()
+
+def get_config_hash():
+    """Get hash of current config for change detection."""
+    config_data = {
+        'tracking': TRACKING_CONFIG,
+        'image_processing': IMAGE_PROCESSING_CONFIG,
+        'EXPORTS_DIR_DEFAULT': EXPORTS_DIR_DEFAULT,
+        'EXPORTS_SUBDIRS': EXPORTS_SUBDIRS
+    }
+    config_str = json.dumps(config_data, sort_keys=True)
+    return hashlib.md5(config_str.encode()).hexdigest()
+
+_CONFIG_HASH = get_config_hash()  # Initial hash
+
+def validate_config_unchanged():
+    """Check if config has changed since last validation."""
+    current_hash = get_config_hash()
+    if current_hash != _CONFIG_HASH:
+        print("⚠️  CONFIG HAS CHANGED! Results may not be comparable.")
+        print(f"   Previous hash: {_CONFIG_HASH[:8]}...")
+        print(f"   Current hash:  {current_hash[:8]}...")
+    return current_hash == _CONFIG_HASH
+
+class ConfigManager:
+    """Centralized config access to ensure consistency."""
+    
+    def __init__(self):
+        self._image_config = IMAGE_PROCESSING_CONFIG.copy()
+        self._tracking_config = TRACKING_CONFIG.copy()
+        self._hash = self._calculate_hash()
+    
+    def _calculate_hash(self):
+        import hashlib
+        import json
+        data = {'image': self._image_config, 'tracking': self._tracking_config}
+        return hashlib.md5(json.dumps(data, sort_keys=True).encode()).hexdigest()
+    
+    def get_image_param(self, key, default=None):
+        """Get image processing parameter with validation."""
+        if key not in self._image_config and default is None:
+            raise KeyError(f"Required IMAGE_PROCESSING_CONFIG key '{key}' not found")
+        return self._image_config.get(key, default)
+    
+    def get_tracking_param(self, key, default=None):
+        """Get tracking parameter with validation."""
+        if key not in self._tracking_config and default is None:
+            raise KeyError(f"Required TRACKING_CONFIG key '{key}' not found")
+        return self._tracking_config.get(key, default)
+    
+    def validate_consistency(self):
+        """Validate config hasn't changed."""
+        current_hash = self._calculate_hash()
+        if current_hash != self._hash:
+            raise RuntimeError("Config has been modified! Create new ConfigManager instance.")
+        return True
+
+# Global instance
+config_manager = ConfigManager()
+
 __all__ = [
-    'FOV_DEG_DEFAULT', 'RANGE_MIN_M_DEFAULT', 'RANGE_MAX_M_DEFAULT', 'DISPLAY_RANGE_MAX_M_DEFAULT',
-    'CONE_W_DEFAULT', 'CONE_H_DEFAULT', 'CONE_FLIP_VERTICAL_DEFAULT', 'CMAP_NAME_DEFAULT',
     'SONAR_VIS_DEFAULTS', 'ENHANCE_DEFAULTS', 'ConeGridSpec',
+    'CONE_W_DEFAULT', 'CONE_H_DEFAULT', 'CONE_FLIP_VERTICAL_DEFAULT', 'CMAP_NAME_DEFAULT',
+    'FOV_DEG_DEFAULT', 'RANGE_MIN_M_DEFAULT', 'RANGE_MAX_M_DEFAULT', 'DISPLAY_RANGE_MAX_M_DEFAULT',
     'IMAGE_PROCESSING_CONFIG', 'TRACKING_CONFIG', 'VIDEO_CONFIG',
-    'EXPORTS_DIR_DEFAULT', 'EXPORTS_SUBDIRS'
+    'EXPORTS_DIR_DEFAULT', 'EXPORTS_SUBDIRS',
+    'validate_config_consistency', 'get_config_hash', 'validate_config_unchanged',
+    'config_manager'
 ]
