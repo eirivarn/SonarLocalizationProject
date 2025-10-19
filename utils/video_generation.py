@@ -7,7 +7,8 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Tuple
+from dataclasses import dataclass
 
 from utils.io_utils import load_df, read_video_index, get_available_npz_files
 from utils.sonar_utils import (
@@ -20,6 +21,90 @@ from utils.config import (
     CMAP_NAME_DEFAULT, DISPLAY_RANGE_MAX_M_DEFAULT, FOV_DEG_DEFAULT,
     EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS,
 )
+
+# Define fallback configs at module level to avoid undefined variable errors
+VIDEO_CONFIG = {'fps': 30}
+IMAGE_PROCESSING_CONFIG = {
+    'binary_threshold': 128,
+    'adaptive_angle_steps': 36,
+    'adaptive_base_radius': 3,
+    'adaptive_max_elongation': 3.0,
+    'momentum_boost': 0.8,
+    'adaptive_linearity_threshold': 0.15,
+    'downscale_factor': 2,
+    'top_k_bins': 8,
+    'min_coverage_percent': 0.5,
+    'gaussian_sigma': 1.0,
+    'morph_close_kernel': 0,
+    'edge_dilation_iterations': 0,
+    'min_contour_area': 100,
+    'aoi_center_x_percent': 50,
+    'aoi_center_y_percent': 60,
+    'aoi_width_percent': 60,
+    'aoi_height_percent': 70,
+    'max_distance_change_pixels': 20
+}
+TRACKING_CONFIG = {
+    'ellipse_expansion_factor': 0.3,
+    'center_smoothing_alpha': 0.3,
+    'ellipse_size_smoothing_alpha': 0.1,
+    'ellipse_orientation_smoothing_alpha': 0.1,
+    'ellipse_max_movement_pixels': 4.0,
+    'corridor_band_k': 0.75,
+    'corridor_length_factor': 1.25,
+    'corridor_widen': 1.0,
+    'corridor_both_directions': True
+}
+
+# Try to import actual configs, which will override the fallbacks if available
+try:
+    from utils.config import VIDEO_CONFIG as _VIDEO_CONFIG, IMAGE_PROCESSING_CONFIG as _IMAGE_PROCESSING_CONFIG, TRACKING_CONFIG as _TRACKING_CONFIG
+    VIDEO_CONFIG.update(_VIDEO_CONFIG)
+    IMAGE_PROCESSING_CONFIG.update(_IMAGE_PROCESSING_CONFIG)
+    TRACKING_CONFIG.update(_TRACKING_CONFIG)
+except ImportError:
+    pass  # Use fallback configs defined above
+
+# Handle image enhancement imports with fallbacks
+try:
+    from utils.image_enhancement import preprocess_edges, adaptive_linear_momentum_merge_fast
+except ImportError:
+    def preprocess_edges(frame_u8, config):
+        # Fallback implementation
+        binary_threshold = config.get('binary_threshold', 128)
+        binary_frame = (frame_u8 > binary_threshold).astype(np.uint8) * 255
+        kernel_edge = np.array([[-1, -1, -1], [-1, 8, -1], [-1, -1, -1]], dtype=np.float32)
+        raw_edges = cv2.filter2D(binary_frame, cv2.CV_32F, kernel_edge)
+        raw_edges = np.clip(raw_edges, 0, 255).astype(np.uint8)
+        raw_edges = (raw_edges > 0).astype(np.uint8) * 255
+        return raw_edges, raw_edges
+    
+    def adaptive_linear_momentum_merge_fast(frame, **kwargs):
+        # Fallback: just return the input frame
+        return frame.astype(np.uint8)
+
+# Handle sonar tracking imports with fallbacks
+try:
+    from utils.sonar_tracking import (
+        create_smooth_elliptical_aoi,
+        split_contour_by_corridor,
+        build_aoi_corridor_mask
+    )
+except ImportError:
+    def create_smooth_elliptical_aoi(contour, expansion, image_shape, prev_ellipse, *args, **kwargs):
+        # Fallback: return a simple ellipse fit
+        if len(contour) >= 5:
+            ellipse = cv2.fitEllipse(contour)
+            return None, None, ellipse
+        return None, None, None
+    
+    def split_contour_by_corridor(contour, ellipse, image_shape, **kwargs):
+        # Fallback: return empty splits
+        return [], [], [], [], []
+    
+    def build_aoi_corridor_mask(image_shape, ellipse, **kwargs):
+        # Fallback: return empty mask
+        return np.zeros(image_shape, dtype=np.uint8)
 
 def load_png_bgr(path: Path) -> np.ndarray:
     img = cv2.imread(str(path), cv2.IMREAD_COLOR)
@@ -981,6 +1066,14 @@ def generate_three_system_video(
     
     return video_path
 
+@dataclass
+class TrackingState:
+    """Container for persistent tracking state across frames."""
+    last_center: Optional[Tuple[float, float]] = None
+    smoothed_center: Optional[Tuple[float, float]] = None
+    previous_ellipse: Optional[Tuple] = None
+    previous_distance_pixels: Optional[float] = None
+
 def create_enhanced_contour_detection_video(
     npz_file_index=0, 
     frame_start=0, 
@@ -990,7 +1083,7 @@ def create_enhanced_contour_detection_video(
 ):
     """
     Create video showing contour detection pipeline.
-    3x3 grid showing: Raw → Momentum-Merged → Edges → Diluted Edges → After Morphology → Contours+AOI+Bands → Best Contour → Net Placement → Empty
+    3x3 grid showing: Raw → Momentum-Merged → Edges → Diluted Edges → After Morphology → Contours+Smoothed Elliptical AOI → Best Contour → Net Placement (Smoothed) → Empty
     """
     import cv2
     import numpy as np
@@ -1003,13 +1096,6 @@ def create_enhanced_contour_detection_video(
         enhance_intensity
     )
     from utils.io_utils import get_available_npz_files
-    from utils.config import VIDEO_CONFIG, IMAGE_PROCESSING_CONFIG, TRACKING_CONFIG
-    from utils.image_enhancement import preprocess_edges, adaptive_linear_momentum_merge_fast
-    from utils.sonar_tracking import (
-        create_smooth_elliptical_aoi,
-        split_contour_by_corridor,
-        build_aoi_corridor_mask
-    )
     
     print("=== CONTOUR DETECTION PIPELINE VIDEO (3x3 Grid) ===")
     
@@ -1039,7 +1125,14 @@ def create_enhanced_contour_detection_video(
     outp.parent.mkdir(parents=True, exist_ok=True)
     
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    vw = cv2.VideoWriter(str(outp), fourcc, VIDEO_CONFIG['fps'], (grid_w, grid_h))
+    
+    # Handle VIDEO_CONFIG gracefully - use default if not available
+    try:
+        fps = VIDEO_CONFIG.get('fps', 30)
+    except NameError:
+        fps = 30  # Default FPS
+    
+    vw = cv2.VideoWriter(str(outp), fourcc, fps, (grid_w, grid_h))
     
     if not vw.isOpened():
         print("Error: Could not initialize video writer")
@@ -1047,13 +1140,12 @@ def create_enhanced_contour_detection_video(
     
     print(f"Processing {actual} frames...")
     print(f"Grid layout (3x3):")
-    print(f"  Row 1: Raw | Momentum-Merged | Edges")
-    print(f"  Row 2: Diluted Edges | After Morphology | Contours+AOI+Bands")
-    print(f"  Row 3: Best Contour | Net Placement | [Empty]")
+    print(f"  Row 1: Raw | Momentum-Merged | Edges (of Momentum)")
+    print(f"  Row 2: Diluted Edges | After Morphology | Contours+Smoothed Elliptical AOI")
+    print(f"  Row 3: Best Contour | Net Placement (Smoothed) | [Empty]")
     
-    # Tracking state
-    previous_ellipse = None
-    current_smoothed_ellipse = None
+    # Initialize tracking state for distance smoothing
+    tracking_state = TrackingState()
     
     for i in range(actual):
         idx = frame_start + i * frame_step
@@ -1093,13 +1185,17 @@ def create_enhanced_contour_detection_video(
         
         # 3. Edges (from momentum-merged frame)
         try:
-            # Get edges from the momentum-merged frame, not raw frame
+            # Import preprocess_edges here to handle potential import errors
+            from utils.image_enhancement import preprocess_edges
             raw_edges, processed_edges = preprocess_edges(momentum_merged, IMAGE_PROCESSING_CONFIG)
             edges_display = cv2.cvtColor(raw_edges, cv2.COLOR_GRAY2BGR)
-        except Exception as e:
+        except (ImportError, NameError) as e:
+            print(f"Warning: preprocess_edges import failed ({e}), using momentum-merged frame")
             edges_display = cv2.cvtColor(momentum_merged, cv2.COLOR_GRAY2BGR)
+        except Exception as e:
             print(f"Warning: preprocess_edges failed ({e}), using momentum-merged frame")
-        
+            edges_display = cv2.cvtColor(momentum_merged, cv2.COLOR_GRAY2BGR)
+    
         cv2.putText(edges_display, "3. Edges (of Momentum)", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
         # 4. Diluted edges (after dilation)
@@ -1158,7 +1254,7 @@ def create_enhanced_contour_detection_video(
             try:
                 expansion = TRACKING_CONFIG.get('ellipse_expansion_factor', 0.3)
                 aoi_mask, aoi_center, smoothed_ellipse = create_smooth_elliptical_aoi(
-                    best_contour, expansion, (H, W), previous_ellipse,
+                    best_contour, expansion, (H, W), tracking_state.previous_ellipse,
                     TRACKING_CONFIG.get('center_smoothing_alpha', 0.3),
                     TRACKING_CONFIG.get('ellipse_size_smoothing_alpha', 0.1),
                     TRACKING_CONFIG.get('ellipse_orientation_smoothing_alpha', 0.1),
@@ -1168,8 +1264,8 @@ def create_enhanced_contour_detection_video(
                 # Draw the smoothed elliptical AOI (magenta, like in other panels)
                 cv2.ellipse(contours_aoi_display, smoothed_ellipse, (255, 0, 255), 2)
                 
-                # Update previous ellipse for next frame
-                previous_ellipse = smoothed_ellipse
+                # Update tracking state
+                tracking_state.previous_ellipse = smoothed_ellipse
                 
             except Exception as e:
                 print(f"Warning: Could not create smoothed AOI: {e}")
@@ -1188,7 +1284,7 @@ def create_enhanced_contour_detection_video(
         
         cv2.putText(best_display, "7. Best Contour", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
-        # 8. Net placement (remove ellipse, keep red line and center)
+        # 8. Net placement (smoothed with center line and intersection)
         net_display = cv2.cvtColor(frame_u8, cv2.COLOR_GRAY2BGR)
         
         if best_contour is not None and len(best_contour) >= 5:
@@ -1198,29 +1294,70 @@ def create_enhanced_contour_detection_video(
             try:
                 expansion = TRACKING_CONFIG.get('ellipse_expansion_factor', 0.3)
                 aoi_mask, _, new_ellipse = create_smooth_elliptical_aoi(
-                    best_contour, expansion, (H, W), previous_ellipse,
+                    best_contour, expansion, (H, W), tracking_state.previous_ellipse,
                     TRACKING_CONFIG.get('center_smoothing_alpha', 0.3),
                     TRACKING_CONFIG.get('ellipse_size_smoothing_alpha', 0.1),
                     TRACKING_CONFIG.get('ellipse_orientation_smoothing_alpha', 0.1),
                     TRACKING_CONFIG.get('ellipse_max_movement_pixels', 4.0)
                 )
                 current_smoothed_ellipse = new_ellipse
-                previous_ellipse = new_ellipse
+                tracking_state.previous_ellipse = new_ellipse
             except:
                 current_smoothed_ellipse = ellipse
             
-            # Draw major axis (red line) - keep this
-            (cx, cy), (w, h), angle = ellipse
-            angle_rad = np.radians(angle + 90.0)
+            # Calculate distance and angle from smoothed ellipse
+            (cx, cy), (w, h), angle = current_smoothed_ellipse
+            major_angle = angle if w >= h else angle + 90.0
+            center_x = W / 2
+            ang_r = np.radians(major_angle)
+            cos_ang = np.cos(ang_r)
+            
+            if abs(cos_ang) > 1e-6:
+                t = (center_x - cx) / cos_ang
+                intersect_y = cy + t * np.sin(ang_r)
+                distance_pixels = intersect_y
+            else:
+                distance_pixels = cy
+            
+            # Apply distance smoothing (similar to sonar_analysis.py)
+            if distance_pixels is not None and tracking_state.previous_distance_pixels is not None:
+                max_change = IMAGE_PROCESSING_CONFIG.get('max_distance_change_pixels', 20)
+                distance_change = abs(distance_pixels - tracking_state.previous_distance_pixels)
+                if distance_change > max_change:
+                    direction = 1 if distance_pixels > tracking_state.previous_distance_pixels else -1
+                    distance_pixels = tracking_state.previous_distance_pixels + (direction * max_change)
+            
+            # Update tracking state with smoothed distance
+            tracking_state.previous_distance_pixels = distance_pixels
+            
+            # Draw vertical center line (gray)
+            cv2.line(net_display, (int(center_x), 0), (int(center_x), H), (128, 128, 128), 1)
+            
+            # Draw major axis (red line) using smoothed distance
+            red_line_angle = (float(angle) + 90.0) % 360.0
+            ang_r = np.radians(red_line_angle)
+            cos_ang = np.cos(ang_r)
+            
+            if abs(cos_ang) > 1e-6:
+                t = (center_x - cx) / cos_ang
+                intersect_y = cy + t * np.sin(ang_r)
+                # Use smoothed distance_pixels instead of intersect_y
+                intersect_y = distance_pixels
+            
             half_major = max(w, h) / 2.0
-            p1x = int(cx + half_major * np.cos(angle_rad))
-            p1y = int(cy + half_major * np.sin(angle_rad))
-            p2x = int(cx - half_major * np.cos(angle_rad))
-            p2y = int(cy - half_major * np.sin(angle_rad))
+            p1x = int(cx + half_major * np.cos(ang_r))
+            p1y = int(cy + half_major * np.sin(ang_r))
+            p2x = int(cx - half_major * np.cos(ang_r))
+            p2y = int(cy - half_major * np.sin(ang_r))
             cv2.line(net_display, (p1x, p1y), (p2x, p2y), (0, 0, 255), 3)
+            
+            # Draw intersection point on center line (yellow circle)
+            cv2.circle(net_display, (int(center_x), int(distance_pixels)), 8, (0, 255, 255), -1)
+            cv2.circle(net_display, (int(center_x), int(distance_pixels)), 8, (0, 0, 0), 2)
+            
             cv2.circle(net_display, (int(cx), int(cy)), 5, (0, 255, 255), -1)
         
-        cv2.putText(net_display, "8. Net Placement (Line Only)", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        cv2.putText(net_display, "8. Net Placement (Center Line)", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
         # 9. Empty
         empty_display = np.zeros((H, W, 3), dtype=np.uint8)
@@ -1246,6 +1383,7 @@ def create_enhanced_contour_detection_video(
     print(f"\nGrid layout (3x3):")
     print(f"  Row 1: Raw | Momentum-Merged | Edges (of Momentum)")
     print(f"  Row 2: Diluted Edges | After Morphology | Contours+Smoothed Elliptical AOI")
-    print(f"  Row 3: Best Contour | Net Placement (Line Only) | [Empty]")
+    print(f"  Row 3: Best Contour | Net Placement (Center Line) | [Empty]")
+    
     
     return output_path
