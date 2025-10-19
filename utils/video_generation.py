@@ -7,13 +7,12 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Optional, Tuple
-from dataclasses import dataclass
+from typing import Optional
 
-from utils.io_utils import load_df, read_video_index, get_available_npz_files
+from utils.io_utils import load_df, read_video_index
 from utils.sonar_utils import (
     get_sonoptix_frame, enhance_intensity, apply_flips, cone_raster_like_display_cell, 
-    to_uint8_gray, load_cone_run_npz
+    
 )
 from utils.config import (
     SONAR_VIS_DEFAULTS,
@@ -82,29 +81,6 @@ except ImportError:
     def adaptive_linear_momentum_merge_fast(frame, **kwargs):
         # Fallback: just return the input frame
         return frame.astype(np.uint8)
-
-# Handle sonar tracking imports with fallbacks
-try:
-    from utils.sonar_tracking import (
-        create_smooth_elliptical_aoi,
-        split_contour_by_corridor,
-        build_aoi_corridor_mask
-    )
-except ImportError:
-    def create_smooth_elliptical_aoi(contour, expansion, image_shape, prev_ellipse, *args, **kwargs):
-        # Fallback: return a simple ellipse fit
-        if len(contour) >= 5:
-            ellipse = cv2.fitEllipse(contour)
-            return None, None, ellipse
-        return None, None, None
-    
-    def split_contour_by_corridor(contour, ellipse, image_shape, **kwargs):
-        # Fallback: return empty splits
-        return [], [], [], [], []
-    
-    def build_aoi_corridor_mask(image_shape, ellipse, **kwargs):
-        # Fallback: return empty mask
-        return np.zeros(image_shape, dtype=np.uint8)
 
 def load_png_bgr(path: Path) -> np.ndarray:
     img = cv2.imread(str(path), cv2.IMREAD_COLOR)
@@ -1006,7 +982,7 @@ def export_optimized_sonar_video(
         meta_path = out_path.with_suffix(out_path.suffix + ".meta.json")
         with open(meta_path, "w", encoding="utf-8") as fh:
             json.dump(meta, fh, ensure_ascii=False, indent=2)
-        print(f"\n🎉 DONE! Wrote {frames_written} frames to {out_path} @ {natural_fps:.2f} FPS")
+        print(f"\n DONE! Wrote {frames_written} frames to {out_path} @ {natural_fps:.2f} FPS")
         print(f"Three-system synchronization: DVL(Yellow/Orange) | FFT(Cyan) | Sonar(Magenta)")
         print(f"Metadata saved to: {meta_path}")
     except Exception as e:
@@ -1065,15 +1041,6 @@ def generate_three_system_video(
     print(f"   - Sonar: Image analysis of sonar returns")
     
     return video_path
-
-@dataclass
-class TrackingState:
-    """Container for persistent tracking state across frames."""
-    last_center: Optional[Tuple[float, float]] = None
-    smoothed_center: Optional[Tuple[float, float]] = None
-    previous_ellipse: Optional[Tuple] = None
-    previous_distance_pixels: Optional[float] = None
-    current_aoi: Optional[dict] = None
 
 def create_enhanced_contour_detection_video(
     npz_file_index=0, 
