@@ -410,16 +410,3 @@ def preprocess_edges(frame_u8: np.ndarray, config: Dict) -> Tuple[np.ndarray, np
         enhanced_edges = cv2.dilate(enhanced_edges, kernel2, iterations=dil)
     
     return raw_edges, enhanced_edges
-
-
-# Keep the simple version for backward compatibility
-def preprocess_edges_simple(frame_u8: np.ndarray, binary_threshold: int = 128) -> np.ndarray:
-    """Simple binary edge detection for sonar frames (backward compatibility)."""
-    binary_frame = (frame_u8 > binary_threshold).astype(np.uint8) * 255
-    
-    kernel_edge = np.array([[-1, -1, -1], [-1, 8, -1], [-1, -1, -1]], dtype=np.float32)
-    edges = cv2.filter2D(binary_frame, cv2.CV_32F, kernel_edge)
-    edges = np.clip(edges, 0, 255).astype(np.uint8)
-    edges = (edges > 0).astype(np.uint8) * 255
-    
-    return edges

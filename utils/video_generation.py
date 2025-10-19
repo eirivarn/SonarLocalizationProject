@@ -9,9 +9,10 @@ from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional
 
-from utils.io_utils import load_df, read_video_index
+from utils.io_utils import load_df, read_video_index, get_available_npz_files
 from utils.sonar_utils import (
-    get_sonoptix_frame, enhance_intensity, apply_flips, cone_raster_like_display_cell
+    get_sonoptix_frame, enhance_intensity, apply_flips, cone_raster_like_display_cell, 
+    to_uint8_gray, load_cone_run_npz
 )
 from utils.config import (
     SONAR_VIS_DEFAULTS,
@@ -51,7 +52,6 @@ def find_video_files_for_bag(bag_name: str, exports_dir: Optional[Path] = None) 
         
     Returns:
         Dictionary with keys:
-        - 'sonar_csv': Path to sonar CSV file or None
         - 'video_frames_dir': Path to best matching PNG frames directory or None
         - 'available_frame_dirs': List of all available frame directories for this bag
     """
@@ -981,183 +981,258 @@ def generate_three_system_video(
     
     return video_path
 
-def create_enhanced_contour_detection_video_with_processor(
-    npz_file_index=0, frame_start=0, frame_count=100,
-    frame_step=5, output_path='enhanced_video.mp4',
-    processor=None
+def create_enhanced_contour_detection_video(
+    npz_file_index=0, 
+    frame_start=0, 
+    frame_count=100,
+    frame_step=5, 
+    output_path='enhanced_video.mp4'
 ):
-    """Create video using the SonarDataProcessor - SHOWS AOI/corridor masks for detailed analysis."""
-    from utils.contour_analysis import (
-        SonarDataProcessor, get_available_npz_files, 
-        load_cone_run_npz, to_uint8_gray
-    )
-    from utils.config import VIDEO_CONFIG
+    """
+    Create video showing the EXACT analysis pipeline from analyze_npz_sequence.
+    Visualizes: raw → edges → morphology → contours → AOI filtering → ellipse fit
+    """
+    import cv2
+    import numpy as np
+    from pathlib import Path
     
-    print("=== ENHANCED VIDEO CREATION WITH AOI/CORRIDOR VISUALIZATION ===")
+    from utils.sonar_utils import load_cone_run_npz, to_uint8_gray
+    from utils.io_utils import get_available_npz_files
+    from utils.config import VIDEO_CONFIG, IMAGE_PROCESSING_CONFIG, TRACKING_CONFIG
+    from utils.image_enhancement import preprocess_edges
+    from utils.sonar_tracking import create_smooth_elliptical_aoi
     
-    if processor is None:
-        processor = SonarDataProcessor()
-        
+    print("=== CONTOUR DETECTION PIPELINE VIDEO (Using analyze_npz_sequence Methods) ===")
+    
     files = get_available_npz_files()
     if npz_file_index >= len(files):
         print(f"Error: NPZ file index {npz_file_index} not available")
         return None
-
+    
+    # Load cone data
     cones, timestamps, extent, _ = load_cone_run_npz(files[npz_file_index])
     T = len(cones)
     actual = int(min(frame_count, max(0, (T - frame_start)) // max(1, frame_step)))
+    
     if actual <= 0:
         print("Error: Not enough frames to process")
         return None
-
-    first = to_uint8_gray(cones[frame_start])
-    H, W = first.shape
-    outp = Path(output_path)
     
+    # Get first frame dimensions
+    first_u8 = to_uint8_gray(cones[frame_start])
+    H, W = first_u8.shape
+    
+    # Setup output - create 3x2 grid layout
+    grid_h = H * 3
+    grid_w = W * 2
+    outp = Path(output_path)
     outp.parent.mkdir(parents=True, exist_ok=True)
-
-    vw = cv2.VideoWriter(str(outp), cv2.VideoWriter_fourcc(*'mp4v'), VIDEO_CONFIG['fps'], (W, H))
+    
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    vw = cv2.VideoWriter(str(outp), fourcc, VIDEO_CONFIG['fps'], (grid_w, grid_h))
+    
     if not vw.isOpened():
-        fallback_path = outp.with_suffix('.avi')
-        vw = cv2.VideoWriter(str(fallback_path), cv2.VideoWriter_fourcc(*'XVID'), VIDEO_CONFIG['fps'], (W, H))
-        if vw.isOpened():
-            print(f"Fallback: Using {fallback_path} (AVI format)")
-            outp = fallback_path
-        else:
-            print("Error: Could not initialize video writer")
-            return None
-
-    processor.reset_tracking()
+        print("Error: Could not initialize video writer")
+        return None
     
     print(f"Processing {actual} frames...")
-    print(f"AOI/Corridor visualization: ENABLED (Green ellipse + Orange corridor)")
+    print(f"Output grid (3x2):")
+    print(f"  Row 1: Raw Sonar | Preprocessed Edges")
+    print(f"  Row 2: After Morphology | After Dilation")
+    print(f"  Row 3: All Contours + AOI | Best Contour + Ellipse")
+    
+    # Initialize tracking state (same as analyze_npz_sequence)
+    last_center = None
+    current_aoi = None
+    smoothed_center = None
+    previous_ellipse = None
     
     for i in range(actual):
         idx = frame_start + i * frame_step
         frame_u8 = to_uint8_gray(cones[idx])
         
-        result = processor.analyze_frame(frame_u8, extent)
+        # STEP 1: Raw sonar
+        raw_display = cv2.cvtColor(frame_u8, cv2.COLOR_GRAY2BGR)
+        cv2.putText(raw_display, "1. Raw Sonar", (10, 30), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         
-        vis = cv2.cvtColor(frame_u8, cv2.COLOR_GRAY2BGR)
+        # STEP 2: Preprocess edges (same as analyze_frame)
+        raw_edges, edges_proc = preprocess_edges(frame_u8, IMAGE_PROCESSING_CONFIG)
+        edges_display = cv2.cvtColor(edges_proc, cv2.COLOR_GRAY2BGR)
+        cv2.putText(edges_display, "2. Preprocessed Edges", (10, 30), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         
-        # CRITICAL: Draw AOI/corridor masks FIRST (filled regions)
-        if processor.current_aoi is not None:
-            try:
-                # Get masks directly from processor's current_aoi
-                ell_mask = processor.current_aoi.get('ellipse_mask')
-                corr_mask = processor.current_aoi.get('corridor_mask')
-                
-                # Draw ellipse AOI mask (green overlay)
-                if ell_mask is not None and isinstance(ell_mask, np.ndarray):
-                    a_color = tuple(int(c) for c in VIDEO_CONFIG.get('aoi_mask_color', (0,255,0)))
-                    a_alpha = float(VIDEO_CONFIG.get('aoi_mask_alpha', 0.25))
-                    
-                    color_layer = np.zeros_like(vis, dtype=np.uint8)
-                    color_layer[ell_mask > 0] = a_color
-                    
-                    # Alpha blend and ensure uint8
-                    vis = cv2.addWeighted(
-                        vis.astype(np.float32), 1.0, 
-                        color_layer.astype(np.float32), a_alpha, 
-                        0
-                    ).astype(np.uint8)
-                    
-                    # Draw ellipse outline
-                    ell_contours, _ = cv2.findContours(ell_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                    if ell_contours:
-                        cv2.drawContours(vis, ell_contours, -1, a_color, 2)
-                
-                # Draw corridor mask (orange overlay)
-                if corr_mask is not None and isinstance(corr_mask, np.ndarray):
-                    c_color = tuple(int(c) for c in VIDEO_CONFIG.get('corridor_mask_color', (0,128,255)))
-                    c_alpha = float(VIDEO_CONFIG.get('corridor_mask_alpha', 0.25))
-                    
-                    color_layer = np.zeros_like(vis, dtype=np.uint8)
-                    color_layer[corr_mask > 0] = c_color
-                    
-                    # Alpha blend and ensure uint8
-                    vis = cv2.addWeighted(
-                        vis.astype(np.float32), 1.0, 
-                        color_layer.astype(np.float32), c_alpha, 
-                        0
-                    ).astype(np.uint8)
-                    
-                    # Draw corridor outline
-                    corr_contours, _ = cv2.findContours(corr_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                    if corr_contours:
-                        cv2.drawContours(vis, corr_contours, -1, c_color, 2)
-                        
-            except Exception as e:
-                if i == frame_start:
-                    print(f"Warning: Could not render AOI/corridor masks: {e}")
+        # STEP 3: Morphology close
+        mks = int(IMAGE_PROCESSING_CONFIG.get('morph_close_kernel', 0))
+        morph_display = edges_display.copy()
+        if mks > 0:
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (mks, mks))
+            morph_result = cv2.morphologyEx(edges_proc, cv2.MORPH_CLOSE, kernel)
+            morph_display = cv2.cvtColor(morph_result, cv2.COLOR_GRAY2BGR)
+        else:
+            morph_result = edges_proc.copy()
         
-        # Draw AOI ellipse outline (yellow) on top
-        if processor.current_aoi is not None:
-            aoi_mask = processor.current_aoi.get('mask')
-            if aoi_mask is not None:
-                aoi_contours, _ = cv2.findContours(aoi_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                if aoi_contours:
-                    cv2.drawContours(vis, aoi_contours, -1, (0, 255, 255), 2)
-                
-                ellipse_center = processor.current_aoi.get('center')
-                if ellipse_center:
-                    cv2.circle(vis, (int(ellipse_center[0]), int(ellipse_center[1])), 3, (0, 255, 255), -1)
-                
-                smoothed = processor.current_aoi.get('smoothed_center')
-                if smoothed:
-                    cv2.circle(vis, (int(smoothed[0]), int(smoothed[1])), 5, (0, 0, 255), -1)
-                    cv2.putText(vis, 'TRACK', (int(smoothed[0]) + 8, int(smoothed[1]) - 8),
-                               cv2.FONT_HERSHEY_SIMPLEX, VIDEO_CONFIG['text_scale']*0.7, (0,0,255), 1)
+        cv2.putText(morph_display, "3. Morphology Close", (10, 30), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         
-        # Draw best contour and features
-        if result.detection_success and result.best_contour is not None:
-            best_contour = result.best_contour
-            cv2.drawContours(vis, [best_contour], -1, (0, 255, 0), 2)
+        # STEP 4: Dilation
+        dil = int(IMAGE_PROCESSING_CONFIG.get('edge_dilation_iterations', 0))
+        dilation_display = morph_display.copy()
+        final_edges = morph_result.copy()
+        if dil > 0:
+            kernel2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
+            final_edges = cv2.dilate(morph_result, kernel2, iterations=dil)
+            dilation_display = cv2.cvtColor(final_edges, cv2.COLOR_GRAY2BGR)
+        
+        cv2.putText(dilation_display, "4. Dilation", (10, 30), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        
+        # STEP 5: Find contours (same as analyze_frame)
+        contours, _ = cv2.findContours(final_edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+        all_contours_display = cv2.cvtColor(frame_u8, cv2.COLOR_GRAY2BGR)
+        cv2.drawContours(all_contours_display, contours, -1, (255, 0, 0), 2)  # Blue = all
+        cv2.putText(all_contours_display, f"5. All Contours ({len(contours)})", (10, 30), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        
+        # Draw AOI if available
+        if current_aoi is not None and 'mask' in current_aoi:
+            aoi_mask = current_aoi['mask']
+            # Draw red overlay for AOI boundary
+            aoi_contours, _ = cv2.findContours(aoi_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(all_contours_display, aoi_contours, -1, (0, 255, 0), 2)
+        
+        cv2.putText(all_contours_display, f"AOI: {'Yes' if current_aoi else 'No'}", (10, H - 20),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+        
+        # STEP 6: Find best contour and fit ellipse
+        best_contour = None
+        best_score = 0.0
+        min_area = float(IMAGE_PROCESSING_CONFIG.get('min_contour_area', 100))
+        
+        for c in contours:
+            area = cv2.contourArea(c)
+            if area < min_area:
+                continue
             
-            if VIDEO_CONFIG.get('show_ellipse', True) and len(best_contour) >= 5:
+            # Aspect ratio calculation (simplified from compute_contour_features)
+            if len(c) >= 5:
+                x, y, w, h = cv2.boundingRect(c)
+                ar = (max(w, h) / max(1, min(w, h))) if min(w, h) > 0 else 0.0
+                score = area * ar
+                
+                # Boost score if in AOI
+                if current_aoi is not None and 'mask' in current_aoi:
+                    aoi_mask = current_aoi['mask']
+                    M = cv2.moments(c)
+                    if M["m00"] != 0:
+                        cx = int(M["m10"] / M["m00"])
+                        cy = int(M["m01"] / M["m00"])
+                        if 0 <= cy < aoi_mask.shape[0] and 0 <= cx < aoi_mask.shape[1]:
+                            if aoi_mask[int(cy), int(cx)] > 0:
+                                score *= IMAGE_PROCESSING_CONFIG.get('aoi_boost_factor', 2.0)
+                
+                if score > best_score:
+                    best_contour = c
+                    best_score = score
+        
+        # Fit ellipse to best contour
+        ellipse_display = cv2.cvtColor(frame_u8, cv2.COLOR_GRAY2BGR)
+        
+        if best_contour is not None:
+            # Draw best contour in green
+            cv2.drawContours(ellipse_display, [best_contour], -1, (0, 255, 0), 2)
+            
+            if len(best_contour) >= 5:
+                # Fit ellipse
+                ellipse = cv2.fitEllipse(best_contour)
+                (cx, cy), (w, h), angle = ellipse
+                
+                # Draw ellipse (magenta)
+                cv2.ellipse(ellipse_display, ellipse, (255, 0, 255), 2)
+                
+                # Draw major axis (red line)
+                angle_rad = np.radians(angle + 90.0)
+                half_major = w / 2.0 if w >= h else h / 2.0
+                p1x = int(cx + half_major * np.cos(angle_rad))
+                p1y = int(cy + half_major * np.sin(angle_rad))
+                p2x = int(cx - half_major * np.cos(angle_rad))
+                p2y = int(cy - half_major * np.sin(angle_rad))
+                cv2.line(ellipse_display, (p1x, p1y), (p2x, p2y), (0, 0, 255), 3)
+                
+                # Mark center
+                cv2.circle(ellipse_display, (int(cx), int(cy)), 5, (0, 255, 255), -1)
+                
+                # Calculate distance
+                major_axis = max(w, h)
+                distance_px = major_axis / 2.0
+                
+                # Calculate distance in meters using extent
+                if extent is not None:
+                    x_min, x_max, y_min, y_max = extent
+                    height_m = y_max - y_min
+                    px2m_y = height_m / H
+                    distance_m = y_min + distance_px * px2m_y
+                    dist_text = f"Dist: {distance_m:.2f}m ({distance_px:.0f}px)"
+                else:
+                    dist_text = f"Dist: {distance_px:.1f}px"
+                
+                cv2.putText(ellipse_display, dist_text, (10, H - 40), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                
+                angle_text = f"Angle: {angle:.1f}°"
+                cv2.putText(ellipse_display, angle_text, (10, H - 15),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 200, 0), 2)
+                
+                # Update AOI for next frame (same as analyze_frame)
                 try:
-                    ellipse = cv2.fitEllipse(best_contour)
-                    (cx, cy), (minor, major), ang = ellipse
-                    
-                    cv2.ellipse(vis, ellipse, (255, 0, 255), 1)
-                    
-                    ang_r = np.radians(ang + 90.0)
-                    half = major * 0.5
-                    p1 = (int(cx + half*np.cos(ang_r)), int(cy + half*np.sin(ang_r)))
-                    p2 = (int(cx - half*np.cos(ang_r)), int(cy - half*np.sin(ang_r)))
-                    cv2.line(vis, p1, p2, (0,0,255), 2)
-                    
-                    if result.distance_pixels is not None:
-                        center_x = W // 2
-                        dot_y = int(result.distance_pixels)
-                        cv2.circle(vis, (center_x, dot_y), 4, (255, 0, 0), -1)
-                        
-                        if result.distance_meters is not None:
-                            dist_text = f"Dist: {result.distance_meters:.2f}m"
-                        else:
-                            dist_text = f"Dist: {result.distance_pixels:.1f}px"
-                        cv2.putText(vis, dist_text, (center_x + 10, dot_y - 10),
-                                   cv2.FONT_HERSHEY_SIMPLEX, VIDEO_CONFIG['text_scale'], (255, 0, 0), 1)
-                except:
-                    pass
+                    expansion = TRACKING_CONFIG.get('ellipse_expansion_factor', 0.3)
+                    aoi_mask, _, new_ellipse = create_smooth_elliptical_aoi(
+                        best_contour, expansion, (H, W),
+                        previous_ellipse,
+                        TRACKING_CONFIG.get('center_smoothing_alpha', 0.3),
+                        TRACKING_CONFIG.get('ellipse_size_smoothing_alpha', 0.1),
+                        TRACKING_CONFIG.get('ellipse_orientation_smoothing_alpha', 0.1),
+                        TRACKING_CONFIG.get('ellipse_max_movement_pixels', 4.0)
+                    )
+                    current_aoi = {
+                        'mask': aoi_mask,
+                        'ellipse_params': new_ellipse
+                    }
+                    previous_ellipse = new_ellipse
+                except Exception as e:
+                    print(f"Warning: AOI creation failed: {e}")
         
-        # Add legend
-        legend_y = 20
-        cv2.putText(vis, "Green: Ellipse AOI | Orange: Corridor | Yellow: Tracking", (10, legend_y), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2, cv2.LINE_AA)
-        cv2.putText(vis, "Green: Ellipse AOI | Orange: Corridor | Yellow: Tracking", (10, legend_y), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
+        cv2.putText(ellipse_display, "6. Fitted Ellipse (Best Contour)", (10, 30), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         
-        frame_info = f'Frame: {idx} | {result.tracking_status}'
-        cv2.putText(vis, frame_info, (10, H - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1)
+        # Assemble 3x2 grid
+        row1 = np.hstack([raw_display, edges_display])
+        row2 = np.hstack([morph_display, dilation_display])
+        row3 = np.hstack([all_contours_display, ellipse_display])
+        grid_frame = np.vstack([row1, row2, row3])
         
-        vw.write(vis)
+        # Frame info
+        frame_info = f'Frame: {idx} | analyze_npz_sequence pipeline visualization'
+        cv2.putText(grid_frame, frame_info, (10, grid_h - 15), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
-        if (i+1) % 10 == 0:
+        vw.write(grid_frame)
+        
+        if (i+1) % 50 == 0:
             print(f"Processed {i+1}/{actual} frames")
-
+    
     vw.release()
-    print(f"\nVideo saved to: {output_path}")
-    print(f"Shows: Green contour + Magenta ellipse + Red axis + Green AOI fill + Orange corridor fill")
+    print(f"\n✓ Contour detection video saved to: {output_path}")
+    print(f"\nGrid layout (3x2) - showing exact pipeline from analyze_npz_sequence:")
+    print(f"  Row 1:")
+    print(f"    1. Raw sonar frame from NPZ")
+    print(f"    2. preprocess_edges() output")
+    print(f"  Row 2:")
+    print(f"    3. After morphology close")
+    print(f"    4. After dilation")
+    print(f"  Row 3:")
+    print(f"    5. All contours (blue) + AOI boundary (green)")
+    print(f"    6. Best contour (green) + fitted ellipse (magenta) + major axis (red line)")
+    print(f"\nThis video shows the EXACT same analysis pipeline used in analyze_npz_sequence()")
     
     return output_path

@@ -31,7 +31,7 @@ except ImportError:
     pass
 
 try:
-    from .contour_analysis import *
+    from .sonar_analysis import *
 except ImportError:
     pass
 

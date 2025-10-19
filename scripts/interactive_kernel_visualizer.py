@@ -28,7 +28,7 @@ from matplotlib.patches import Rectangle
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from utils.contour_analysis import (
+from utils.sonar_analysis import (
     create_elliptical_kernel_fast, 
     create_circular_kernel_fast,
     create_oriented_gradient_kernel_fast,

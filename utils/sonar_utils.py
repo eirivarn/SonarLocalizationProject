@@ -9,12 +9,11 @@ This module focuses on core sonar data processing.
 """
 
 from __future__ import annotations
-import json
 from dataclasses import dataclass
+import json
 from pathlib import Path
 from typing import Iterable, Optional, Tuple, Dict, List
 
-import cv2
 import numpy as np
 import pandas as pd
 
@@ -23,8 +22,56 @@ from utils.io_utils import (
     load_df, parse_json_cell, load_png_rgb, ensure_ts_col,
     read_video_index, normalize_ts_utc, nearest_video_index
 )
-from utils.rendering import ConeGridSpec, rasterize_cone
 
+# --------------------------- Cone rasterization ------------------------------
+
+@dataclass
+class ConeGridSpec:
+    """Specification for cone grid dimensions."""
+    img_w: int = 900
+    img_h: int = 700
+
+
+def rasterize_cone(
+    Z: np.ndarray,
+    *,
+    fov_deg: float,
+    rmin: float,
+    rmax: float,
+    y_zoom: Optional[float] = None,
+    grid: ConeGridSpec = ConeGridSpec(),
+) -> Tuple[np.ndarray, Tuple[float, float, float, float]]:
+    """
+    Rasterize a polar fan (rows=range, cols=beams) into Cartesian (x,y) with forward +Y,
+    starboard +X, returning (cone_image, extent=(x_min,x_max,y_min,y_max)).
+    """
+    H, W = map(int, Z.shape)
+    half = np.deg2rad(0.5 * float(fov_deg))
+    y_min = max(0.0, float(rmin))
+    y_max = float(y_zoom if y_zoom is not None else rmax)
+    x_max = np.sin(half) * y_max
+    x_min = -x_max
+
+    x = np.linspace(x_min, x_max, grid.img_w)
+    y = np.linspace(y_min, y_max, grid.img_h)
+    Xg, Yg = np.meshgrid(x, y)
+
+    theta = np.arctan2(Xg, Yg)   # angle from +Y axis
+    r = np.hypot(Xg, Yg)
+
+    mask = (r >= rmin) & (r <= y_max) & (theta >= -half) & (theta <= +half)
+
+    # map (r,theta) -> (row, col)
+    rowf = (r - rmin) / max((rmax - rmin), 1e-12) * (H - 1)
+    colf = (theta + half) / max((2 * half), 1e-12) * (W - 1)
+    rows = np.rint(np.clip(rowf, 0, H - 1)).astype(np.int32)
+    cols = np.rint(np.clip(colf, 0, W - 1)).astype(np.int32)
+
+    cone = np.full((grid.img_h, grid.img_w), np.nan, dtype=float)
+    mflat = mask.ravel()
+    cone.ravel()[mflat] = Z[rows.ravel()[mflat], cols.ravel()[mflat]]
+    extent = (x_min, x_max, y_min, y_max)
+    return cone, extent
 
 # --------------------------- Frame extraction --------------------------------
 
@@ -338,17 +385,6 @@ def load_cone_run_npz(path: str | Path):
 
     return cones, ts, extent, meta
 
-
-def box_blur(img: np.ndarray, k: int = 3) -> np.ndarray:
-    """Apply a simple box blur for display smoothing (requires scipy)."""
-    try:
-        from scipy.ndimage import uniform_filter
-        return uniform_filter(img, size=k, mode="nearest")
-    except ImportError:
-        print("Warning: scipy not available for box_blur, returning original image")
-        return img
-
-
 def cone_raster_like_display_cell(Z: np.ndarray,
                                   fov_deg: float, r_min: float, r_max: float,
                                   y_max: float, img_w: int, img_h: int):
@@ -428,6 +464,9 @@ def get_pixel_to_meter_mapping(npz_file_path: Path) -> Dict[str, any]:
 # --------------------------- Public API --------------------------------------
 
 __all__ = [
+    # Cone rasterization
+    "ConeGridSpec",
+    "rasterize_cone",
     # Frame extraction
     "infer_hw",
     "get_sonoptix_frame",
@@ -435,21 +474,12 @@ __all__ = [
     # Intensity processing
     "enhance_intensity",
     # Cone operations
-    "ConeGridSpec",
     "iter_cone_frames",
     "save_cone_run_npz",
     "load_cone_run_npz",
-    "box_blur",
     "cone_raster_like_display_cell",
     "to_uint8_gray",
     "get_pixel_to_meter_mapping",
-    # Video utilities
-    "load_png_bgr",
-    "to_local_tz",
-    "ts_for_filename",
-    "put_text_overlay",
-    "find_video_files_for_bag",
-    "get_video_overlay_info",
     # Re-exported from io_utils for backward compatibility
     "load_df",
     "parse_json_cell",
@@ -458,6 +488,4 @@ __all__ = [
     "read_video_index",
     "normalize_ts_utc",
     "nearest_video_index",
-    # Re-exported from rendering for backward compatibility
-    "rasterize_cone",
 ]
