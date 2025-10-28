@@ -50,7 +50,6 @@ def analyze_npz_sequence(
     frame_step: int = 1,
     save_outputs: bool = False,
 ) -> pd.DataFrame:
-    """Clean analysis using NetTracker - matches create_enhanced_contour_detection_video pipeline exactly."""
     files = get_available_npz_files(npz_dir)
     npz_path = files[npz_file_index]
     
@@ -74,35 +73,16 @@ def analyze_npz_sequence(
         frame_u8 = to_uint8_gray(cones[frame_idx])
         H, W = frame_u8.shape[:2]
         
-        # === EXACT PIPELINE MATCH ===
-        
         # 1. Binary conversion
         binary = (frame_u8 > config['binary_threshold']).astype(np.uint8) * 255
-        
-        # 2. Momentum merging
+
+        # 2. Image processing
         try:
-            from utils.image_enhancement import adaptive_linear_momentum_merge_fast
-            momentum = adaptive_linear_momentum_merge_fast(binary, 
-                angle_steps=config['adaptive_angle_steps'],
-                base_radius=config['adaptive_base_radius'],
-                max_elongation=config['adaptive_max_elongation'],
-                momentum_boost=config['momentum_boost'],
-                linearity_threshold=config['adaptive_linearity_threshold'],
-                downscale_factor=config['downscale_factor'],
-                top_k_bins=config['top_k_bins'],
-                min_coverage_percent=config['min_coverage_percent'],
-                gaussian_sigma=config['gaussian_sigma']
-            )
-        except:
-            momentum = binary
-        
-        # 3. Edge detection
-        try:
-            _, edges = preprocess_edges(momentum, config)
+            _, edges = preprocess_edges(binary, config)
         except:
             edges = binary
         
-        # 4. Track using NetTracker on edges (NO morphology - matches video pipeline)
+        # 4. Track using NetTracker on edges 
         contour = tracker.find_and_update(edges, (H, W))
         distance_px, angle_deg = tracker.calculate_distance(W, H)
         

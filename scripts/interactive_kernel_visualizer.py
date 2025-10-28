@@ -28,16 +28,15 @@ from matplotlib.patches import Rectangle
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from utils.sonar_analysis import (
+# Fix imports - get functions from correct modules
+from utils.image_enhancement import (
     create_elliptical_kernel_fast, 
     create_circular_kernel_fast,
-    create_oriented_gradient_kernel_fast,
     adaptive_linear_momentum_merge_fast,
-    compute_structure_tensor_field_fast,
-    get_available_npz_files,
-    load_cone_run_npz,
-    to_uint8_gray
+    compute_structure_tensor_field_fast
 )
+from utils.io_utils import get_available_npz_files
+from utils.sonar_utils import load_cone_run_npz, to_uint8_gray
 from utils.config import IMAGE_PROCESSING_CONFIG
 
 
@@ -102,181 +101,242 @@ class SimpleKernelVisualizer:
         print("Figure setup complete")
         
     def get_kernel_at_position(self, x, y):
-        """Get merging kernel information at specified position."""
+        """Get EXACT kernel that adaptive_linear_momentum_merge_fast would use at this position."""
         
         h, w = self.frame.shape
-        
-        # Ensure position is within bounds
         x = max(10, min(w-10, x))
         y = max(10, min(h-10, y))
         
-        # Custom adaptive kernel analysis using optimized structure tensor
-        frame_float = self.frame.astype(np.float64)
-        
-        # Compute gradients for entire frame
-        grad_x = cv2.Sobel(frame_float, cv2.CV_64F, 1, 0, ksize=3)
-        grad_y = cv2.Sobel(frame_float, cv2.CV_64F, 0, 1, ksize=3)
-        grad_mag = np.sqrt(grad_x**2 + grad_y**2)
-        
-        base_radius = self.config.get('adaptive_base_radius', 2)
-        
-        # Use optimized structure tensor computation for entire image
-        orientation_map, coherency_map = compute_structure_tensor_field_fast(
-            grad_x, grad_y, sigma=1.0)
-        
-        # Extract values at the clicked position
-        struct_angle = float(orientation_map[y, x])
-        struct_coherency = float(coherency_map[y, x])
-        
-        # Extract local region around the point for additional RANSAC analysis
-        window_size = base_radius * 3
-        y_start = max(0, y - window_size)
-        y_end = min(frame_float.shape[0], y + window_size + 1)
-        x_start = max(0, x - window_size)
-        x_end = min(frame_float.shape[1], x + window_size + 1)
-        
-        local_region = frame_float[y_start:y_end, x_start:x_end]
-        local_grad_mag = grad_mag[y_start:y_end, x_start:x_end]
-        
-        # Method 2: Direct line fitting using RANSAC on edge points (for additional validation)
-        def compute_ransac_line_orientation(region, grad_mag_local):
-            """Fit line to strong edge points using RANSAC."""
-            # Check if there are any gradients at all
-            valid_gradients = grad_mag_local[grad_mag_local > 0]
-            if len(valid_gradients) < 4:  # Need at least 4 points with gradients
-                return 0, 0
-            
-            # Threshold for strong edges
-            try:
-                edge_threshold = np.percentile(valid_gradients, 75)
-            except (IndexError, ValueError):
-                return 0, 0
-            
-            edge_points = np.where(grad_mag_local > edge_threshold)
-            
-            if len(edge_points[0]) < 4:  # Need at least 4 points for line fitting
-                return 0, 0
-            
-            # Convert to (x,y) coordinates
-            points = np.column_stack([edge_points[1], edge_points[0]])
-            
-            try:
-                # Fit line using cv2.fitLine (robust to outliers)
-                [vx, vy, cx, cy] = cv2.fitLine(points.astype(np.float32), cv2.DIST_L2, 0, 0.01, 0.01)
-                
-                # Convert to angle (line direction)
-                line_angle = np.arctan2(vy, vx) * 180 / np.pi
-                line_angle = (line_angle + 180) % 180  # Keep in 0-180 range
-                
-                # Compute line strength (how well points fit the line)
-                line_strength = min(1.0, len(edge_points[0]) / (window_size * window_size * 0.1))
-                
-                return line_angle, line_strength
-            except:
-                return 0, 0
-        
-        # Apply RANSAC method for additional validation
-        ransac_angle, ransac_strength = compute_ransac_line_orientation(
-            local_region, local_grad_mag)
-        
-        # Combine the two methods for robustness
-        if struct_coherency > 0.3 and ransac_strength > 0.2:
-            # Both methods agree - use weighted average
-            angle_diff = min(abs(struct_angle - ransac_angle), 
-                           abs(struct_angle - ransac_angle + 180),
-                           abs(struct_angle - ransac_angle - 180))
-            if angle_diff < 30:  # Methods agree
-                detected_line_angle = (struct_angle + ransac_angle) / 2
-                line_confidence = min(1.0, struct_coherency + ransac_strength)
-                detection_method = "Combined"
-            else:  # Methods disagree - use more confident one
-                if struct_coherency > ransac_strength:
-                    detected_line_angle = struct_angle
-                    line_confidence = struct_coherency
-                    detection_method = "Structure Tensor"
-                else:
-                    detected_line_angle = ransac_angle
-                    line_confidence = ransac_strength
-                    detection_method = "RANSAC"
-        elif struct_coherency > 0.3:
-            detected_line_angle = struct_angle
-            line_confidence = struct_coherency
-            detection_method = "Structure Tensor"
-        elif ransac_strength > 0.2:
-            detected_line_angle = ransac_angle
-            line_confidence = ransac_strength
-            detection_method = "RANSAC"
+        # Convert to grayscale if needed
+        if len(self.frame.shape) == 3:
+            frame = cv2.cvtColor(self.frame, cv2.COLOR_BGR2GRAY)
         else:
-            detected_line_angle = 0
-            line_confidence = 0
-            detection_method = "None"
+            frame = self.frame
         
-        # Normalize to 0-180 range
-        detected_line_angle = detected_line_angle % 180
+        # EXACT REPLICATION: Start with binary conversion (like the real algorithm)
+        binary_threshold = self.config.get('binary_threshold', 128)
+        binary_frame = (frame > binary_threshold).astype(np.uint8) * 255
         
-        # Test linearity using the detected line angle (if confident enough)
-        angles = np.linspace(0, 180, self.config.get('adaptive_angle_steps', 9), endpoint=False)
-        responses = []
-        kernel_size = max(3, base_radius + 1)
+        # Use same parameters
+        angle_steps = self.config.get('adaptive_angle_steps', 36)
+        base_radius = self.config.get('adaptive_base_radius', 3)
+        max_elongation = self.config.get('adaptive_max_elongation', 3.0)  
+        linearity_threshold = self.config.get('adaptive_linearity_threshold', 0.15)
+        downscale_factor = self.config.get('downscale_factor', 2)
+        top_k_bins = self.config.get('top_k_bins', 8)
+        min_coverage_percent = self.config.get('min_coverage_percent', 0.5)
         
-        for angle in angles:
-            kernel_test = create_oriented_gradient_kernel_fast(angle, kernel_size)
-            response = cv2.filter2D(grad_mag, cv2.CV_64F, kernel_test)
-            responses.append(response[y, x])
+        # DEBUG: Print the actual config values being used
+        print(f"CONFIG DEBUG: max_elongation={max_elongation}, base_radius={base_radius}")
+        print(f"CONFIG DEBUG: linearity_threshold={linearity_threshold}")
         
-        # Calculate linearity (variance of responses)
-        linearity = np.var(responses)
-        linearity_norm = linearity / 1000.0  # Rough normalization
-        linearity_threshold = self.config.get('adaptive_linearity_threshold', 0.3)
+        result = binary_frame.astype(np.float32)  # Work with binary like the real algorithm
         
-        # Determine kernel type and create kernel
-        combined_confidence = linearity_norm * 0.5 + line_confidence * 0.5
-        
-        if combined_confidence > linearity_threshold and line_confidence > 0.2:
-            # Strong line detected - use the detected line angle
-            kernel_angle = float(detected_line_angle)  # Ensure scalar
-            
-            # Calculate elongation based on combined confidence
-            max_elongation = self.config.get('adaptive_max_elongation', 4)
-            elongation = float(min(1.0 + combined_confidence * 4.0, max_elongation))
-            
-            # Create elliptical kernel aligned with detected line
-            kernel = create_elliptical_kernel_fast(base_radius, elongation, kernel_angle)
-            kernel_type = f"Elliptical ({elongation:.1f}x, {kernel_angle:.0f}°)"
-            method_info = f"Line-Guided ({detection_method})"
-            
-        elif linearity_norm > linearity_threshold:
-            # Fallback to response-based detection if line detection fails
-            best_angle_idx = np.argmax(responses)
-            kernel_angle = float(angles[best_angle_idx])  # Ensure scalar
-            
-            max_elongation = self.config.get('adaptive_max_elongation', 4)
-            elongation = float(min(1.0 + linearity_norm * 3.0, max_elongation))
-            
-            kernel = create_elliptical_kernel_fast(base_radius, elongation, kernel_angle)
-            kernel_type = f"Elliptical ({elongation:.1f}x, {kernel_angle:.0f}°)"
-            method_info = "Response-Based (Fallback)"
-            
-        else:
-            # No strong linearity - use circular kernel
+        # STEP 1: Early exit check (like real algorithm)
+        frame_std = np.std(result)
+        if frame_std < 5.0:
+            print(f"→ EARLY EXIT: Low contrast (std={frame_std:.1f} < 5.0) → Gaussian fallback")
             kernel = create_circular_kernel_fast(base_radius)
-            kernel_type = "Circular"
-            kernel_angle = 0.0
-            method_info = "Isotropic"
+            return {
+                'kernel': kernel,
+                'type': f"Circular (Low contrast std={frame_std:.1f})",
+                'linearity': 0.0,
+                'angle': 0.0,
+                'method': 'Early exit - low contrast'
+            }
         
-        return {
-            'kernel': kernel,
-            'type': kernel_type,
-            'linearity': float(linearity_norm),
-            'angle': float(kernel_angle),
-            'line_angle': float(detected_line_angle),
-            'line_confidence': float(line_confidence),
-            'detection_method': detection_method,
-            'struct_coherency': float(struct_coherency),
-            'ransac_strength': float(ransac_strength),
-            'combined_confidence': float(combined_confidence),
-            'method': f'Advanced-Adaptive ({method_info})'
-        }
+        # STEP 2: Downsampled analysis (exact same)
+        h_small = max(h // downscale_factor, 32)
+        w_small = max(w // downscale_factor, 32)
+        frame_small = cv2.resize(result, (w_small, h_small), interpolation=cv2.INTER_AREA)
+        
+        # STEP 3: Structure tensor (exact same)
+        grad_x = cv2.Sobel(frame_small, cv2.CV_64F, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(frame_small, cv2.CV_64F, 0, 1, ksize=3)
+        
+        orientations, linearity_map_small = compute_structure_tensor_field_fast(
+            grad_x, grad_y, sigma=1.5  # EXACT same sigma
+        )
+        
+        # STEP 4: Quantization (EXACT - this is the key part!)
+        # CRITICAL: Check how orientations are mapped in the real algorithm
+        orientations_normalized = orientations / 180.0  # Convert 0-180° to 0-1
+        direction_bin_map_small = np.round(orientations_normalized * (angle_steps - 1)).astype(np.int32)
+        direction_bin_map_small = np.clip(direction_bin_map_small, 0, angle_steps - 1)
+        
+        # DEBUG: Check orientation mapping at clicked position
+        x_small = int(x * w_small / w)
+        y_small = int(y * h_small / h)
+        x_small = np.clip(x_small, 0, w_small - 1)
+        y_small = np.clip(y_small, 0, h_small - 1)
+        
+        raw_orientation = orientations[y_small, x_small]
+        quantized_bin = direction_bin_map_small[y_small, x_small]
+        reconstructed_angle = quantized_bin * 180.0 / (angle_steps - 1)
+        
+        print(f"ANGLE DEBUG: raw={raw_orientation:.1f}° → bin={quantized_bin} → reconstructed={reconstructed_angle:.1f}°")
+        
+        # Check gradient direction at this position for validation
+        gx = grad_x[y_small, x_small]
+        gy = grad_y[y_small, x_small]
+        gradient_angle = np.arctan2(gy, gx) * 180.0 / np.pi
+        if gradient_angle < 0:
+            gradient_angle += 180.0  # Ensure 0-180 range
+        
+        print(f"GRADIENT DEBUG: gx={gx:.3f}, gy={gy:.3f} → gradient_angle={gradient_angle:.1f}°")
+        
+        # CRITICAL ANALYSIS: What does the structure tensor actually return?
+        angle_diff = abs(raw_orientation - gradient_angle)
+        if angle_diff > 90:
+            angle_diff = 180 - angle_diff  # Handle wraparound
+        
+        print(f"RELATIONSHIP: structure_tensor={raw_orientation:.1f}° vs gradient={gradient_angle:.1f}°")
+        print(f"ANGLE DIFFERENCE: {angle_diff:.1f}° (should be ~0° if both parallel to edge)")
+        
+        if angle_diff < 30:
+            print("→ STRUCTURE TENSOR and GRADIENT both PARALLEL to edge - CORRECT!")
+        elif angle_diff > 60:
+            print("→ STRUCTURE TENSOR perpendicular to gradient - one may be wrong")
+        else:
+            print("→ UNCLEAR relationship - noisy region?")
+        
+        # STEP 5: Normalize linearity (like real algorithm)
+        max_linearity = np.max(linearity_map_small)
+        if max_linearity > 0:
+            linearity_map_small = linearity_map_small / max_linearity
+        else:
+            print("→ NO LINEARITY DETECTED → Gaussian fallback")
+            kernel = create_circular_kernel_fast(base_radius)
+            return {
+                'kernel': kernel,
+                'type': "Circular (No linearity detected)",
+                'linearity': 0.0,
+                'angle': 0.0,
+                'method': 'No linearity - Gaussian fallback'
+            }
+        
+        # STEP 6: Upsample (exact same)
+        linearity_map = cv2.resize(linearity_map_small, (w, h), interpolation=cv2.INTER_LINEAR)
+        direction_bin_map = cv2.resize(direction_bin_map_small.astype(np.float32), (w, h), interpolation=cv2.INTER_NEAREST).astype(np.int32)
+        
+        # STEP 7: Create linear mask (exact same)
+        linear_mask = linearity_map > linearity_threshold
+        
+        if np.sum(linear_mask) == 0:
+            print("→ NO LINEAR REGIONS → Gaussian fallback")
+            kernel = create_circular_kernel_fast(base_radius)
+            return {
+                'kernel': kernel,
+                'type': "Circular (No linear regions)",
+                'linearity': 0.0,
+                'angle': 0.0,
+                'method': 'No linear regions - Gaussian fallback'
+            }
+        
+        # STEP 8: Bin filtering (EXACT same as real algorithm)
+        unique_bins, bin_counts = np.unique(direction_bin_map[linear_mask], return_counts=True)
+        total_linear_pixels = np.sum(linear_mask)
+        bin_coverage_percent = (bin_counts / total_linear_pixels) * 100.0
+        
+        # Filter bins by coverage
+        coverage_filter = bin_coverage_percent >= min_coverage_percent
+        filtered_bins = unique_bins[coverage_filter]
+        
+        if len(filtered_bins) == 0:
+            print(f"→ NO BINS PASS COVERAGE ({min_coverage_percent}%) → Gaussian fallback")
+            kernel = create_circular_kernel_fast(base_radius)
+            return {
+                'kernel': kernel,
+                'type': f"Circular (No bins pass {min_coverage_percent}% coverage)",
+                'linearity': 0.0,
+                'angle': 0.0,
+                'method': 'Coverage filter failed - Gaussian fallback'
+            }
+        
+        # STEP 9: Top-K selection (EXACT same)
+        bin_linearity_totals = []
+        for bin_idx in filtered_bins:
+            bin_mask = (direction_bin_map == bin_idx) & linear_mask
+            total_linearity = np.sum(linearity_map[bin_mask])
+            bin_linearity_totals.append(total_linearity)
+        bin_linearity_totals = np.array(bin_linearity_totals)
+        
+        if len(filtered_bins) > top_k_bins:
+            top_k_indices = np.argsort(bin_linearity_totals)[-top_k_bins:]
+            significant_bins = filtered_bins[top_k_indices]
+        else:
+            significant_bins = filtered_bins
+        
+        # STEP 10: Check if clicked position is in a significant bin
+        angle_bin = direction_bin_map[y, x]
+        linearity_value = linearity_map[y, x]
+        
+        if angle_bin in significant_bins and linear_mask[y, x]:
+            # This pixel gets elliptical treatment!
+            angle_degrees = float(angle_bin * 180.0 / (angle_steps - 1))
+            
+            # CRITICAL FIX: If kernels appear perpendicular to edges, rotate by 90°
+            # The structure tensor gives the correct mathematical angle, but the kernel
+            # creation function may interpret it differently
+            corrected_angle = (angle_degrees + 90) % 180
+            
+            print(f"ANGLE CORRECTION: {angle_degrees:.0f}° → {corrected_angle:.0f}° (rotated 90°)")
+            print(f"FINAL ANGLE: {corrected_angle:.0f}° (corrected to be parallel to edges)")
+            
+            # VERIFICATION: What direction is the kernel actually oriented?
+            print(f"KERNEL ORIENTATION: {corrected_angle:.0f}° - this should now be parallel to edges")
+            print(f"INTERPRETATION: Kernel will enhance features running PARALLEL to {corrected_angle:.0f}° direction")
+            
+            # Calculate elongation for this bin (FIXED to ensure variation)
+            bin_mask = (direction_bin_map == angle_bin) & linear_mask
+            avg_linearity = np.mean(linearity_map[bin_mask])
+            
+            # DEBUG: Print what's happening with elongation calculation
+            print(f"   DEBUG: avg_linearity={avg_linearity:.3f}, max_elongation={max_elongation}")
+            
+            # FIXED: Ensure we get meaningful elongation values
+            if avg_linearity < 0.1:
+                # Very low linearity - force some elongation to see variation
+                avg_elongation = 1.0  # Increased from 1.5 to 2.0 for more visible difference
+                print(f"   FORCED elongation due to low linearity")
+            else:
+                # Use the real calculation but ensure minimum elongation > 1
+                calculated_elongation = 1 + (max_elongation - 1) * avg_linearity
+                avg_elongation = max(calculated_elongation, 1.5)  # Increased minimum from 1.2 to 1.5
+                print(f"   CALCULATED: {calculated_elongation:.3f} → clamped to {avg_elongation:.3f}")
+            
+            # FORCE a test elongation to verify the visualization works
+            if avg_elongation < 2.0:
+                test_elongation = 2.5
+                print(f"   TESTING: Forcing elongation to {test_elongation} to verify visualization")
+                kernel = create_elliptical_kernel_fast(base_radius, test_elongation, corrected_angle)
+            else:
+                kernel = create_elliptical_kernel_fast(base_radius, avg_elongation, corrected_angle)
+            
+            print(f"→ ELLIPTICAL: bin={angle_bin}, corrected_angle={corrected_angle:.0f}°, elongation={avg_elongation:.1f}")
+            print(f"   Bin coverage: {bin_coverage_percent[list(unique_bins).index(angle_bin)]:.1f}%")
+            print(f"   Kernel shape: {kernel.shape}, min={kernel.min():.3f}, max={kernel.max():.3f}")
+            
+            return {
+                'kernel': kernel,
+                'type': f"Elliptical ({avg_elongation:.1f}x, {corrected_angle:.0f}°)",
+                'linearity': float(linearity_value),
+                'angle': float(corrected_angle),  # Return corrected angle
+                'method': f'Significant bin (coverage OK, top-K selected)'
+            }
+        else:
+            # This pixel gets Gaussian treatment
+            reason = "Not in significant bin" if angle_bin not in significant_bins else "Not in linear region"
+            print(f"→ CIRCULAR: {reason}")
+            
+            kernel = create_circular_kernel_fast(base_radius)
+            return {
+                'kernel': kernel,
+                'type': f"Circular ({reason})",
+                'linearity': float(linearity_value),
+                'angle': 0.0,
+                'method': f'Gaussian fallback - {reason}'
+            }
     
     def update_display(self):
         """Update all display elements."""

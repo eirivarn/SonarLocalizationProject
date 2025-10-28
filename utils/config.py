@@ -86,18 +86,20 @@ IMAGE_PROCESSING_CONFIG: Dict = {
     # Advanced momentum parameters
     'adaptive_angle_steps': 20,         # Number of angles tested for linearity
     'adaptive_base_radius': 3,          # Base circular kernel radius
-    'adaptive_max_elongation': 1.0,     # Maximum kernel elongation (1.0 = circular)
+    'adaptive_max_elongation': 3.0,     # Maximum kernel elongation (1.0 = circular)
     'momentum_boost': 10.0,            # Enhancement strength multiplier
-    'adaptive_linearity_threshold': 1.0, # Minimum linearity to trigger elongation
+    'adaptive_linearity_threshold': 0.75, # Minimum linearity to trigger elongation
     'downscale_factor': 2,              # Downscaling for faster processing
     'top_k_bins': 8,                    # Top bins for orientation histogram
     'min_coverage_percent': 0.3,        # Minimum coverage for valid bins
     'gaussian_sigma': 5.0,              # Sigma for Gaussian smoothing in tensor
     
     # Basic Gaussian parameters (when use_advanced_momentum_merging=False)
-    'basic_gaussian_kernel_size': 3,    # Kernel size for basic mode (odd integer)
-    'basic_gaussian_sigma': 5.0,        # Sigma for basic Gaussian blur
-    'basic_momentum_boost': 5.0,        # Enhancement strength for basic mode
+    'basic_gaussian_kernel_size': 3,     # Kernel size for basic mode (odd integer)
+    'basic_gaussian_sigma': 1.0,        # Sigma for basic Gaussian blur
+    'basic_use_dilation': True,          # Use morphological dilation instead of blur
+    'basic_dilation_kernel_size': 3,     # Kernel size for dilation (grows non-zero pixels)
+    'basic_dilation_iterations': 1,      # Number of dilation iterations
     
     # === MORPHOLOGICAL POST-PROCESSING ===
     'morph_close_kernel': 0,            # Kernel size for morphological closing

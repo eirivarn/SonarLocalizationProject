@@ -215,8 +215,8 @@ def adaptive_linear_momentum_merge_fast(
     )
     
     # ADVANCED OPTIMIZATION 3: Quantize orientations to integer angle bins
-    # Convert orientations (-π/2 to π/2) to angle bins (0 to angle_steps-1)
-    orientations_normalized = (orientations + np.pi/2) / np.pi  # Normalize to [0, 1]
+    # FIXED: orientations are already in degrees (0-180), not radians (-π/2 to π/2)
+    orientations_normalized = orientations / 180.0  # Convert degrees to [0, 1]
     direction_bin_map_small = np.round(orientations_normalized * (angle_steps - 1)).astype(np.int32)
     direction_bin_map_small = np.clip(direction_bin_map_small, 0, angle_steps - 1)
     
@@ -365,12 +365,11 @@ def get_momentum_merged_frame(frame_u8: np.ndarray, config: Dict) -> np.ndarray:
             linearity_threshold=config.get('adaptive_linearity_threshold', 0.15),
         )
     else:
-        kernel_size = config.get('basic_gaussian_kernel_size', 5)
-        gaussian_sigma = config.get('basic_gaussian_sigma', 1.0)
-        momentum_boost = config.get('basic_momentum_boost', 0.5)
-        enhanced = cv2.GaussianBlur(binary_frame, (kernel_size, kernel_size), gaussian_sigma)
-        merged = binary_frame + momentum_boost * enhanced
-        merged = np.clip(merged, 0, 255).astype(np.uint8)
+        kernel_size = config.get('basic_gaussian_kernel_size', 9)
+        # Use morphological opening instead of Gaussian - removes noise, preserves structure
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+        enhanced = cv2.morphologyEx(binary_frame, cv2.MORPH_OPENING, kernel)
+        merged = np.clip(enhanced, 0, 255).astype(np.uint8)
     return merged
 
 def preprocess_edges(frame_u8: np.ndarray, config: Dict) -> Tuple[np.ndarray, np.ndarray]:
@@ -403,13 +402,19 @@ def preprocess_edges(frame_u8: np.ndarray, config: Dict) -> Tuple[np.ndarray, np
             linearity_threshold=config.get('adaptive_linearity_threshold', 0.15),
         )
     else:
-        # Use basic Gaussian blur enhancement (faster)
-        kernel_size = config.get('basic_gaussian_kernel_size', 5)
-        gaussian_sigma = config.get('basic_gaussian_sigma', 1.0)
-        momentum_boost = config.get('basic_momentum_boost', 0.5)
-        
-        enhanced = cv2.GaussianBlur(binary_frame, (kernel_size, kernel_size), gaussian_sigma)
-        enhanced_binary = binary_frame + momentum_boost * enhanced
+        use_dilation = config.get('basic_use_dilation', True)
+        if use_dilation:
+            # Use morphological dilation to grow non-zero pixels into nearby zero pixels
+            kernel_size = config.get('basic_dilation_kernel_size', 3)
+            iterations = config.get('basic_dilation_iterations', 1)
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+            enhanced = cv2.dilate(binary_frame, kernel, iterations=iterations)
+        else:
+            # Fallback to Gaussian blur
+            kernel_size = config.get('basic_gaussian_kernel_size', 3)
+            gaussian_sigma = config.get('basic_gaussian_sigma', 1.0)        
+            enhanced = cv2.GaussianBlur(binary_frame, (kernel_size, kernel_size), gaussian_sigma)
+        enhanced_binary = enhanced
         enhanced_binary = np.clip(enhanced_binary, 0, 255).astype(np.uint8)
     
     # STEP 3: Extract edges from enhanced binary frame

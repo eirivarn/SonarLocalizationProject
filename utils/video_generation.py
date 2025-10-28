@@ -77,10 +77,6 @@ except ImportError:
         raw_edges = np.clip(raw_edges, 0, 255).astype(np.uint8)
         raw_edges = (raw_edges > 0).astype(np.uint8) * 255
         return raw_edges, raw_edges
-    
-    def adaptive_linear_momentum_merge_fast(frame, **kwargs):
-        # Fallback: just return the input frame
-        return frame.astype(np.uint8)
 
 def load_png_bgr(path: Path) -> np.ndarray:
     img = cv2.imread(str(path), cv2.IMREAD_COLOR)
@@ -1114,42 +1110,53 @@ def create_enhanced_contour_detection_video(
         idx = frame_start + i * frame_step
         frame_u8 = to_uint8_gray(cones[idx])
         
-        # 1. Raw frame
-        raw_display = cv2.cvtColor(frame_u8, cv2.COLOR_GRAY2BGR)
-        cv2.putText(raw_display, "1. Raw", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        
-        # 2. Momentum-merged
+        # 1. Binary conversion
         binary = (frame_u8 > config['binary_threshold']).astype(np.uint8) * 255
+        
+        # Just for showcasing the momentum merge step
+        # (not used in tracking for the rest of the pipeline)
         try:
-            momentum = adaptive_linear_momentum_merge_fast(binary,
-                angle_steps=config['adaptive_angle_steps'],
-                base_radius=config['adaptive_base_radius'],
-                max_elongation=config['adaptive_max_elongation'],
-                momentum_boost=config['momentum_boost'],
-                linearity_threshold=config['adaptive_linearity_threshold'],
-                downscale_factor=config['downscale_factor'],
-                top_k_bins=config['top_k_bins'],
-                min_coverage_percent=config['min_coverage_percent'],
-                gaussian_sigma=config['gaussian_sigma']
-            )
+            use_advanced = config.get('use_advanced_momentum_merging', True)
+            if use_advanced:
+                momentum = adaptive_linear_momentum_merge_fast(binary,
+                    angle_steps=config['adaptive_angle_steps'],
+                    base_radius=config['adaptive_base_radius'],
+                    max_elongation=config['adaptive_max_elongation'],
+                    momentum_boost=config['momentum_boost'],
+                    linearity_threshold=config['adaptive_linearity_threshold'],
+                    downscale_factor=config['downscale_factor'],
+                    top_k_bins=config['top_k_bins'],
+                    min_coverage_percent=config['min_coverage_percent'],
+                    gaussian_sigma=config['gaussian_sigma']
+                )
+            else:
+                # Use basic enhancement methods (morphological dilation or Gaussian blur)
+                use_dilation = config.get('basic_use_dilation', True)
+                if use_dilation:
+                    # Use morphological dilation to grow non-zero pixels into nearby zero pixels
+                    kernel_size = config.get('basic_dilation_kernel_size', 3)
+                    iterations = config.get('basic_dilation_iterations', 1)
+                    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+                    momentum = cv2.dilate(binary, kernel, iterations=iterations)
+                else:
+                    # Fallback to Gaussian blur
+                    kernel_size = config.get('basic_gaussian_kernel_size', 3)
+                    gaussian_sigma = config.get('basic_gaussian_sigma', 1.0)
+                    momentum = cv2.GaussianBlur(binary, (kernel_size, kernel_size), gaussian_sigma)
             momentum_display = cv2.cvtColor(momentum, cv2.COLOR_GRAY2BGR)
         except:
             momentum = binary
             momentum_display = cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
         
-        cv2.putText(momentum_display, "2. Momentum", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        
-        # 3. Edges
+        # 2. Image processing
         try:
-            _, edges = preprocess_edges(momentum, config)
+            _, edges = preprocess_edges(binary, config)
             edges_display = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
         except:
             edges = binary
             edges_display = cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
         
-        cv2.putText(edges_display, "3. Edges", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        
-        # 4. Search mask (from tracker) - RENUMBERED
+        # 4. Search mask (from tracker)
         search_mask_display = cv2.cvtColor(frame_u8, cv2.COLOR_GRAY2BGR)
         search_mask = tracker._get_search_mask((H, W))
         if search_mask is not None:
@@ -1165,10 +1172,7 @@ def create_enhanced_contour_detection_video(
                        tracker.angle)
                 cv2.ellipse(search_mask_display, ell, (255, 0, 255), 2)
         
-        cv2.putText(search_mask_display, "4. Search Mask", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        
-        # 5. Track using NetTracker - RENUMBERED
-        # CRITICAL FIX: Use edges directly (not morph) since we removed morphology panel
+        # 5. Track using NetTracker
         contour = tracker.find_and_update(edges, (H, W))
         
         best_display = cv2.cvtColor(frame_u8, cv2.COLOR_GRAY2BGR)
@@ -1181,9 +1185,7 @@ def create_enhanced_contour_detection_video(
                 except:
                     pass
         
-        cv2.putText(best_display, "5. Best Contour", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        
-        # 6. Distance visualization - RENUMBERED
+        # 6. Distance visualization
         distance_display = cv2.cvtColor(frame_u8, cv2.COLOR_GRAY2BGR)
         distance_result = tracker.calculate_distance(W, H)
         
@@ -1196,14 +1198,12 @@ def create_enhanced_contour_detection_video(
             # Draw center line
             cv2.line(distance_display, (W//2, 0), (W//2, H), (128, 128, 128), 1)
             
-            # CRITICAL FIX: Draw distance point at the intersection of red line with center line
-            # The angle_deg is already the red line angle (perpendicular to major axis)
+            # Draw distance point at the intersection of red line with center line
             cv2.circle(distance_display, (W//2, int(distance_px)), 8, (0, 0, 255), -1)
             cv2.circle(distance_display, (W//2, int(distance_px)), 8, (255, 255, 255), 2)
             
             # Draw the red line itself (perpendicular to major axis)
             if tracker.center and tracker.size and tracker.angle is not None:
-                # The angle_deg from calculate_distance is already the red line angle
                 ang_r = np.radians(angle_deg)
                 half_len = max(tracker.size) / 2
                 
@@ -1219,29 +1219,37 @@ def create_enhanced_contour_detection_video(
                 px2m = (extent[3] - extent[2]) / H
                 dist_m = extent[2] + distance_px * px2m
                 cv2.putText(distance_display, f"{dist_m:.2f}m", (W//2 + 15, int(distance_px)),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2, cv2.LINE_AA)
         
-        cv2.putText(distance_display, "6. Distance", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        
-        # Assemble grid - CRITICAL: Make sure frames are right size
-        row0 = np.hstack([raw_display, momentum_display, edges_display])
+        # Ensure all arrays have the same number of dimensions for np.hstack
+        if binary.ndim == 2:
+            binary = cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
+        if momentum_display.ndim == 2:
+            momentum_display = cv2.cvtColor(momentum_display, cv2.COLOR_GRAY2BGR)
+        if edges_display.ndim == 2:
+            edges_display = cv2.cvtColor(edges_display, cv2.COLOR_GRAY2BGR)  # Convert grayscale to BGR
+
+        # Add text labels to each panel (single text only)
+        cv2.putText(binary, "1. Raw - Binary Frame", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+        cv2.putText(momentum_display, "2. Momentum Merged", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+        cv2.putText(edges_display, "3. Edges", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+        cv2.putText(search_mask_display, "4. Search Mask", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+        cv2.putText(best_display, "5. Best Contour", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+        cv2.putText(distance_display, "6. Distance", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+
+        # Stack the images horizontally
+        row0 = np.hstack([binary, momentum_display, edges_display])
         row1 = np.hstack([search_mask_display, best_display, distance_display])
         grid_frame = np.vstack([row0, row1])
         
-        # CRITICAL FIX: Verify grid size before writing
-        if grid_frame.shape != (grid_h, grid_w, 3):
-            print(f"ERROR: Grid frame size {grid_frame.shape} doesn't match expected {(grid_h, grid_w, 3)}")
-            print(f"  Row 0 shape: {row0.shape}")
-            print(f"  Row 1 shape: {row1.shape}")
-            continue
-        
-        # CRITICAL FIX: Ensure uint8
+        # Ensure uint8 before writing
         if grid_frame.dtype != np.uint8:
             grid_frame = np.clip(grid_frame, 0, 255).astype(np.uint8)
         
-        # Frame info
+        # Frame info (single text only)
         frame_info = f'Frame: {idx} | {tracker.get_status()}'
-        cv2.putText(grid_frame, frame_info, (10, grid_frame.shape[0] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        cv2.putText(grid_frame, frame_info, (10, grid_frame.shape[0] - 10), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
         
         vw.write(grid_frame)
         

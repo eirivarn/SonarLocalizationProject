@@ -25,7 +25,7 @@ class NetTracker:
     def __init__(self, config: Dict):
         self.config = config
         
-        # Current ellipse state (smoothed)
+        # Current ellipse state 
         self.center: Optional[Tuple[float, float]] = None
         self.size: Optional[Tuple[float, float]] = None  # (width, height)
         self.angle: Optional[float] = None  # degrees
