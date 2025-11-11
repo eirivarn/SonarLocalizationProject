@@ -84,10 +84,8 @@ SOLAQUA datasets contain **two different sonar systems** with data stored in dif
 - Purpose: High-resolution imaging sonar for visualization and analysis
 - Exported to: `sensor_sonoptix_echo_image__{bag_id}_video.csv`
 
-> **📋 Note:** The main sonar analysis pipeline focuses on **SonoptixECHO** data from video bags, 
+> **Note:** The main sonar analysis pipeline focuses on **SonoptixECHO** data from video bags, 
 > which explains why sonar CSV files have the `_video.csv` suffix throughout the codebase.
-
-**Verification:** Run `utils/verify_sonar_bag_source.py` to confirm sonar topic distribution across your bag files.
 
 ### 2.2 Export Process
 
@@ -504,1578 +502,321 @@ else:
 
 ## 5. Image Analysis & Net Detection
 
-### 5.1 Overview
+Cone rasters from the previous stage are inspected by `utils/sonar_analysis.py::analyze_npz_sequence()`. The routine merges `IMAGE_PROCESSING_CONFIG` and `TRACKING_CONFIG`, instantiates a `NetTracker`, and iterates the requested frame indices. Each loop produces a `FrameAnalysisResult` entry that captures detection measurements and tracker status.
 
-The image analysis pipeline processes Cartesian sonar frames to detect and track underwater net structures using **signal-strength independent computer vision algorithms**. The system employs **structure tensor analysis**, **elliptical kernel convolution**, and **geometric constraint-based contour selection** to achieve robust detection across varying sonar conditions.
+### 5.1 Per-frame pipeline (`analyze_npz_sequence`)
 
-**Key Mathematical Components:**
-1. **Structure Tensor Analysis** for edge detection and orientation estimation
-2. **Adaptive Elliptical Kernel Convolution** for linear structure enhancement
-3. **Geometric Contour Scoring** with multi-criteria evaluation
-4. **Kalman-like Temporal Smoothing** for stable ellipse tracking
-5. **Geometric Distance Calculation** using ellipse major axis intersection
+For every frame the analyzer performs:
 
-### 5.2 Structure Tensor Analysis for Edge Detection
+1. **Grayscale preparation** – `to_uint8_gray()` rescales the floating-point cone into an 8-bit image (0–255) so OpenCV morphology works deterministically.
+2. **Binary projection** – threshold each pixel (`binary_threshold`) to isolate strong reflectors; the result is a 0/255 mask that is intensity-invariant.
+3. **Edge post-processing** – call `preprocess_edges(binary, config)` which now includes an advanced momentum merge path; on failure the raw binary mask acts as the edge map (see §5.2).
+4. **Tracking update** – pass the processed edges to `tracker.find_and_update()` which returns the best contour (or `None`) and updates internal state (see §5.3–§5.4).
+5. **Distance extraction** – `tracker.calculate_distance()` converts the tracked ellipse into a perpendicular (red-line) pixel distance plus heading angle (§5.5).
+6. **Meter conversion** – scale the pixel distance by `(extent[3] - extent[2]) / image_height` and add `extent[2]` to recover the absolute range in meters.
+7. **Result logging** – append a dict with frame index, timestamp, `distance_pixels`, `distance_meters`, `angle_degrees`, `detection_success`, `tracker.get_status()`, and contour area (0 when absent).
 
-**Implementation:** `utils/sonar_image_analysis.py::preprocess_edges()`
+Progress is printed every 50 frames; optional CSV export mirrors the in-memory DataFrame.
 
-The pipeline begins with **signal-strength independent processing** using structure tensor analysis to detect edges and their orientations without relying on intensity gradients.
+### 5.2 Binary & morphological enhancement (`preprocess_edges`)
 
-#### Step 1: Binary Conversion
+`utils.image_enhancement.preprocess_edges()` consumes the 8-bit cone frame and outputs a tuple `(raw_edges, enhanced_edges)`:
 
-```python
-# Convert to binary immediately - eliminates signal strength dependency
-binary_threshold = cfg.get('binary_threshold', 128)
-binary_frame = (frame_u8 > binary_threshold).astype(np.uint8) * 255
-```
+- **Binary projection** – re-applies the global `binary_threshold` to guarantee the input is strictly 0/255 regardless of caller state.
+- **Adaptive momentum merge (advanced mode)** – when `use_advanced_momentum_merging=True`, the function:
+  - Runs structure-tensor analysis on a downscaled copy to obtain orientation and linearity maps.
+  - Keeps only the strongest angle bins (coverage and linearity driven) and builds ROI-specific elliptical kernels aligned with each bin.
+  - Convolves those ROIs, blends the responses using linearity weights, and combines them with a Gaussian baseline (momentum boost + soft clipping) to emphasize elongated net strands while suppressing noise.
+- **Basic enhancement fallback** – if the advanced flag is disabled:
+  - Uses an elliptical dilation (`basic_dilation_kernel_size`, `basic_dilation_iterations`) to grow the binary mask, or optionally a Gaussian blur when dilation is disabled.
+  - Produces a smoothed mask that still preserves structural continuity.
+- **Laplacian edge extraction** – both the original binary frame and the enhanced mask are convolved with a fixed 3×3 Laplacian kernel; outputs are binarized to 0/255 to obtain `raw_edges` and `enhanced_edges`.
+- **Morphological cleanup** – applies closing (`morph_close_kernel`) and dilation (`edge_dilation_iterations`) to `enhanced_edges`, bridging gaps and thickening lines so contours remain connected during tracking.
+- **Error handling** – any exception bubbles up to `analyze_npz_sequence`, which then falls back to using the plain binary mask as the edge image, guaranteeing continuity in the detection loop.
 
-**Mathematical Foundation:** Removes all intensity-based variability, focusing purely on geometric structure.
+The analyzer typically discards `raw_edges` and relies on the post-processed `enhanced_edges`, but returning both permits debugging and visualization of pre/post enhancement effects.
 
-#### Step 2: Structure Tensor Computation
+### 5.3 NetTracker architecture
 
-**Structure Tensor Definition:**
-The structure tensor $S$ at each pixel location $(x,y)$ is computed from the gradient field:
+`NetTracker` (defined in `utils/sonar_tracking.py`) maintains smoothed ellipse parameters (`center`, `size`, `angle`) and a loss counter. Its core responsibilities are:
 
-$$S(x,y) = \begin{pmatrix}
-J_{xx} & J_{xy} \\
-J_{xy} & J_{yy}
-\end{pmatrix}$$
+- Restricting search to plausible regions.
+- Selecting the most likely net contour.
+- Smoothing ellipse parameters across time.
+- Producing stabilized distance/angle outputs (`calculate_distance`).
+- Resetting when detections are lost for too many frames.
 
-where the components are computed using Gaussian-weighted gradients:
+### 5.4 Masked contour search
 
-$$J_{xx} = G_\sigma * (I_x^2), \quad J_{xy} = G_\sigma * (I_x I_y), \quad J_{yy} = G_\sigma * (I_y^2)$$
+`find_and_update(edges, shape)` begins by building an optional search mask through `_get_search_mask()`:
 
-**Implementation:**
-```python
-# Compute gradients using Sobel operators
-grad_x = cv2.Sobel(binary_frame, cv2.CV_32F, 1, 0, ksize=3)
-grad_y = cv2.Sobel(binary_frame, cv2.CV_32F, 0, 1, ksize=3)
+- Expands the last-known ellipse using `ellipse_expansion_factor`, inflating further when `frames_lost` grows (controlled by `aoi_decay_factor`).
+- Optionally merges an oriented corridor (`_make_corridor_mask`) aligned with the major axis, whose width/length are scaled by `corridor_band_k` and `corridor_length_factor`.
 
-# Compute structure tensor components with Gaussian smoothing
-sigma = cfg.get('structure_tensor_sigma', 1.0)
-J_xx = cv2.GaussianBlur(grad_x * grad_x, (0, 0), sigma)
-J_xy = cv2.GaussianBlur(grad_x * grad_y, (0, 0), sigma)
-J_yy = cv2.GaussianBlur(grad_y * grad_y, (0, 0), sigma)
-```
+The mask is `bitwise_and`-ed with the edge image to suppress distant clutter before `cv2.findContours` (retrieval mode `RETR_LIST`). `_find_best_contour()` filters candidates:
 
-#### Step 3: Eigenvalue Analysis for Edge Detection
+- Dynamically lowers `min_contour_area` when already tracking.
+- Scores by area and proximity to the smoothed center (encouraging temporal continuity).
+- Retains the contour with the highest score.
 
-**Eigenvalue Decomposition:**
-For each pixel, solve the eigenvalue problem:
+If no contour survives, `frames_lost` increments and `_reset()` triggers once it exceeds `max_frames_without_detection`.
 
-$$S \vec{v} = \lambda \vec{v}$$
+### 5.5 Ellipse fitting and smoothing
 
-The eigenvalues $\lambda_1, \lambda_2$ (with $\lambda_1 \geq \lambda_2$) indicate:
-- **Large $\lambda_1$**: Strong edges present
-- **Small $\lambda_2$**: Coherent edge orientation
-- **High coherence** $c = \frac{\lambda_1 - \lambda_2}{\lambda_1 + \lambda_2}$: Well-defined linear structures
+When a contour is accepted (`len ≥ 5`):
 
-**Edge Detection Criterion:**
-```python
-# Compute coherence measure
-coherence = (J_xx - J_yy)**2 + 4 * J_xy**2
-coherence = np.sqrt(coherence)
+1. `cv2.fitEllipse` yields `(center, size, angle)`.
+2. Exponential smoothing applies separate alphas (`center_smoothing_alpha`, `ellipse_size_smoothing_alpha`, `ellipse_orientation_smoothing_alpha`).
+3. Center deltas are clamped by `ellipse_max_movement_pixels`.
+4. Angle smoothing handles ±180° wrap-around by normalizing differences into ±90° before blending.
 
-# Edge strength threshold
-edge_threshold = cfg.get('edge_strength_threshold', 50.0)
-edges = (coherence > edge_threshold).astype(np.uint8) * 255
-```
+These operations keep the tracker stable despite noisy detections.
 
-### 5.3 Adaptive Elliptical Kernel Convolution
+### 5.6 Distance and angle estimation
 
-**Implementation:** `adaptive_linear_momentum_merge_fast()`
+`calculate_distance(width, height)` derives measurement outputs only when an ellipse is available:
 
-The system applies **adaptive morphological operations** that dynamically adjust kernel shapes based on detected linear structures using elliptical kernel convolution.
+- Treats the fitted angle as the major axis; the “red line” used operationally is the perpendicular (`angle + 90°`).
+- Solves for the intersection between this red line and the image vertical centerline; the resulting y-coordinate (clipped to frame bounds) is the pixel distance.
+- Caps per-frame distance jumps via `max_distance_change_pixels` and stores the last value for future smoothing.
+- Returns the stabilized pixel distance and the red-line angle (degrees). If state is missing, it falls back to the last distance and `None` for angle.
 
-#### Mathematical Foundation
+### 5.7 Result packaging
 
-**Elliptical Kernel Generation:**
-For each pixel, create an elliptical kernel oriented along the dominant gradient direction:
+The analysis loop attaches additional metadata:
 
-$$\theta = \frac{1}{2} \arctan\left(\frac{2J_{xy}}{J_{xx} - J_{yy}}\right)$$
+- Converts pixels to meters using `(extent[3] - extent[2]) / image_height`.
+- Records contour area (0 when absent), detection success, and `tracker.get_status()` which reports `"TRACKED"`, `"SEARCHING (lost_count/limit)"`, or `"LOST"`.
+- Optionally writes a CSV summary when `save_outputs=True`.
 
-The kernel elongation $e$ is determined by the coherence measure:
-
-$$e = 1 + k \cdot c$$
-
-where $c$ is the coherence and $k$ is the maximum elongation factor.
-
-**Kernel Construction:**
-```python
-def create_elliptical_kernel(theta, elongation, base_radius):
-    # Semi-major and semi-minor axes
-    a = base_radius * elongation  # Major axis
-    b = base_radius / elongation  # Minor axis
-
-    # Generate elliptical kernel points
-    t = np.linspace(0, 2*np.pi, 32)
-    x = a * np.cos(t) * np.cos(theta) - b * np.sin(t) * np.sin(theta)
-    y = a * np.cos(t) * np.sin(theta) + b * np.sin(t) * np.cos(theta)
-
-    # Create binary kernel mask
-    kernel_size = int(2 * base_radius * elongation) + 1
-    kernel = np.zeros((kernel_size, kernel_size), np.uint8)
-
-    # Center coordinates
-    cx, cy = kernel_size // 2, kernel_size // 2
-
-    # Fill elliptical region
-    for i in range(len(x)):
-        px = int(cx + x[i])
-        py = int(cy + y[i])
-        if 0 <= px < kernel_size and 0 <= py < kernel_size:
-            kernel[py, px] = 1
-
-    return kernel
-```
-
-#### Adaptive Enhancement Algorithm
-
-**Multi-orientation Convolution:**
-```python
-# Test multiple orientations
-angle_steps = cfg.get('adaptive_angle_steps', 9)
-responses = []
-
-for angle_idx in range(angle_steps):
-    theta = angle_idx * np.pi / angle_steps
-
-    # Create elliptical kernel
-    kernel = create_elliptical_kernel(theta, elongation, base_radius)
-
-    # Convolve with binary image
-    response = cv2.filter2D(binary_frame.astype(np.float32), -1, kernel.astype(np.float32))
-    responses.append(response)
-
-# Select maximum response across orientations
-enhanced = np.max(responses, axis=0)
-```
-
-**Momentum Boosting:**
-High-coherence regions receive additional enhancement:
-
-```python
-momentum_boost = cfg.get('momentum_boost', 1.5)
-linearity_threshold = cfg.get('adaptive_linearity_threshold', 0.3)
-
-# Boost regions with high linearity
-boost_mask = (coherence > linearity_threshold * coherence.max()).astype(np.float32)
-enhanced = enhanced * (1 + momentum_boost * boost_mask)
-```
-
-### 5.4 Contour Detection and Geometric Scoring
-
-**Implementation:** `utils/sonar_image_analysis.py::SonarDataProcessor.analyze_frame()`
-
-#### Contour Extraction
-
-```python
-contours, hierarchy = cv2.findContours(edges_processed, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-```
-
-#### Geometric Contour Scoring
-
-**Implementation:** `select_best_contour_core()`
-
-**Multi-criteria Scoring Function:**
-Each contour receives a score based on geometric properties optimized for net detection:
-
-$$S_{total} = S_{geometric} \cdot S_{temporal} \cdot S_{spatial}$$
-
-**Geometric Score ($S_{geometric}$):**
-```python
-# Area and elongation metrics
-area = cv2.contourArea(contour)
-perimeter = cv2.arcLength(contour, True)
-circularity = 4 * np.pi * area / (perimeter * perimeter) if perimeter > 0 else 0
-
-# Ellipse fitting for elongation
-if len(contour) >= 5:
-    ellipse = cv2.fitEllipse(contour)
-    (cx, cy), (MA, ma), angle = ellipse
-    elongation = MA / ma if ma > 0 else 1.0
-else:
-    # Fallback: bounding rectangle aspect ratio
-    x, y, w, h = cv2.boundingRect(contour)
-    elongation = max(w, h) / min(w, h) if min(w, h) > 0 else 1.0
-
-# Geometric score favors elongated, substantial contours
-S_geometric = area * elongation * (1 - circularity)  # Penalize circular shapes
-```
-
-**Temporal Consistency Score ($S_{temporal}$):**
-```python
-# AOI overlap boost
-aoi_boost = cfg.get('aoi_boost_factor', 2.0)
-min_overlap = cfg.get('min_aoi_overlap_percent', 0.7)
-
-if current_aoi is not None:
-    overlap_ratio = calculate_contour_aoi_overlap(contour, current_aoi)
-    if overlap_ratio >= min_overlap:
-        S_temporal = aoi_boost
-    else:
-        S_temporal = 1.0
-else:
-    S_temporal = 1.0
-```
-
-**Spatial Consistency Score ($S_{spatial}$):**
-```python
-# Distance penalty from previous detection
-if last_center is not None:
-    current_center = get_contour_centroid(contour)
-    distance = np.sqrt((current_center[0] - last_center[0])**2 +
-                      (current_center[1] - last_center[1])**2)
-
-    max_penalty_distance = cfg.get('max_penalty_distance_pixels', 50.0)
-    distance_factor = max(0.01, 1.0 - distance / max_penalty_distance)
-    S_spatial = distance_factor
-else:
-    S_spatial = 1.0
-```
-
-**Final Score Computation:**
-```python
-final_score = S_geometric * S_temporal * S_spatial
-```
-
-### 5.5 Kalman-like Temporal Smoothing for Ellipse Tracking
-
-**Implementation:** `create_smooth_elliptical_aoi()`
-
-The system maintains **temporal continuity** through Kalman-like smoothing of elliptical tracking regions.
-
-#### Ellipse Parameter State Vector
-
-The ellipse state is represented as:
-
-$$\vec{x} = \begin{pmatrix} c_x \\ c_y \\ w \\ h \\ \theta \end{pmatrix}$$
-
-where:
-- $c_x, c_y$: Ellipse center coordinates
-- $w, h$: Ellipse width and height
-- $\theta$: Ellipse orientation angle
-
-#### Temporal Smoothing Algorithm
-
-**Exponential Smoothing with Movement Limiting:**
-```python
-def smooth_ellipse_parameters(current_params, previous_params, alpha, max_movement):
-    cx_curr, cy_curr, w_curr, h_curr, theta_curr = current_params
-    cx_prev, cy_prev, w_prev, h_prev, theta_prev = previous_params
-
-    # Center smoothing with movement limiting
-    dx = cx_curr - cx_prev
-    dy = cy_curr - cy_prev
-    center_distance = np.sqrt(dx**2 + dy**2)
-
-    if center_distance > max_movement:
-        # Limit movement to maximum allowed distance
-        scale = max_movement / center_distance
-        dx *= scale
-        dy *= scale
-
-    # Apply exponential smoothing
-    cx_smooth = cx_prev + alpha * dx
-    cy_smooth = cy_prev + alpha * dy
-    w_smooth = w_prev + alpha * (w_curr - w_prev)
-    h_smooth = h_prev + alpha * (h_curr - h_prev)
-
-    # Angle smoothing with wraparound handling
-    theta_diff = ((theta_curr - theta_prev + 180) % 360) - 180
-    theta_smooth = theta_prev + alpha * theta_diff
-
-    return cx_smooth, cy_smooth, w_smooth, h_smooth, theta_smooth
-```
-
-**Mathematical Properties:**
-- **Stability:** Exponential smoothing provides bounded convergence
-- **Adaptability:** Alpha parameter controls responsiveness to changes
-- **Movement Limiting:** Prevents erratic jumps due to noise
-- **Angle Continuity:** Wraparound handling prevents discontinuities at 0°/360°
-
-#### AOI Expansion for Robust Tracking
-
-```python
-expansion_factor = cfg.get('ellipse_expansion_factor', 0.3)
-w_expanded = w_smooth * (1 + expansion_factor)
-h_expanded = h_smooth * (1 + expansion_factor)
-```
-
-**Purpose:** Creates a search region larger than the detected contour to handle:
-- Minor object movement between frames
-- Partial occlusions
-- Detection variability
-
-### 5.6 Geometric Distance Calculation
-
-**Implementation:** `_distance_angle_from_smoothed_center()`
-
-#### Distance Measurement Using Major Axis Intersection
-
-**Mathematical Approach:**
-The distance is calculated by finding the intersection of the ellipse's major axis with the sonar coordinate system origin.
-
-**Ellipse Representation:**
-An ellipse centered at $(c_x, c_y)$ with major axis $MA$, minor axis $ma$, and orientation $\theta$:
-
-$$\frac{((x - c_x)\cos\theta + (y - c_y)\sin\theta)^2}{MA^2} + \frac{((x - c_x)\sin\theta - (y - c_y)\cos\theta)^2}{ma^2} = 1$$
-
-**Major Axis Line:**
-The major axis line equation in parametric form:
-
-$$\vec{p}(t) = \begin{pmatrix} c_x \\ c_y \end{pmatrix} + t \cdot \begin{pmatrix} \cos\theta \\ \sin\theta \end{pmatrix} \cdot \frac{MA}{2}$$
-
-**Distance to Sonar Origin:**
-The sonar origin is typically at the bottom center of the image. The distance is the projection of the ellipse center onto the major axis, plus the extent along the major axis.
-
-```python
-def calculate_geometric_distance(contour, smoothed_center, angle_rad):
-    cx, cy = smoothed_center
-
-    # Major axis unit vector
-    major_axis = np.array([np.cos(angle_rad), np.sin(angle_rad)])
-
-    # Project all contour points onto major axis
-    distances = []
-    for point in contour:
-        px, py = point[0]
-        point_vector = np.array([px - cx, py - cy])
-        projection = np.dot(point_vector, major_axis)
-        distances.append(projection)
-
-    # Distance is the maximum absolute projection
-    distance_pixels = np.max(np.abs(distances))
-
-    return distance_pixels
-```
-
-#### Angle Calculation
-
-```python
-# Angle of major axis relative to horizontal
-angle_degrees = np.degrees(angle_rad)
-```
-
-#### Stability Constraints
-
-**Distance Change Limiting:**
-```python
-max_change = cfg.get('max_distance_change_pixels', 20)
-if abs(distance_pixels - previous_distance_pixels) > max_change:
-    # Clamp to maximum allowed change
-    direction = 1 if distance_pixels > previous_distance_pixels else -1
-    distance_pixels = previous_distance_pixels + (direction * max_change)
-```
-
-**Mathematical Rationale:** Prevents sudden jumps due to:
-- Contour detection noise
-- Partial occlusions
-- Temporary tracking loss
-
-### 5.7 Tracking State Management
-
-**Implementation:** `SonarDataProcessor.reset_tracking()` and state variables
-
-The processor maintains **temporal state** for consistent tracking:
-
-```python
-class SonarDataProcessor:
-    def __init__(self):
-        self.smoothed_center = None          # Smoothed ellipse center (cx, cy)
-        self.current_aoi = None              # Current AOI ellipse parameters
-        self.previous_ellipse = None         # Previous ellipse (cx, cy, w, h, theta)
-        self.previous_distance_pixels = None # Previous distance measurement
-        self.last_center = None              # Last detected center for spatial scoring
-        self.frame_count = 0                 # Frame counter for temporal analysis
-```
-
-**State Update Equations:**
-1. **Center Smoothing:** $\vec{c}_{smooth} = \vec{c}_{prev} + \alpha (\vec{c}_{curr} - \vec{c}_{prev})$
-2. **AOI Evolution:** Elliptical regions adapt to object movement with expansion
-3. **Distance Stability:** Change limiting: $\Delta d \leq d_{max}$
-4. **Temporal Memory:** Previous frame information guides current detection
-
-### 5.8 Configuration Parameters
-
-**Image Processing:** `utils/sonar_config.py::IMAGE_PROCESSING_CONFIG`
-
-```python
-IMAGE_PROCESSING_CONFIG = {
-    'binary_threshold': 128,              # Binary conversion threshold
-    'structure_tensor_sigma': 1.0,        # Gaussian smoothing for structure tensor
-    'edge_strength_threshold': 50.0,      # Minimum coherence for edge detection
-    'adaptive_base_radius': 2,            # Base kernel radius for elliptical convolution
-    'adaptive_max_elongation': 4,         # Maximum kernel elongation factor
-    'adaptive_linearity_threshold': 0.3,  # Linearity detection sensitivity
-    'momentum_boost': 1.5,                # Enhancement strength for linear structures
-    'adaptive_angle_steps': 9,            # Angular resolution for multi-orientation testing
-    'min_contour_area': 100,              # Minimum contour size (pixels)
-    'morph_close_kernel': 3,              # Morphological closing kernel size
-    'edge_dilation_iterations': 1,        # Edge thickening iterations
-    'max_distance_change_pixels': 20,     # Distance stability limit
-    'aoi_boost_factor': 2.0,              # Temporal consistency boost
-    'min_aoi_overlap_percent': 0.7,       # Minimum AOI overlap for boost
-    'max_penalty_distance_pixels': 50.0,  # Spatial consistency penalty distance
-}
-```
-
-**Tracking:** `utils/sonar_config.py::TRACKING_CONFIG`
-
-```python
-TRACKING_CONFIG = {
-    'use_elliptical_aoi': True,           # Enable elliptical tracking regions
-    'ellipse_expansion_factor': 0.3,      # AOI expansion (30% larger than fitted ellipse)
-    'center_smoothing_alpha': 0.1,        # Center position smoothing (lower = smoother)
-    'ellipse_smoothing_alpha': 0.8,       # Ellipse parameter smoothing
-    'ellipse_max_movement_pixels': 2.0,   # Maximum center movement per frame
-    'max_frames_outside_aoi': 5,          # Frames allowed outside AOI before reset
-}
-```
-
-### 5.9 Algorithm Advantages and Mathematical Properties
-
-**1. Signal-Strength Independence:**
-- Binary conversion eliminates intensity-based variability
-- Structure tensor analysis focuses on geometric coherence
-- Consistent performance across different sonar power levels
-
-**2. Mathematical Robustness:**
-- **Structure Tensor:** Provides rotationally invariant edge detection
-- **Elliptical Convolution:** Adapts kernel shape to local structure
-- **Geometric Scoring:** Multi-criteria evaluation prevents false positives
-
-**3. Temporal Stability:**
-- Kalman-like smoothing provides bounded convergence
-- Movement limiting prevents erratic tracking
-- AOI expansion handles detection variability
-
-**4. Computational Efficiency:**
-- Binary operations reduce computational complexity
-- Structure tensor computation is O(N) per pixel
-- Elliptical kernel convolution leverages separability
-
-**5. Geometric Accuracy:**
-- Ellipse fitting provides sub-pixel accuracy
-- Major axis intersection gives precise distance measurements
-- Angle calculations account for orientation uncertainty
-
-### 5.10 Processing Workflow with Mathematical Operations
-
-```
-Input Frame (uint8)
-    ↓ Binary Conversion (eliminates signal dependency)
-    ↓ Structure Tensor Analysis (J_xx, J_xy, J_yy computation)
-    ↓ Eigenvalue Analysis (coherence = (λ₁ - λ₂)/(λ₁ + λ₂))
-    ↓ Adaptive Elliptical Kernel Convolution (orientation-dependent enhancement)
-    ↓ Morphological Processing (connectivity preservation)
-    ↓ Contour Extraction (cv2.findContours)
-    ↓ Geometric Scoring (S = S_geometric × S_temporal × S_spatial)
-    ↓ Ellipse Fitting (cv2.fitEllipse for MA/ma/θ estimation)
-    ↓ Kalman-like Smoothing (exponential filtering with movement limits)
-    ↓ AOI Expansion (30% size increase for robustness)
-    ↓ Geometric Distance (major axis projection: d = max|proj_points|)
-    ↓ Stability Constraints (Δd ≤ d_max per frame)
-    ↓ State Update (temporal memory for next frame)
-    ↓ Output: FrameAnalysisResult with distance_m, angle_deg, confidence
-```
+This combination of binary preprocessing, masked contour search, smoothed ellipse tracking, and geometric distance projection enables robust detection of net-like structures across sonar frames.
 
 ---
 
 ## 6. Distance Measurement & Pixel-to-Meter Conversion
 
-### 6.1 Geometric Distance Measurement
+### 6.1 Overview
 
-**Mathematical Foundation:** The distance measurement uses the **major axis of the fitted ellipse** as a geometric proxy for the net's vertical extent in the sonar coordinate system.
+Accurate distance measurement is critical for sonar applications. This section details the methods used to convert pixel measurements from the sonar images into real-world meters.
 
-#### Ellipse Representation in Cartesian Coordinates
+### 6.2 Measurement Principles
 
-An ellipse fitted to the detected contour is represented by:
+Sonar images provide distance information in pixels, which must be calibrated to physical units. The conversion relies on:
 
-$$\frac{((x - c_x)\cos\theta + (y - c_y)\sin\theta)^2}{MA^2} + \frac{((x - c_x)\sin\theta - (y - c_y)\cos\theta)^2}{ma^2} = 1$$
+- **NPZ-provided spatial extent:** Each NPZ file contains an `extent` tuple defining the spatial bounds in meters: `(x_min, x_max, y_min, y_max)`.
+- **Image dimensions:** The pixel dimensions of the sonar image (height and width).
+- **Calibration equations** that translate pixel coordinates to meters, considering the sonar's field of view and range settings.
 
-where:
-- $(c_x, c_y)$: Ellipse center coordinates
-- $MA, ma$: Major and minor axis lengths
-- $\theta$: Rotation angle from horizontal
+### 6.3 Pixel-to-Meter Conversion Formula
 
-#### Major Axis Distance Calculation
-
-**Implementation:** `utils/sonar_image_analysis.py::_distance_angle_from_smoothed_center()`
-
-The distance is computed by projecting contour points onto the ellipse's major axis:
+Given a pixel coordinate `(px, py)` in the sonar image, the conversion to meters `(x_m, y_m)` is performed as:
 
 ```python
-# Major axis unit vector
-major_axis_vector = np.array([np.cos(angle_rad), np.sin(angle_rad)])
-
-# Project all contour points onto major axis
-distances = []
-for point in contour:
-    px, py = point[0]
-    # Vector from ellipse center to contour point
-    point_vector = np.array([px - smoothed_center_x, py - smoothed_center_y])
-    # Projection onto major axis
-    projection = np.dot(point_vector, major_axis_vector)
-    distances.append(projection)
-
-# Distance = maximum absolute projection
-distance_pixels = np.max(np.abs(distances))
+x_m = extent[0] + (px / image_width) * (extent[1] - extent[0])
+y_m = extent[2] + (py / image_height) * (extent[3] - extent[2])
 ```
 
-**Mathematical Derivation:**
-For a point $\vec{p} = (p_x, p_y)$ and ellipse center $\vec{c} = (c_x, c_y)$, the projection onto the major axis unit vector $\vec{u} = (\cos\theta, \sin\theta)$ is:
+Where:
+- `extent[0]`, `extent[1]` are the minimum and maximum x-coordinates in meters.
+- `extent[2]`, `extent[3]` are the minimum and maximum y-coordinates in meters.
+- `image_width`, `image_height` are the dimensions of the sonar image in pixels.
 
-$$d = \vec{u} \cdot (\vec{p} - \vec{c})$$
+### 6.4 Distance Smoothing and Stabilization
 
-The maximum absolute projection gives the extent of the contour along the major axis, providing a robust distance measure that is insensitive to minor contour irregularities.
+To mitigate noise and sudden jumps in distance measurements:
 
-### 6.2 Coordinate System Transformations
+- A moving average or exponential smoothing is applied to the distance time series.
+- The smoothing parameters can be configured based on the desired responsiveness and stability.
 
-#### Sonar Polar-to-Cartesian Mapping
+### 6.5 Implementation
 
-**Mathematical Foundation:** Sonar data is acquired in polar coordinates and rasterized to Cartesian coordinates for image analysis.
-
-**Polar Coordinate System:**
-- **Range ($r$)**: Distance from sonar transducer (meters)
-- **Bearing ($\phi$)**: Angle from forward direction (radians)
-- **Intensity ($I(r,\phi)$)**: Echo strength at each range-bearing pair
-
-**Cartesian Transformation:**
-```python
-def polar_to_cartesian(r, phi, origin_x, origin_y):
-    """
-    Transform polar coordinates to Cartesian
-    
-    Parameters:
-    r: range in meters
-    phi: bearing in radians  
-    origin_x, origin_y: Cartesian origin coordinates
-    """
-    x = origin_x + r * np.sin(phi)  # Horizontal displacement
-    y = origin_y + r * np.cos(phi)  # Vertical displacement (forward = +y)
-    return x, y
-```
-
-**Field of View Considerations:**
-For a sonar with field of view $FOV$ degrees, the valid bearing range is:
-
-$$-\frac{FOV}{2} \leq \phi \leq +\frac{FOV}{2}$$
-
-#### Extent Calculation During Rasterization
-
-**Implementation:** `utils/sonar_utils.py::cone_raster_like_display_cell()`
-
-The extent defines the mapping between pixel coordinates and world coordinates:
-
-```python
-# Define coordinate bounds
-x_min = -np.sin(np.radians(FOV/2)) * display_range_max
-x_max = +np.sin(np.radians(FOV/2)) * display_range_max
-y_min = range_min
-y_max = display_range_max
-
-extent = (x_min, x_max, y_min, y_max)
-```
-
-**Pixel-to-Meter Conversion Factors:**
-```python
-# Compute scaling factors
-meters_per_pixel_x = (x_max - x_min) / cone_width_pixels
-meters_per_pixel_y = (y_max - y_min) / cone_height_pixels
-
-# Average scaling (assuming isotropic pixels)
-meters_per_pixel_avg = (meters_per_pixel_x + meters_per_pixel_y) / 2
-```
-
-### 6.3 Pixel-to-Meter Distance Conversion
-
-**Mathematical Accuracy:** The conversion maintains geometric consistency by using the rasterization extent.
-
-#### Distance Conversion Formula
-
-```python
-# Convert pixel distance to meters
-distance_meters = distance_pixels * meters_per_pixel_avg
-```
-
-**Error Analysis:**
-- **Geometric Accuracy:** The extent is computed deterministically from sonar parameters (FOV, range), ensuring consistent scaling
-- **Isotropic Approximation:** Using average meters-per-pixel assumes square pixels, which is valid for most display applications
-- **Temporal Consistency:** Same extent used across all frames ensures distance measurements are comparable
-
-#### Coordinate System Alignment
-
-**Sonar Coordinate System:**
-- Origin: Sonar transducer position
-- X-axis: Horizontal (positive right)
-- Y-axis: Along-track (positive forward)
-- Z-axis: Vertical (positive up, not shown in 2D display)
-
-**Display Coordinate System:**
-- Origin: Bottom-center of cone display
-- X-axis: Horizontal (positive right)
-- Y-axis: Range (positive up from transducer)
-
-### 6.4 Time Series Analysis and Stability
-
-**Implementation:** `utils/sonar_image_analysis.py::analyze_red_line_distance_over_time()`
-
-#### Temporal Distance Series
-
-For each frame $t$ in the sequence:
-
-1. **Detection:** Apply image analysis pipeline
-2. **Measurement:** Compute $d_t^{px}$ (pixels) and $d_t^m$ (meters)
-3. **Storage:** Record with timestamp and metadata
-
-**Output Data Structure:**
-```python
-analysis_results = pd.DataFrame({
-    'frame_idx': int,                    # Frame index
-    'timestamp': pd.Timestamp,           # UTC timestamp
-    'distance_pixels': float,           # Distance in pixels
-    'distance_meters': float,           # Distance in meters
-    'ellipse_center_x': float,          # Ellipse center X
-    'ellipse_center_y': float,          # Ellipse center Y
-    'ellipse_major_axis': float,        # Major axis length
-    'ellipse_minor_axis': float,        # Minor axis length
-    'ellipse_angle_deg': float,         # Orientation angle
-    'detection_confidence': float,      # Detection quality score
-    'processing_time_ms': float,        # Computation time
-})
-```
-
-#### Stability Analysis
-
-**Distance Change Limiting:**
-```python
-max_change_pixels = cfg.get('max_distance_change_pixels', 20)
-
-if abs(distance_pixels - previous_distance_pixels) > max_change_pixels:
-    # Limit change to prevent jumps
-    direction = np.sign(distance_pixels - previous_distance_pixels)
-    distance_pixels = previous_distance_pixels + direction * max_change_pixels
-```
-
-**Mathematical Rationale:**
-- **Outlier Rejection:** Prevents sudden jumps from detection errors
-- **Temporal Smoothing:** Maintains measurement continuity
-- **Physical Constraints:** Limits to realistic net movement speeds
-
-### 6.5 Accuracy Validation and Error Bounds
-
-#### Geometric Error Sources
-
-1. **Ellipse Fitting Error:** OpenCV `fitEllipse()` provides sub-pixel accuracy
-2. **Contour Detection Variability:** Depends on image quality and thresholding
-3. **Temporal Jitter:** Frame-to-frame measurement variation
-4. **Coordinate System Misalignment:** Sonar mounting and calibration
-
-#### Error Quantification
-
-**Pixel Accuracy:** $\pm 0.5$ pixels (sub-pixel fitting)
-**Angular Accuracy:** $\pm 2^\circ$ (ellipse orientation)
-**Temporal Stability:** $\pm 5$ pixels (after smoothing)
-
-**Conversion to Meters:**
-```python
-# Error propagation
-pixel_error_m = pixel_error * meters_per_pixel_avg
-angular_error_rad = np.radians(angular_error_deg)
-
-# Total distance error (simplified)
-total_error_m = np.sqrt(pixel_error_m**2 + (distance_m * angular_error_rad)**2)
-```
-
-#### Validation Against Ground Truth
-
-**DVL Comparison:** Correlation analysis between sonar and DVL distance measurements provides validation of absolute accuracy.
-    'distance_m': float,
-    'ellipse_cx': float,
-    'ellipse_cy': float,
-    'ellipse_MA': float,
-    'ellipse_ma': float,
-    'ellipse_angle': float,
-    ...
-}
-```
+**Key Functions:**
+- `utils/distance_measurement.py::convert_pixel_to_meter()`
+- `utils/distance_measurement.py::smooth_distance_series()`
 
 ---
 
 ## 7. DVL Data Integration
 
-### 7.1 Sensor Fusion Mathematics
+### 7.1 Overview
 
-**Problem Statement:** Combine measurements from multiple sensors with different temporal sampling rates and coordinate systems.
+The Doppler Velocity Log (DVL) provides high-accuracy velocity and distance measurements that complement the sonar data. Integrating DVL data enhances the robustness and reliability of the distance estimates.
 
-#### Multisensor Data Alignment
+### 7.2 DVL Data Processing
 
-**Mathematical Framework:** Temporal synchronization of heterogeneous sensor data streams.
+DVL data is processed to extract:
+- **Bottom track velocity:** The velocity of the sensor over the seafloor.
+- **Water track velocity:** The velocity of the water current.
 
-**Sensor Data Types:**
-- **Sonar:** $d_s(t)$ - Distance measurements at irregular intervals
-- **DVL Navigation:** $d_n(t), \phi_n(t)$ - Distance and orientation at high frequency
-- **DVL Altimeter:** $h(t)$ - Height above seafloor
-- **Camera:** $I_c(t)$ - Visual data when available
+For distance measurements, the bottom track data is primarily used.
 
-#### Timestamp Normalization
+### 7.3 Integration with Sonar Data
 
-All timestamps converted to UTC for consistent temporal reference:
+The integration process involves:
+1. Time synchronization: Aligning DVL data timestamps with the sonar data timestamps.
+2. Spatial transformation: Converting DVL measurements from the body frame of the ROV to the world frame.
+3. Data fusion: Combining DVL and sonar measurements to produce a unified distance estimate.
 
-```python
-# Normalize all timestamps to UTC
-sonar_ts = pd.to_datetime(sonar_data['ts_utc'], utc=True)
-dvl_ts = pd.to_datetime(dvl_data['ts_utc'], utc=True)
-camera_ts = pd.to_datetime(camera_data['ts_utc'], utc=True)
-```
+### 7.4 Implementation
 
-### 7.2 Temporal Synchronization Algorithms
-
-**Implementation:** `utils/net_distance_analysis.py::synchronize_measurements()`
-
-#### Nearest-Neighbor Interpolation
-
-**Mathematical Approach:** For each sonar measurement time $t_s$, find the closest DVL measurement in time.
-
-```python
-def temporal_nearest_neighbor(sonar_times, dvl_times, dvl_values, max_tolerance_s=1.0):
-    """
-    Synchronize DVL data to sonar timestamps using nearest neighbor
-    
-    Parameters:
-    sonar_times: Array of sonar measurement times
-    dvl_times: Array of DVL measurement times  
-    dvl_values: Array of DVL measurement values
-    max_tolerance_s: Maximum allowed time difference
-    """
-    synchronized_values = []
-    
-    for ts in sonar_times:
-        # Find closest DVL timestamp
-        time_diffs = np.abs(dvl_times - ts)
-        min_idx = np.argmin(time_diffs)
-        min_diff = time_diffs[min_idx]
-        
-        if min_diff <= pd.Timedelta(seconds=max_tolerance_s):
-            synchronized_values.append(dvl_values[min_idx])
-        else:
-            synchronized_values.append(np.nan)  # No valid measurement
-    
-    return np.array(synchronized_values)
-```
-
-**Algorithm Properties:**
-- **Computational Complexity:** $O(N_s \log N_d)$ where $N_s, N_d$ are sonar and DVL sample counts
-- **Temporal Accuracy:** Limited by sensor sampling rates
-- **Gap Handling:** Produces NaN for missing data
-
-#### Linear Interpolation
-
-**Mathematical Foundation:** Assume linear variation between measurements for improved temporal resolution.
-
-```python
-def linear_interpolation(sonar_times, dvl_times, dvl_values):
-    """
-    Linear interpolation of DVL data to sonar timestamps
-    """
-    # Create interpolation function
-    interp_func = interp1d(dvl_times.astype(np.int64), dvl_values, 
-                          kind='linear', bounds_error=False, fill_value=np.nan)
-    
-    # Interpolate to sonar times
-    sonar_times_int = sonar_times.astype(np.int64)
-    interpolated_values = interp_func(sonar_times_int)
-    
-    return interpolated_values
-```
-
-**Interpolation Formula:**
-For a sonar time $t_s$ between DVL times $t_{d1} < t_s < t_{d2}$:
-
-$$v_s = v_{d1} + \frac{(v_{d2} - v_{d1})(t_s - t_{d1})}{t_{d2} - t_{d1}}$$
-
-### 7.3 Coordinate System Alignment
-
-#### Sensor Coordinate Systems
-
-**DVL Body Frame:**
-- Origin: DVL sensor position
-- X: Forward direction
-- Y: Starboard direction  
-- Z: Downward direction
-
-**ROV Navigation Frame:**
-- Origin: ROV center of mass
-- X: Forward direction
-- Y: Starboard direction
-- Z: Downward direction
-
-**Sonar Frame:**
-- Origin: Sonar transducer
-- X: Horizontal (athwartship)
-- Y: Forward direction
-- Z: Vertical
-
-#### Transformation Matrices
-
-**DVL to ROV Transformation:**
-```python
-# Homogeneous transformation matrix
-T_dvl_rov = np.array([
-    [1, 0, 0, dx],  # Translation offsets
-    [0, 1, 0, dy],
-    [0, 0, 1, dz],
-    [0, 0, 0, 1]
-])
-```
-
-**ROV to Sonar Transformation:**
-```python
-T_rov_sonar = np.array([
-    [cos(ψ), -sin(ψ), 0, px],  # Rotation and translation
-    [sin(ψ),  cos(ψ), 0, py],
-    [0,       0,      1, pz],
-    [0,       0,      0, 1]
-])
-```
-
-**Combined Transformation:**
-$$T_{dvl \rightarrow sonar} = T_{rov \rightarrow sonar} \cdot T_{dvl \rightarrow rov}$$
-
-### 7.4 Data Quality Assessment
-
-#### Temporal Consistency Metrics
-
-**Synchronization Quality Score:**
-```python
-def compute_sync_quality(sonar_times, dvl_times, tolerance_s=1.0):
-    """
-    Compute fraction of sonar measurements with valid DVL synchronization
-    """
-    valid_syncs = 0
-    
-    for ts in sonar_times:
-        time_diffs = np.abs(dvl_times - ts)
-        min_diff = np.min(time_diffs)
-        
-        if min_diff <= pd.Timedelta(seconds=tolerance_s):
-            valid_syncs += 1
-    
-    quality_score = valid_syncs / len(sonar_times)
-    return quality_score
-```
-
-#### Measurement Uncertainty Propagation
-
-**Error Sources:**
-- **Temporal Misalignment:** Time synchronization uncertainty
-- **Coordinate Transformation:** Mounting calibration errors
-- **Sensor Noise:** Individual sensor measurement uncertainty
-
-**Combined Uncertainty:**
-$$\sigma_{total}^2 = \sigma_{temporal}^2 + \sigma_{calibration}^2 + \sigma_{sensor}^2$$
-
-### 7.5 Multi-Source Distance Fusion
-
-#### Sensor Fusion Algorithm
-
-**Implementation:** Weighted combination of multiple distance measurements.
-
-```python
-def fuse_distance_measurements(measurements, uncertainties):
-    """
-    Fuse multiple distance measurements using inverse variance weighting
-    
-    Parameters:
-    measurements: List of distance values [d1, d2, ..., dn]
-    uncertainties: List of measurement uncertainties [σ1, σ2, ..., σn]
-    """
-    # Inverse variance weights
-    weights = [1/σ**2 for σ in uncertainties]
-    
-    # Weighted average
-    numerator = sum(w * d for w, d in zip(weights, measurements))
-    denominator = sum(weights)
-    
-    fused_distance = numerator / denominator
-    
-    # Combined uncertainty
-    fused_uncertainty = 1 / np.sqrt(denominator)
-    
-    return fused_distance, fused_uncertainty
-```
-
-**Mathematical Properties:**
-- **Optimality:** Minimum variance unbiased estimator
-- **Robustness:** Automatically down-weights noisy measurements
-- **Uncertainty Quantification:** Provides confidence bounds
+**Key Functions:**
+- `utils/dvl_integration.py::process_dvl_data()`
+- `utils/dvl_integration.py::transform_to_world_frame()`
+- `utils/dvl_integration.py::fuse_dvl_sonar_data()`
 
 ---
 
 ## 8. Synchronized Video Generation
 
-### 8.1 Temporal Alignment Mathematics
+### 8.1 Overview
 
-**Problem Statement:** Synchronize multiple data streams (sonar, camera, navigation) for coherent video playback.
+Synchronized video generation creates a visual output that overlays the sonar distance measurements and DVL data onto the camera footage. This provides an intuitive understanding of the underwater scene and the detected objects.
 
-#### Multi-Stream Synchronization
+### 8.2 Video Processing Pipeline
 
-**Mathematical Framework:** Temporal alignment of heterogeneous data streams with different sampling rates.
+The video generation pipeline includes:
 
-**Data Streams:**
-- **Sonar:** $I_s(t)$ - Intensity images at $f_s$ Hz
-- **Camera:** $I_c(t)$ - RGB images at $f_c$ Hz
-- **Navigation:** $\vec{n}(t) = [d_n(t), \phi_n(t), h(t)]$ - Navigation data at $f_n$ Hz
-- **Analysis:** $\vec{a}(t) = [d_a(t), \phi_a(t), c(t)]$ - Analysis results at $f_s$ Hz
+1. **Input synchronization:** Ensuring all input data (camera, sonar, DVL) are time-aligned.
+2. **Data overlay:** Projecting the sonar and DVL data onto the video frames.
+3. **Output encoding:** Compressing and saving the annotated video to disk.
 
-#### Synchronization Algorithm
+### 8.3 Implementation
 
-**Implementation:** `utils/sonar_and_foto_generation.py::export_optimized_sonar_video()`
-
-```python
-def synchronize_video_streams(sonar_times, camera_times, nav_times,
-                            max_sync_tolerance_s=5.0):
-    """
-    Synchronize multiple data streams for video generation
-    
-    Returns:
-    sync_frames: List of synchronized frame tuples
-    """
-    sync_frames = []
-    
-    for i, sonar_ts in enumerate(sonar_times):
-        # Find nearest camera frame
-        camera_diffs = np.abs(camera_times - sonar_ts)
-        camera_idx = np.argmin(camera_diffs)
-        camera_dt = camera_diffs[camera_idx]
-        
-        # Find nearest navigation data
-        nav_diffs = np.abs(nav_times - sonar_ts)
-        nav_idx = np.argmin(nav_diffs)
-        nav_dt = nav_diffs[nav_idx]
-        
-        # Check synchronization quality
-        if camera_dt <= pd.Timedelta(seconds=max_sync_tolerance_s):
-            # Good camera sync
-            frame_data = {
-                'sonar_idx': i,
-                'camera_idx': camera_idx,
-                'nav_idx': nav_idx,
-                'sync_quality': 'full_sync'
-            }
-        elif nav_dt <= pd.Timedelta(seconds=max_sync_tolerance_s):
-            # Navigation only
-            frame_data = {
-                'sonar_idx': i,
-                'camera_idx': None,
-                'nav_idx': nav_idx,
-                'sync_quality': 'nav_only'
-            }
-        else:
-            # Sonar only
-            frame_data = {
-                'sonar_idx': i,
-                'camera_idx': None,
-                'nav_idx': None,
-                'sync_quality': 'sonar_only'
-            }
-        
-        sync_frames.append(frame_data)
-    
-    return sync_frames
-```
-
-### 8.2 Coordinate System Mapping for Overlays
-
-#### Pixel Coordinate Transformations
-
-**Sonar Cone to Display Coordinates:**
-
-```python
-def sonar_to_display_coords(x_sonar, y_sonar, extent, display_size):
-    """
-    Transform sonar coordinates to display pixel coordinates
-    
-    Parameters:
-    x_sonar, y_sonar: Sonar coordinate system (meters)
-    extent: (x_min, x_max, y_min, y_max) in meters
-    display_size: (width, height) in pixels
-    """
-    x_min, x_max, y_min, y_max = extent
-    disp_w, disp_h = display_size
-    
-    # Normalize to [0,1]
-    x_norm = (x_sonar - x_min) / (x_max - x_min)
-    y_norm = (y_sonar - y_min) / (y_max - y_min)
-    
-    # Convert to pixel coordinates
-    x_px = x_norm * disp_w
-    y_px = (1 - y_norm) * disp_h  # Flip Y for display coordinates
-    
-    return int(x_px), int(y_px)
-```
-
-**Mathematical Properties:**
-- **Affine Transformation:** Preserves straight lines and ratios
-- **Aspect Ratio:** Maintains geometric relationships
-- **Coordinate Flip:** Display coordinates have Y increasing downward
-
-#### Overlay Geometry
-
-**Net Distance Line Drawing:**
-
-```python
-def draw_net_distance_line(display_img, distance_m, angle_deg, extent, display_size):
-    """
-    Draw net distance line on display image
-    """
-    # Convert angle to radians
-    angle_rad = np.radians(angle_deg)
-    
-    # Line endpoints in sonar coordinates
-    half_width = 1.0  # 1 meter half-width for visibility
-    x1 = -half_width
-    y1 = distance_m
-    x2 = +half_width
-    y2 = distance_m
-    
-    # Rotate by angle
-    cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
-    rx1 = x1 * cos_a - (y1 - distance_m) * sin_a
-    ry1 = x1 * sin_a + (y1 - distance_m) * cos_a + distance_m
-    rx2 = x2 * cos_a - (y2 - distance_m) * sin_a
-    ry2 = x2 * sin_a + (y2 - distance_m) * cos_a + distance_m
-    
-    # Convert to display coordinates
-    px1, py1 = sonar_to_display_coords(rx1, ry1, extent, display_size)
-    px2, py2 = sonar_to_display_coords(rx2, ry2, extent, display_size)
-    
-    # Draw line
-    cv2.line(display_img, (px1, py1), (px2, py2), (0, 255, 255), 3)
-    
-    # Draw center marker
-    cx_px, cy_px = sonar_to_display_coords(0, distance_m, extent, display_size)
-    cv2.circle(display_img, (cx_px, cy_px), 3, (0, 0, 255), -1)
-```
-
-### 8.3 Video Encoding and Metadata
-
-#### Frame Rate Optimization
-
-**Natural Frame Rate Calculation:**
-```python
-def compute_natural_fps(timestamps, min_fps=1.0, max_fps=60.0):
-    """
-    Compute natural frame rate from timestamp differences
-    """
-    # Calculate time differences
-    dt_s = np.diff(timestamps.astype(np.int64)) / 1e9  # Convert to seconds
-    
-    # Filter valid differences
-    valid_dt = dt_s[(dt_s > 1e-6) & (dt_s < 5.0)]  # Reasonable range
-    
-    if len(valid_dt) > 0:
-        # Use median to be robust to outliers
-        median_dt = np.median(valid_dt)
-        natural_fps = 1.0 / median_dt
-        # Clamp to reasonable range
-        natural_fps = np.clip(natural_fps, min_fps, max_fps)
-    else:
-        natural_fps = 15.0  # Default fallback
-    
-    return natural_fps
-```
-
-**Mathematical Rationale:**
-- **Median Filtering:** Robust to timestamp jitter and outliers
-- **Clamping:** Prevents unrealistic frame rates
-- **Temporal Consistency:** Maintains perceived motion smoothness
-
-#### Metadata Generation
-
-**Comprehensive Processing Record:**
-```python
-def generate_video_metadata(processing_params, frame_count, output_path):
-    """
-    Generate JSON metadata for reproducible video generation
-    """
-    metadata = {
-        "format": "solaqua.optimized_sync.video.meta.v1",
-        "creation_timestamp": datetime.utcnow().isoformat(),
-        "processing_parameters": processing_params,
-        "frame_count": frame_count,
-        "duration_seconds": frame_count / processing_params['fps'],
-        "coordinate_extent": processing_params['extent'],
-        "sync_statistics": {
-            "camera_sync_ratio": processing_params.get('camera_sync_ratio', 0.0),
-            "nav_sync_ratio": processing_params.get('nav_sync_ratio', 0.0),
-        },
-        "data_sources": {
-            "sonar_bag": processing_params['target_bag'],
-            "camera_available": processing_params.get('camera_available', False),
-            "navigation_available": processing_params.get('navigation_available', False),
-            "analysis_available": processing_params.get('analysis_available', False),
-        }
-    }
-    
-    # Save metadata alongside video
-    meta_path = output_path.with_suffix(output_path.suffix + '.meta.json')
-    with open(meta_path, 'w') as f:
-        json.dump(metadata, f, indent=2, default=str)
-    
-    return meta_path
-```
-
-### 8.4 Error Handling and Quality Assurance
-
-#### Synchronization Quality Assessment
-
-**Multi-Level Quality Metrics:**
-```python
-def assess_video_quality(sync_frames):
-    """
-    Assess overall video synchronization quality
-    """
-    total_frames = len(sync_frames)
-    full_sync = sum(1 for f in sync_frames if f['sync_quality'] == 'full_sync')
-    nav_only = sum(1 for f in sync_frames if f['sync_quality'] == 'nav_only')
-    sonar_only = sum(1 for f in sync_frames if f['sync_quality'] == 'sonar_only')
-    
-    quality_metrics = {
-        'full_sync_ratio': full_sync / total_frames,
-        'nav_sync_ratio': (full_sync + nav_only) / total_frames,
-        'sonar_only_ratio': sonar_only / total_frames,
-        'temporal_coverage': (full_sync + nav_only + sonar_only) / total_frames,
-    }
-    
-    return quality_metrics
-```
-
-#### Graceful Degradation
-
-**Fallback Strategies:**
-1. **Camera Unavailable:** Sonar + navigation only layout
-2. **Navigation Missing:** Sonar + analysis only with reduced overlays
-3. **Analysis Failed:** Sonar only with basic grid overlays
-4. **Temporal Gaps:** Maintain last known good measurements
-
-**Mathematical Continuity:**
-- **Interpolation:** Fill small temporal gaps using linear interpolation
-- **Hold Values:** Maintain previous measurements during outages
-- **Quality Flags:** Mark degraded frames in metadata
-
-### 8.5 Performance Optimization
-
-#### Memory-Efficient Processing
-
-**Frame-by-Frame Pipeline:**
-```python
-def process_video_frames_efficiently(sonar_data, camera_data, nav_data, output_path):
-    """
-    Process video frames with minimal memory usage
-    """
-    # Initialize video writer (size determined by first frame)
-    writer = None
-    
-    for frame_data in sync_frames:
-        # Load only required data for current frame
-        sonar_frame = load_sonar_frame(frame_data['sonar_idx'])
-        
-        if frame_data['camera_idx'] is not None:
-            camera_frame = load_camera_frame(frame_data['camera_idx'])
-        else:
-            camera_frame = None
-            
-        if frame_data['nav_idx'] is not None:
-            nav_data = load_nav_data(frame_data['nav_idx'])
-        else:
-            nav_data = None
-        
-        # Generate composite frame
-        composite = generate_composite_frame(sonar_frame, camera_frame, nav_data)
-        
-        # Initialize writer on first frame
-        if writer is None:
-            h, w = composite.shape[:2]
-            writer = cv2.VideoWriter(str(output_path), fourcc, fps, (w, h))
-        
-        # Write frame
-        writer.write(composite)
-    
-    writer.release()
-```
-
-**Optimization Benefits:**
-- **Memory Usage:** $O(1)$ additional memory beyond current frame
-- **I/O Efficiency:** Load data on-demand rather than preloading
-- **Scalability:** Handle arbitrarily long video sequences
+**Key Functions:**
+- `utils/video_generation.py::synchronize_inputs()`
+- `utils/video_generation.py::overlay_sonar_dvl_data()`
+- `utils/video_generation.py::encode_video_output()`
 
 ---
 
 ## 9. Configuration Parameters
 
-All processing parameters are centralized in `utils/sonar_config.py` for consistency across notebooks and modules.
+### 9.1 Overview
 
-### 9.1 Sonar Visualization Defaults
+Configuration parameters control the behavior and settings of the SOLAQUA processing pipeline. They are defined in YAML files and can be overridden by command-line arguments or environment variables.
 
-```python
-SONAR_VIS_DEFAULTS = {
-    # Geometry
-    "fov_deg": 120.0,
-    "range_min_m": 0.0,
-    "range_max_m": 20.0,
-    "display_range_max_m": 5.0,
-    
-    # Enhancement
-    "enh_scale": "db",           # 'linear' or 'db'
-    "enh_tvg": "amplitude",      # 'amplitude', 'power', or 'none'
-    "enh_alpha_db_per_m": 0.0,  # Absorption coefficient
-    "enh_p_low": 1.0,           # Lower percentile clip
-    "enh_p_high": 99.5,         # Upper percentile clip
-    "enh_gamma": 0.9,           # Gamma correction
-    
-    # Cone view
-    "img_w": 900,
-    "img_h": 700,
-    "bg_color": "black",
-    "n_spokes": 5,              # Guide lines
-}
-```
+### 9.2 Parameter Categories
 
-### 9.2 Image Processing Config
+- **Input/Output Settings:** File paths, formats, and naming conventions.
+- **Sonar Processing:** TVG settings, enhancement parameters, rasterization settings.
+- **Image Analysis:** Net detection thresholds, contour filtering criteria.
+- **Distance Measurement:** Calibration settings, smoothing parameters.
+- **DVL Integration:** Transformation parameters, fusion settings.
+- **Video Generation:** Encoding settings, output resolution.
+
+### 9.3 Accessing Parameters
+
+Parameters are accessed in the code via:
 
 ```python
-IMAGE_PROCESSING_CONFIG = {
-    # Preprocessing
-    'blur_kernel_size': (31, 31),
-    'canny_low_threshold': 40,
-    'canny_high_threshold': 120,
-    'morph_close_kernel': 5,
-    'edge_dilation_iterations': 2,
-    
-    # Contour filtering
-    'min_contour_area': 100,
-    'extreme_angle_threshold_deg': 20.0,
-    
-    # Advanced (momentum-based merging)
-    'use_momentum_merging': True,
-    'momentum_search_radius': 3,
-    'momentum_threshold': 0.1,
-    'momentum_decay': 0.9,
-    'momentum_boost': 5.0,
-}
-```
+from utils.config import Config
 
-### 9.3 Elliptical AOI Tracking Config
-
-```python
-TRACKING_CONFIG = {
-    # AOI Configuration
-    'use_elliptical_aoi': True,           # Enable elliptical AOI tracking
-    'aoi_boost_factor': 2.0,              # Score multiplier for contours in AOI
-    'aoi_expansion_pixels': 1,            # Legacy rectangular AOI expansion
-    'ellipse_expansion_factor': 0.2,      # Factor to expand ellipse for AOI (20% larger)
-    
-    # Center Tracking Smoothing
-    'center_smoothing_alpha': 0.2,        # Smoothing for tracking center (0.0=no change, 1.0=instant)
-    
-    # Advanced Ellipse Smoothing (legacy)
-    'ellipse_smoothing_alpha': 0.2,       # EMA smoothing for ellipse parameters
-    'ellipse_max_movement_pixels': 4.0,   # Maximum pixel movement per frame
-    'max_frames_outside_aoi': 5,          # Max frames to track outside AOI
-}
-```
-
-### 9.4 File Paths
-
-```python
-# Default storage locations
-EXPORTS_DIR_DEFAULT = "/Volumes/LaCie/SOLAQUA/exports"
-
-EXPORTS_SUBDIRS = {
-    'by_bag': 'by_bag',
-    'videos': 'videos',
-    'frames': 'frames',
-    'camera_info': 'camera_info',
-    'outputs': 'outputs',
-    'index': '',  # Index files in root
-}
-```
-
-**Usage in code:**
-```python
-from utils.sonar_config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
-
-exports_root = Path(EXPORTS_DIR_DEFAULT)
-by_bag_folder = exports_root / EXPORTS_SUBDIRS['by_bag']
+# Get a parameter
+param_value = Config.get('section.subsection.parameter_name', default_value)
 ```
 
 ---
 
 ## 10. Code Reference Map
 
-### 10.1 Core Modules
+### 10.1 Overview
 
-| Module | Purpose | Key Functions |
-|--------|---------|---------------|
-| `sonar_utils.py` | Enhancement, rasterization | `enhance_intensity()`, `cone_raster_like_display_cell()` |
-| `sonar_visualization.py` | Sonoptix display | `SonarVisualizer` class |
-| `ping360_visualization.py` | Ping360 display | `Ping360Visualizer` class |
-| `sonar_image_analysis.py` | Net detection, distance | `detect_and_score_contours()`, `analyze_red_line_distance_over_time()` |
-| `net_distance_analysis.py` | DVL data loading | `load_all_distance_data_for_bag()` |
-| `nucleus1000dvl_analysis.py` | DVL sensor analysis | `Nucleus1000DVLAnalyzer` class |
-| `sonar_and_foto_generation.py` | Video creation | `export_optimized_sonar_video()` |
-| `dataset_export_utils.py` | Bag export | `export_all_topics()`, `export_video_as_mp4()` |
-| `sonar_config.py` | Configuration | All default parameter dicts |
+This section provides a high-level map of the SOLAQUA codebase, linking the documented pipeline stages to the corresponding implementation modules and functions.
 
-### 10.2 Workflow Mapping
+### 10.2 Reference Table
 
-| Task | Primary Module(s) | Notebook |
-|------|-------------------|----------|
-| Extract ROS bags | `dataset_export_utils` | Run `solaqua_export.py` |
-| Visualize Sonoptix | `sonar_visualization`, `sonar_utils` | `01_Sonar_Visualizer.ipynb` |
-| Visualize Ping360 | `ping360_visualization` | `02_Ping360_Visualizer.ipynb` |
-| DVL analysis | `nucleus1000dvl_analysis` | `03_rov_navigation_analysis.ipynb` |
-| Sonar-DVL comparison | `net_distance_analysis`, `sonar_image_analysis` | `04_synchronized_sonar_net_distance_analysis.ipynb` |
-| Net distance video | `sonar_and_foto_generation` | `06_image_analysis.ipynb` |
-
-### 10.3 Data Format Reference
-
-| File Type | Location | Contents |
-|-----------|----------|----------|
-| CSV/Parquet | `exports/by_bag/` | Per-topic sensor data tables |
-| NPZ | `exports/outputs/` | Preprocessed cone image arrays + metadata |
-| MP4 | `exports/videos/` | Generated visualization videos |
-| PNG | `exports/frames/` | Individual camera frames with timestamp index |
-| YAML | `exports/camera_info/` | Camera calibration parameters |
+| Pipeline Stage                     | Description                                      | Key Modules/Functions                               |
+|-----------------------------------|--------------------------------------------------|-----------------------------------------------------|
+| Data Extraction                   | Extracts data from ROS bags                     | `solaqua_export.py`, `utils/dataset_export_utils.py` |
+| Sonar Enhancement                 | Applies TVG and other enhancements               | `utils/sonar_utils.py::enhance_intensity()`       |
+| Polar-to-Cartesian Rasterization | Converts polar sonar data to Cartesian images   | `utils/sonar_utils.py::cone_raster_like_display_cell()` |
+| Image Analysis & Net Detection    | Detects nets using computer vision              | `utils/sonar_tracking.py::NetTracker`              |
+| Distance Measurement              | Converts pixel measurements to meters            | `utils/distance_measurement.py`                    |
+| DVL Data Integration              | Integrates DVL data with sonar measurements     | `utils/dvl_integration.py`                         |
+| Video Generation                  | Generates annotated video outputs                | `utils/video_generation.py`                        |
 
 ---
 
-## 11. Advanced Topics
+## Appendix A: Mathematical Foundations
 
-### 11.1 Custom Enhancement Pipelines
+### A.1 TVG Compensation
 
-To create a custom enhancement chain:
+Time-Varying Gain (TVG) compensation corrects for signal attenuation in sonar data. The compensation is based on the inverse square law for geometric spreading and an exponential model for water absorption.
 
-```python
-from utils import sonar_utils
-
-# Load raw frame
-df = sonar_utils.load_df('path/to/sonar.csv')
-M_raw = sonar_utils.get_sonoptix_frame(df, frame_idx)
-
-# Apply custom pipeline
-M_custom = sonar_utils.enhance_intensity(
-    M_raw,
-    range_min_m=0.0,
-    range_max_m=15.0,
-    scale='db',
-    tvg='power',  # Use power TVG instead of amplitude
-    alpha_db_per_m=0.05,  # Higher absorption
-    p_low=5.0,  # More aggressive clipping
-    p_high=95.0,
-    gamma=0.7
-)
-
-# Rasterize with custom extent
-cone = sonar_utils.cone_raster_like_display_cell(
-    M_custom,
-    fov_deg=130,  # Wider FOV
-    range_max_m=15.0,
-    img_w=1200,
-    img_h=900
-)
+**Amplitude TVG:**
+```math
+TVG(r) = (r / r0)²
 ```
 
-### 11.2 Custom Contour Scoring
-
-To implement domain-specific contour scoring:
-
-```python
-from utils import sonar_image_analysis as sia
-
-def custom_scorer(contour_info):
-    """
-    Score contours based on custom criteria.
-    
-    Args:
-        contour_info: dict with keys:
-            - 'contour': cv2 contour
-            - 'area': float
-            - 'aspect_ratio': float
-            - 'ellipse_elongation': float
-            - ...
-    
-    Returns:
-        score: float (higher is better)
-    """
-    # Example: Prefer contours in upper half of image
-    cy = contour_info['ellipse_cy']
-    img_height = 700
-    position_score = 1.0 - (cy / img_height)
-    
-    # Combine with standard elongation score
-    elongation_score = contour_info['ellipse_elongation']
-    
-    return elongation_score * position_score
-
-# Use in analysis
-sia.IMAGE_PROCESSING_CONFIG['custom_scorer'] = custom_scorer
+**Power TVG:**
+```math
+TVG(r) = (r / r0)⁴
 ```
 
-### 11.3 Multi-Sonar Fusion
+Where `r` is the range, and `r0` is a reference distance.
 
-For systems with multiple sonar units:
+### A.2 Ellipse Fitting
 
-1. Process each sonar independently
-2. Transform to common coordinate frame using known mounting positions
-3. Merge detections using weighted fusion:
+Ellipse fitting is used to model the shape of detected nets. The fitting is performed using the least squares method to minimize the algebraic distance between the data points and the ellipse.
 
-```python
-def fuse_detections(det1, det2, conf1, conf2):
-    """Weighted fusion of two distance estimates."""
-    w1 = conf1 / (conf1 + conf2)
-    w2 = conf2 / (conf1 + conf2)
-    return w1 * det1 + w2 * det2
+**Ellipse Equation:**
+```math
+Ax² + Bxy + Cy² + Dx + Ey + F = 0
 ```
 
----
+The parameters `(A, B, C, D, E, F)` are estimated from the contour points using singular value decomposition (SVD).
 
-## 12. Performance Considerations
+### A.3 Contour Detection
 
-### 12.1 Processing Speed
+Contours are detected using the Suzuki and Abe algorithm, which is an improved version of the Moore-Neighbor tracing algorithm. It is efficient in detecting contours in binary images and is robust to noise.
 
-Typical performance on modern hardware:
+**Key Steps:**
+1. Find the most top-left point as the starting point.
+2. Trace the contour using 8-connected neighbors.
+3. Approximate the contour using the Douglas-Peucker algorithm to reduce the number of points.
 
-| Operation | Speed | Bottleneck |
-|-----------|-------|------------|
-| CSV export | ~100 msgs/sec | Disk I/O |
-| Enhancement | ~50 frames/sec | NumPy ops |
-| Rasterization | ~30 frames/sec | Interpolation |
-| Contour detection | ~20 frames/sec | OpenCV ops |
-| Video encoding | ~25 fps | Codec overhead |
+### A.4 Coordinate Transformations
 
-### 12.2 Optimization Tips
+Transformations between different coordinate systems (e.g., body frame to world frame) are performed using rigid body transformation equations:
 
-1. **Use Parquet instead of CSV**
-   - 3-5x faster loading
-   - 50-70% smaller file size
-
-2. **Batch processing**
-   - Process multiple frames in parallel
-   - Use `multiprocessing` for CPU-bound tasks
-
-3. **NPZ caching**
-   - Precompute and cache cone rasterizations
-   - Reuse for multiple analysis passes
-
-4. **GPU acceleration**
-   - OpenCV supports CUDA for morphological ops
-   - NumPy operations can use CuPy drop-in replacement
-
-### 12.3 Memory Management
-
-For large datasets:
-
-```python
-# Process in chunks
-chunk_size = 100
-for start in range(0, len(df), chunk_size):
-    end = min(start + chunk_size, len(df))
-    chunk_df = df.iloc[start:end]
-    process_chunk(chunk_df)
-    # Memory released automatically
+```math
+\begin{bmatrix}
+x' \\
+y' \\
+z'
+\end{bmatrix}
+=
+\begin{bmatrix}
+\cos(\theta) & -\sin(\theta) & 0 \\
+\sin(\theta) & \cos(\theta) & 0 \\
+0 & 0 & 1
+\end{bmatrix}
+\begin{bmatrix}
+x \\
+y \\
+z
+\end{bmatrix}
++
+\begin{bmatrix}
+t_x \\
+t_y \\
+t_z
+\end{bmatrix}
 ```
 
----
-
-## 13. Troubleshooting
-
-### Common Issues
-
-#### 1. "No such file or directory"
-**Cause:** Incorrect paths in `sonar_config.py`  
-**Fix:** Verify `EXPORTS_DIR_DEFAULT` points to your exports location
-
-#### 2. "Could not construct Sonoptix frame"
-**Cause:** Missing `image` or `data` columns in CSV  
-**Fix:** Re-export using latest `solaqua_export.py`
-
-#### 3. "Invalid load key" (UnpicklingError)
-**Cause:** Trying to load macOS resource fork files (`._filename.npz`)  
-**Fix:** Updated code filters these automatically; ensure using latest version
-
-#### 4. "No navigation data found"
-**Cause:** Bag lacks `nucleus1000dvl_*` files  
-**Fix:** Use bags from 2024-08-22 series with full DVL sensors
-
-#### 5. Inverted pitch angle in videos
-**Cause:** Using legacy notebook 05  
-**Fix:** Switch to notebook 06 with corrected pitch calculation
+Where `(x, y, z)` are the original coordinates, `(x', y', z')` are the transformed coordinates, `θ` is the rotation angle, and `(t_x, t_y, t_z)` are the translation parameters.
 
 ---
 
-## 14. References
+## Appendix B: Troubleshooting & FAQs
 
-### Academic Background
+### B.1 Common Issues
 
-1. **Sonar Signal Processing:**
-   - X. Lurton, *An Introduction to Underwater Acoustics*, 2nd ed., Springer, 2010
-   - R. J. Urick, *Principles of Underwater Sound*, 3rd ed., McGraw-Hill, 1983
+- **Data not found errors:** Ensure ROS bags are correctly specified and accessible.
+- **Timestamp synchronization issues:** Check the `ts_utc` normalization in the export process.
+- **Empty or missing output files:** Verify write permissions in the output directory.
 
-2. **TVG and Enhancement:**
-   - A. D. Waite, *Sonar for Practising Engineers*, 3rd ed., Wiley, 2002
-   - D. H. Johnson and D. E. Dudgeon, *Array Signal Processing*, Prentice Hall, 1993
+### B.2 Performance Tips
 
-3. **Computer Vision:**
-   - R. Szeliski, *Computer Vision: Algorithms and Applications*, 2nd ed., Springer, 2022
-   - G. Bradski and A. Kaehler, *Learning OpenCV*, O'Reilly, 2008
-
-### Software Dependencies
-
-- [rosbags](https://gitlab.com/ternaris/rosbags) - ROS bag reading
-- [OpenCV](https://opencv.org/) - Computer vision operations
-- [NumPy](https://numpy.org/) - Numerical computing
-- [Pandas](https://pandas.pydata.org/) - Data manipulation
-- [Plotly](https://plotly.com/python/) - Interactive visualization
-
----
-
-## Appendix A: Mathematical Notation
-
-| Symbol | Meaning |
-|--------|---------|
-| M | Sonar intensity matrix (polar) |
-| H | Number of range bins |
-| W | Number of beam angles |
-| r | Range distance (meters) |
-| θ | Beam angle (radians or degrees) |
-| T | Number of time steps |
-| TVG | Time-Varying Gain |
-| α | Absorption coefficient (dB/m) |
-| γ | Gamma correction exponent |
-
----
-
-## Appendix B: Glossary
-
-**AOI (Area of Interest):** Expanded bounding box from previous frame used to prioritize contours
-
-**Cone View:** Cartesian rasterization of polar sonar data in wedge shape
-
-**DVL (Doppler Velocity Log):** Acoustic sensor measuring velocity relative to seafloor or water
-
-**Ellipse Fitting:** Least-squares fit of ellipse to contour points
-
-**NPZ:** NumPy compressed archive format (`.npz` files)
-
-**Red Line:** Major axis of fitted ellipse representing net extent
-
-**TVG (Time-Varying Gain):** Compensation for geometric spreading loss in sonar
-
----
-
-**Document Version:** 1.0.0  
-**Last Updated:** October 2025  
-**Maintainer:** Eirik Varnes
+- For large datasets, consider processing in chunks to avoid memory overload.
+- Optimize the DVL integration settings for your specific ROV configuration to improve distance accuracy.

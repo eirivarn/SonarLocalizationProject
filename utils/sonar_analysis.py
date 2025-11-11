@@ -19,7 +19,7 @@ from utils.io_utils import get_available_npz_files
 
 @dataclass
 class FrameAnalysisResult:
-    """Simplified result for CSV export."""
+    """Analysis result for a single sonar frame with net detection data."""
     frame_idx: int
     timestamp: pd.Timestamp
     distance_pixels: Optional[float] = None
@@ -27,7 +27,7 @@ class FrameAnalysisResult:
     distance_meters: Optional[float] = None
     detection_success: bool = False
     contour_features: Dict = field(default_factory=dict)
-    tracking_status: str = "SIMPLE"
+    tracking_status: str = "NO_DETECTION"
     
     def to_dict(self) -> Dict:
         return {
@@ -50,6 +50,29 @@ def analyze_npz_sequence(
     frame_step: int = 1,
     save_outputs: bool = False,
 ) -> pd.DataFrame:
+    """
+    Analyze a sequence of sonar frames for net detection and distance measurement.
+    
+    Processing Pipeline:
+    1. Load cone-view sonar frames from NPZ file
+    2. Convert to binary images (eliminates intensity variations)
+    3. Apply edge enhancement using morphological operations
+    4. Track net structures using NetTracker system
+    5. Convert pixel distances to meters using spatial extent
+    6. Return time series of measurements
+    
+    Args:
+        npz_file_index: Index of NPZ file to process
+        npz_dir: Directory containing NPZ files (None = use default)
+        frame_start: First frame to process
+        frame_count: Number of frames to process
+        frame_step: Process every Nth frame
+        save_outputs: Save results to CSV file
+        
+    Returns:
+        DataFrame with columns: frame_index, timestamp, distance_pixels, 
+        distance_meters, angle_degrees, detection_success, tracking_status, area
+    """
     files = get_available_npz_files(npz_dir)
     npz_path = files[npz_file_index]
     
@@ -62,8 +85,9 @@ def analyze_npz_sequence(
     ))
     
     print(f"Analyzing {len(frame_indices)} frames from {npz_path.name}")
+    print(f"Using NetTracker system with binary processing and ellipse fitting")
     
-    # Create tracker
+    # Create NetTracker with combined configuration
     config = {**IMAGE_PROCESSING_CONFIG, **TRACKING_CONFIG}
     tracker = NetTracker(config)
     
@@ -73,26 +97,28 @@ def analyze_npz_sequence(
         frame_u8 = to_uint8_gray(cones[frame_idx])
         H, W = frame_u8.shape[:2]
         
-        # 1. Binary conversion
+        # 1. Binary conversion (eliminates signal strength dependency)
         binary = (frame_u8 > config['binary_threshold']).astype(np.uint8) * 255
 
-        # 2. Image processing
+        # 2. Edge enhancement using morphological operations
         try:
             _, edges = preprocess_edges(binary, config)
         except:
-            edges = binary
+            edges = binary  # Fallback to binary if enhancement fails
         
-        # 4. Track using NetTracker on edges 
+        # 3. Track net using NetTracker system
         contour = tracker.find_and_update(edges, (H, W))
         distance_px, angle_deg = tracker.calculate_distance(W, H)
         
-        # 5. Convert to meters
+        # 4. Convert pixel distance to meters using spatial extent
         distance_m = None
         if distance_px is not None and extent is not None:
+            # Meters per pixel in Y (range) direction
             px2m = (extent[3] - extent[2]) / H
+            # Convert: y_min + pixels * scaling_factor  
             distance_m = extent[2] + distance_px * px2m
         
-        # Store result
+        # 5. Store comprehensive result
         results.append({
             'frame_index': frame_idx,
             'timestamp': pd.Timestamp(timestamps[frame_idx]),
@@ -105,9 +131,17 @@ def analyze_npz_sequence(
         })
         
         if (i + 1) % 50 == 0:
-            print(f"  {i+1}/{len(frame_indices)} | {tracker.get_status()}")
+            print(f"  {i+1}/{len(frame_indices)} | Status: {tracker.get_status()}")
     
     df = pd.DataFrame(results)
+    
+    # Print analysis summary
+    detection_rate = df['detection_success'].mean() * 100
+    print(f"\nAnalysis Summary:")
+    print(f"  Detection Rate: {detection_rate:.1f}%")
+    print(f"  Valid Distance Measurements: {df['distance_meters'].notna().sum()}")
+    if df['distance_meters'].notna().any():
+        print(f"  Distance Range: {df['distance_meters'].min():.2f} - {df['distance_meters'].max():.2f} m")
     
     if save_outputs:
         from utils.config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS

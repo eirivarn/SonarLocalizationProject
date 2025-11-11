@@ -86,8 +86,8 @@ IMAGE_PROCESSING_CONFIG: Dict = {
     # Advanced momentum parameters
     'adaptive_angle_steps': 20,         # Number of angles tested for linearity
     'adaptive_base_radius': 3,          # Base circular kernel radius
-    'adaptive_max_elongation': 3.0,     # Maximum kernel elongation (1.0 = circular)
-    'momentum_boost': 10.0,            # Enhancement strength multiplier
+    'adaptive_max_elongation': 1.0,     # Maximum kernel elongation (1.0 = circular)
+    'momentum_boost': 10.0,           # Enhancement strength multiplier
     'adaptive_linearity_threshold': 0.75, # Minimum linearity to trigger elongation
     'downscale_factor': 2,              # Downscaling for faster processing
     'top_k_bins': 8,                    # Top bins for orientation histogram
@@ -129,19 +129,19 @@ TRACKING_CONFIG: Dict = {
     #   alpha = 0.01 → new = old * 0.99 + measured * 0.01  (99% old, 1% new - VERY SMOOTH)
     #   alpha = 0.30 → new = old * 0.70 + measured * 0.30  (70% old, 30% new)
     #   alpha = 1.00 → new = measured                      (0% old, 100% new - NO SMOOTHING)
-    
-    'center_smoothing_alpha': 0.3,                # 70% old, 30% new
+
+    'center_smoothing_alpha': 0.8,                # 80% old, 20% new
     'ellipse_size_smoothing_alpha': 0.01,         # 99% old, 1% new (VERY SMOOTH)
-    'ellipse_orientation_smoothing_alpha': 0.2,   # 80% old, 20% new
+    'ellipse_orientation_smoothing_alpha': 0.1,   # 80% old, 20% new
     'ellipse_max_movement_pixels': 30.0,          # Max center jump per frame
     
-    # === CORRIDOR EXTENSION ===
-    'use_corridor_splitting': True,
-    'corridor_band_k': 2.0,           # Corridor width relative to minor axis
-    'corridor_length_px': None,       # Auto-calculate
-    'corridor_length_factor': 2.0,    # Length = major axis * factor
-    'corridor_widen': 1.0,
-    'corridor_both_directions': True,
+    # === CORRIDOR EXTENSION (LEGACY - mostly unused) ===
+    'corridor_band_k': 1.0,            # Corridor width relative to minor axis (used in some legacy code)
+    'corridor_length_factor': 2.0,     # Length = major axis * factor (used in some legacy code)
+    'corridor_widen': 1.0,             # Legacy parameter
+    'corridor_both_directions': True,  # Legacy parameter
+    
+    # Note: The pipeline now primarily uses elliptical AOI instead of complex corridor splitting
     
     # === PERSISTENCE ===
     'max_frames_without_detection': 30,  # Keep tracking for 30 frames without detection
