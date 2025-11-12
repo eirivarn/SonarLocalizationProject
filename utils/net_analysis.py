@@ -216,7 +216,7 @@ def synchronize_sonar_and_dvl(
             rows.append({
                 'timestamp': pd.Timestamp(sonar_row.timestamp),
                 'sonar_distance_m': getattr(sonar_row, 'distance_meters', None),
-                'sonar_angle_deg': getattr(sonor_row, 'angle_degrees', None),
+                'sonar_angle_deg': getattr(sonar_row, 'angle_degrees', None),
                 'sonar_detection': bool(getattr(sonar_row, 'detection_success', False)),
                 'dvl_distance_m': nav_row.get('NetDistance'),
                 'dvl_pitch_deg': float(np.degrees(nav_row['NetPitch'])) if 'NetPitch' in nav_row and pd.notna(nav_row['NetPitch']) else None,
