@@ -538,7 +538,44 @@ def export_optimized_sonar_video(
     out_name = f"{TARGET_BAG}_optimized_sync_{'withcam_' if VIDEO_SEQ_DIR is not None else ''}{'withsonar_' if SONAR_RESULTS is not None else ''}{'nonet_' if not INCLUDE_NET else ''}{ts_for_name(first_ts)}.mp4"
     out_path = out_dir / out_name
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    
+    # CRITICAL FIX: Pre-calculate maximum frame dimensions to avoid size mismatches
     writer = None
+    max_frame_width = CONE_W
+    max_frame_height = CONE_H
+    
+    # If camera is enabled, calculate the maximum width including camera feed
+    if VIDEO_SEQ_DIR is not None and dfv is not None:
+        try:
+            # Load a sample camera frame to determine its dimensions after resizing
+            sample_cam_file = VIDEO_SEQ_DIR / dfv.iloc[0]["file"]
+            sample_cam = load_png_bgr(sample_cam_file)
+            vh, vw0 = sample_cam.shape[:2]
+            scale = VIDEO_HEIGHT / vh
+            camera_width_resized = int(round(vw0 * scale))
+            
+            # Maximum width = camera + padding + cone
+            max_frame_width = camera_width_resized + PAD_BETWEEN + CONE_W
+            max_frame_height = CONE_H  # Height remains constant
+            
+            print(f"   Video dimensions calculated:")
+            print(f"     Camera: {camera_width_resized}x{VIDEO_HEIGHT}")
+            print(f"     Sonar cone: {CONE_W}x{CONE_H}")
+            print(f"     Max composite: {max_frame_width}x{max_frame_height}")
+        except Exception as e:
+            print(f"   Warning: Could not pre-calculate camera dimensions: {e}")
+            print(f"   Falling back to dynamic initialization")
+    
+    # Initialize writer with maximum dimensions (ensure even numbers for codec)
+    max_frame_width = max_frame_width + (max_frame_width % 2)  # Make even
+    max_frame_height = max_frame_height + (max_frame_height % 2)  # Make even
+    
+    writer = cv2.VideoWriter(str(out_path), fourcc, natural_fps, (max_frame_width, max_frame_height), True)
+    if not writer.isOpened():
+        raise RuntimeError(f"Could not open writer: {out_path} with size {max_frame_width}x{max_frame_height}")
+    
+    print(f"   VideoWriter initialized: {max_frame_width}x{max_frame_height} @ {natural_fps:.2f} FPS")
+    
     meta_extent = None
 
     # --- Color map and geometry helpers ---
@@ -891,6 +928,11 @@ def export_optimized_sonar_video(
             if ts_target < video_idx.min() or ts_target > video_idx.max():
                 # Outside camera time range - use sonar-only mode for this frame
                 composite = cone_frame
+                # PAD to match expected width
+                if composite.shape[1] < max_frame_width:
+                    pad_width = max_frame_width - composite.shape[1]
+                    pad_left = np.zeros((CONE_H, pad_width, 3), dtype=np.uint8)
+                    composite = np.hstack([pad_left, composite])
                 print(f"   Frame {frame_idx}: Outside camera time range, using sonar-only")
             else:
                 # Find nearest camera frame within reasonable tolerance
@@ -905,6 +947,11 @@ def export_optimized_sonar_video(
                 if dt > max_sync_tolerance:
                     # Time difference too large - camera video probably ended
                     composite = cone_frame
+                    # PAD to match expected width
+                    if composite.shape[1] < max_frame_width:
+                        pad_width = max_frame_width - composite.shape[1]
+                        pad_left = np.zeros((CONE_H, pad_width, 3), dtype=np.uint8)
+                        composite = np.hstack([pad_left, composite])
                     print(f"   Frame {frame_idx}: Sync tolerance exceeded ({dt.total_seconds():.1f}s), using sonar-only")
                 else:
                     # Good sync - compose with camera
@@ -924,17 +971,18 @@ def export_optimized_sonar_video(
                     put_text(composite, f"SONAR  @ {ts_sonar_loc:%Y-%m-%d %H:%M:%S.%f %Z}   Δt={dt.total_seconds():.3f}s", 48, scale=FONT_SCALE)
 
         else:
-            # sonar-only output canvas
+            # sonar-only output canvas - PAD to match expected width
             composite = cone_frame
+            if composite.shape[1] < max_frame_width:
+                pad_width = max_frame_width - composite.shape[1]
+                pad_left = np.zeros((CONE_H, pad_width, 3), dtype=np.uint8)
+                composite = np.hstack([pad_left, composite])
 
-        # init writer on first valid frame
-        if writer is None:
-            out_size = (composite.shape[1], composite.shape[0])
-            writer = cv2.VideoWriter(str(out_path), fourcc, natural_fps, out_size, True)
-            if not writer.isOpened():
-                raise RuntimeError(f"Could not open writer: {out_path}")
-
-        # FINAL CHECK: Ensure uint8 before writing
+        # FINAL CHECK: Ensure correct dimensions and uint8
+        if composite.shape[:2] != (max_frame_height, max_frame_width):
+            # Resize to exact dimensions if needed
+            composite = cv2.resize(composite, (max_frame_width, max_frame_height))
+        
         if composite.dtype != np.uint8:
             composite = np.clip(composite, 0, 255).astype(np.uint8)
             
@@ -989,19 +1037,83 @@ def export_optimized_sonar_video(
 def generate_three_system_video(
     target_bag: str,
     exports_folder: Path,
-    net_analysis_results: pd.DataFrame,
-    raw_data: dict,
+    net_analysis_results: pd.DataFrame | None = None,  # Now optional
+    raw_data: dict | None = None,  # Now optional
     fft_csv_path: Path | None = None,
     start_idx: int = 1,
     end_idx: int = 1200,
     **video_kwargs
 ) -> Path:
     """
-    Simplified three-system video generation with automatic synchronization.
+    Simplified three-system video generation with automatic data loading.
     Falls back gracefully to two-system mode if FFT data is not available.
+    
+    Args:
+        target_bag: Bag name to process
+        exports_folder: Path to exports directory
+        net_analysis_results: Optional pre-loaded sonar analysis results. 
+                            If None, will attempt to load from saved CSV file.
+        raw_data: Optional pre-loaded raw data dictionary.
+                 If None, will attempt to load DVL navigation data.
+        fft_csv_path: Optional path to FFT data CSV
+        start_idx: Starting frame index
+        end_idx: Ending frame index
+        **video_kwargs: Additional arguments passed to export_optimized_sonar_video
+        
+    Returns:
+        Path to generated video file
     """
     print("GENERATING THREE-SYSTEM VIDEO" if fft_csv_path and fft_csv_path.exists() else "GENERATING TWO-SYSTEM VIDEO")
     print("=" * 50)
+    
+    # STEP 1: Load sonar analysis results if not provided
+    if net_analysis_results is None:
+        print("📊 Loading sonar analysis results from saved CSV...")
+        
+        # Look for the analysis CSV file saved by analyze_npz_sequence
+        outputs_dir = exports_folder / EXPORTS_SUBDIRS.get('outputs', 'outputs')
+        analysis_csv_pattern = f"{target_bag.replace('_video', '')}_analysis.csv"
+        analysis_csv_path = outputs_dir / analysis_csv_pattern
+        
+        if analysis_csv_path.exists():
+            net_analysis_results = pd.read_csv(analysis_csv_path)
+            net_analysis_results['timestamp'] = pd.to_datetime(net_analysis_results['timestamp'])
+            print(f"✓ Loaded {len(net_analysis_results)} sonar analysis records from {analysis_csv_path.name}")
+        else:
+            # Try to find any matching analysis file
+            matching_files = list(outputs_dir.glob(f"*{target_bag}*_analysis.csv"))
+            if matching_files:
+                analysis_csv_path = matching_files[0]
+                net_analysis_results = pd.read_csv(analysis_csv_path)
+                net_analysis_results['timestamp'] = pd.to_datetime(net_analysis_results['timestamp'])
+                print(f"✓ Loaded {len(net_analysis_results)} sonar analysis records from {analysis_csv_path.name}")
+            else:
+                raise FileNotFoundError(
+                    f"No sonar analysis CSV found for bag '{target_bag}'.\n"
+                    f"Expected location: {analysis_csv_path}\n"
+                    f"Please run analyze_npz_sequence() with save_outputs=True first."
+                )
+    else:
+        print(f"✓ Using provided sonar analysis results: {len(net_analysis_results)} records")
+    
+    # STEP 2: Load DVL navigation data if not provided
+    if raw_data is None:
+        print("📊 Loading DVL navigation data...")
+        try:
+            import utils.distance_measurement as sda
+            BY_BAG_FOLDER = exports_folder / EXPORTS_SUBDIRS.get('by_bag', 'by_bag')
+            raw_data, _ = sda.load_all_distance_data_for_bag(target_bag, BY_BAG_FOLDER)
+            
+            if raw_data.get('navigation') is not None:
+                print(f"✓ Loaded {len(raw_data['navigation'])} DVL navigation records")
+            else:
+                print("⚠️  No DVL navigation data found")
+                raw_data = {'navigation': None}
+        except Exception as e:
+            print(f"⚠️  Could not load DVL data: {e}")
+            raw_data = {'navigation': None}
+    else:
+        print(f"✓ Using provided raw data")
     
     # Prepare synchronized data (handles missing FFT gracefully)
     net_analysis_sync, fft_net_data_sync = prepare_three_system_data(

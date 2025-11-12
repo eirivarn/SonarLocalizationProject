@@ -808,15 +808,3 @@ Where `(x, y, z)` are the original coordinates, `(x', y', z')` are the transform
 
 ---
 
-## Appendix B: Troubleshooting & FAQs
-
-### B.1 Common Issues
-
-- **Data not found errors:** Ensure ROS bags are correctly specified and accessible.
-- **Timestamp synchronization issues:** Check the `ts_utc` normalization in the export process.
-- **Empty or missing output files:** Verify write permissions in the output directory.
-
-### B.2 Performance Tips
-
-- For large datasets, consider processing in chunks to avoid memory overload.
-- Optimize the DVL integration settings for your specific ROV configuration to improve distance accuracy.

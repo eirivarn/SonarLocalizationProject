@@ -5,11 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass, field
+import cv2
 import numpy as np
 import pandas as pd
-import cv2
 
-from utils.config import IMAGE_PROCESSING_CONFIG, TRACKING_CONFIG
+from utils.config import IMAGE_PROCESSING_CONFIG, TRACKING_CONFIG, EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
 from utils.image_enhancement import preprocess_edges
 from utils.sonar_tracking import NetTracker
 from utils.sonar_utils import load_cone_run_npz, to_uint8_gray
@@ -132,9 +132,9 @@ def analyze_npz_sequence(
         
         if (i + 1) % 50 == 0:
             print(f"  {i+1}/{len(frame_indices)} | Status: {tracker.get_status()}")
-    
+
     df = pd.DataFrame(results)
-    
+
     # Print analysis summary
     detection_rate = df['detection_success'].mean() * 100
     print(f"\nAnalysis Summary:")
@@ -144,11 +144,11 @@ def analyze_npz_sequence(
         print(f"  Distance Range: {df['distance_meters'].min():.2f} - {df['distance_meters'].max():.2f} m")
     
     if save_outputs:
-        from utils.config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
-        output_dir = Path(EXPORTS_DIR_DEFAULT) / EXPORTS_SUBDIRS['outputs']
+        output_root = Path(EXPORTS_DIR_DEFAULT)
+        output_dir = output_root / EXPORTS_SUBDIRS.get('outputs', 'outputs')
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / f"{npz_path.stem.replace('_video', '')}_analysis.csv"
         df.to_csv(output_path, index=False)
         print(f"Saved: {output_path}")
-    
+
     return df
