@@ -78,6 +78,10 @@ def analyze_npz_sequence(
     
     cones, timestamps, extent, _ = load_cone_run_npz(npz_path)
     
+    # Extract bag_id from filename
+    # Filename format: sensor_sonoptix_echo_image__YYYY-MM-DD_HH-MM-SS_video.npz
+    bag_id = npz_path.stem.replace('sensor_sonoptix_echo_image__', '').replace('_video', '')
+    
     frame_indices = list(range(
         max(0, frame_start),
         min(len(cones), frame_start + frame_count),
@@ -85,6 +89,7 @@ def analyze_npz_sequence(
     ))
     
     print(f"Analyzing {len(frame_indices)} frames from {npz_path.name}")
+    print(f"Bag ID: {bag_id}")
     print(f"Using NetTracker system with binary processing and ellipse fitting")
     
     # Create NetTracker with combined configuration
@@ -134,6 +139,9 @@ def analyze_npz_sequence(
             print(f"  {i+1}/{len(frame_indices)} | Status: {tracker.get_status()}")
 
     df = pd.DataFrame(results)
+    
+    # Store bag_id as metadata (accessible for plotting)
+    df.attrs['bag_id'] = bag_id
 
     # Print analysis summary
     detection_rate = df['detection_success'].mean() * 100
@@ -147,7 +155,7 @@ def analyze_npz_sequence(
         output_root = Path(EXPORTS_DIR_DEFAULT)
         output_dir = output_root / EXPORTS_SUBDIRS.get('outputs', 'outputs')
         output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = output_dir / f"{npz_path.stem.replace('_video', '')}_analysis.csv"
+        output_path = output_dir / f"{bag_id}_analysis.csv"
         df.to_csv(output_path, index=False)
         print(f"Saved: {output_path}")
 

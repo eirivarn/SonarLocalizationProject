@@ -324,9 +324,26 @@ def compare_sonar_vs_dvl(
     distance_results: pd.DataFrame,
     raw_data: Optional[Dict[str, pd.DataFrame]],
     sonar_coverage_m: float = 5.0,
-    sonar_image_size: int = 700
+    sonar_image_size: int = 700,
+    bag_id: Optional[str] = None,
+    save_plot: bool = True,
+    plots_dir: Optional[Union[str, Path]] = None
 ) -> Tuple[Optional[go.Figure], Dict]:
-    """Compare sonar and DVL distance measurements."""
+    """
+    Compare sonar and DVL distance measurements.
+    
+    Args:
+        distance_results: DataFrame with sonar analysis results
+        raw_data: Dictionary containing navigation data
+        sonar_coverage_m: Sonar coverage in meters
+        sonar_image_size: Image size in pixels
+        bag_id: Bag identifier for saving plots (auto-detected from timestamp if None)
+        save_plot: Whether to save the plot to disk
+        plots_dir: Directory to save plots (uses /Volumes/LaCie/SOLAQUA/exports/plots if None)
+    
+    Returns:
+        Tuple of (plotly figure, statistics dictionary)
+    """
     
     if raw_data is None or 'navigation' not in raw_data or raw_data['navigation'] is None:
         return None, {'error': 'no_navigation_data'}
@@ -350,13 +367,23 @@ def compare_sonar_vs_dvl(
     N = max(1, len(sonar) - 1)
     sonar['synthetic_time'] = (sonar['frame_index'] / float(N)) * dvl_duration
     
+    # Auto-detect bag_id from timestamp if not provided
+    if bag_id is None and 'timestamp' in sonar.columns:
+        try:
+            first_ts = pd.to_datetime(sonar['timestamp'].iloc[0])
+            bag_id = first_ts.strftime('%Y-%m-%d_%H-%M-%S')
+        except:
+            bag_id = 'unknown'
+    elif bag_id is None:
+        bag_id = 'unknown'
+    
     fig = make_subplots()
     fig.add_trace(go.Scatter(x=sonar['synthetic_time'], y=sonar['distance_meters'],
                   mode='lines', name='Sonar', line=dict(color='red', width=3)))
     fig.add_trace(go.Scatter(x=nav['relative_time'], y=nav['NetDistance'],
                   mode='lines', name='DVL', line=dict(color='blue', width=3)))
     
-    fig.update_layout(title="Sonar vs DVL Distance Comparison", height=600)
+    fig.update_layout(title=f"Sonar vs DVL Distance Comparison - {bag_id}", height=600)
     fig.update_xaxes(title_text="Time (seconds)")
     fig.update_yaxes(title_text="Distance (meters)")
     
@@ -369,8 +396,42 @@ def compare_sonar_vs_dvl(
         'scale_ratio': sonar_mean / dvl_mean if dvl_mean else np.nan,
         'sonar_frames': len(sonar),
         'dvl_records': len(nav),
+        'bag_id': bag_id,
     }
     
     print(f"\nComparison: Sonar={sonar_mean:.3f}m, DVL={dvl_mean:.3f}m, Ratio={stats['scale_ratio']:.3f}x")
+    
+    # Save plot if requested
+    if save_plot and fig is not None:
+        # Determine save directory
+        if plots_dir is None:
+            # Try default location first
+            default_plots_dir = Path("/Volumes/LaCie/SOLAQUA/exports/plots")
+            if default_plots_dir.parent.exists():
+                plots_dir = default_plots_dir
+            else:
+                # Fallback: create 'plots' in current working directory
+                plots_dir = Path.cwd() / "plots"
+        else:
+            plots_dir = Path(plots_dir)
+        
+        # Create directory if it doesn't exist
+        plots_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Save as HTML (interactive) and PNG (static)
+        html_path = plots_dir / f"sonar_vs_dvl_{bag_id}.html"
+        png_path = plots_dir / f"sonar_vs_dvl_{bag_id}.png"
+        
+        try:
+            fig.write_html(str(html_path))
+            print(f"Saved plot: {html_path}")
+        except Exception as e:
+            print(f"Warning: Could not save HTML plot: {e}")
+        
+        try:
+            fig.write_image(str(png_path), width=1200, height=600)
+            print(f"Saved plot: {png_path}")
+        except Exception as e:
+            print(f"Warning: Could not save PNG plot (requires kaleido): {e}")
     
     return fig, stats
