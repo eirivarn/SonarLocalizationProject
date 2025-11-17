@@ -384,3 +384,424 @@ def _prepare_fft_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         prepared['fft_y_m'] = prepared['distance_m'] * np.sin(prepared['pitch_rad'])
 
     return prepared
+
+def compute_distance_pitch_statistics(sync_df: pd.DataFrame) -> Dict:
+    """
+    Compute comprehensive distance and pitch statistics for all systems.
+    
+    Args:
+        sync_df: Synchronized DataFrame with distance and pitch columns
+        
+    Returns:
+        Dictionary containing statistics for each system and cross-system comparisons
+    """
+    stats = {
+        'distance': {},
+        'pitch': {},
+        'distance_differences': {},
+        'pitch_differences': {}
+    }
+    
+    # Define column mappings
+    distance_cols = {
+        'FFT': 'fft_distance_m',
+        'Sonar': 'sonar_distance_m',
+        'DVL': 'nav_distance_m'
+    }
+    
+    pitch_cols = {
+        'FFT': 'fft_pitch_deg',
+        'Sonar': 'sonar_pitch_deg',
+        'DVL': 'nav_pitch_deg'
+    }
+    
+    # Compute per-system statistics
+    for system, col in distance_cols.items():
+        if col in sync_df.columns:
+            valid_data = sync_df[col].dropna()
+            if len(valid_data) > 0:
+                stats['distance'][system] = {
+                    'count': len(valid_data),
+                    'mean': float(valid_data.mean()),
+                    'std': float(valid_data.std()),
+                    'min': float(valid_data.min()),
+                    'max': float(valid_data.max()),
+                    'range': float(valid_data.max() - valid_data.min())
+                }
+    
+    for system, col in pitch_cols.items():
+        if col in sync_df.columns:
+            valid_data = sync_df[col].dropna()
+            if len(valid_data) > 0:
+                stats['pitch'][system] = {
+                    'count': len(valid_data),
+                    'mean': float(valid_data.mean()),
+                    'std': float(valid_data.std()),
+                    'min': float(valid_data.min()),
+                    'max': float(valid_data.max()),
+                    'range': float(valid_data.max() - valid_data.min())
+                }
+    
+    # Compute cross-system comparisons
+    system_pairs = [
+        ('FFT', 'Sonar', 'fft_distance_m', 'sonar_distance_m'),
+        ('FFT', 'DVL', 'fft_distance_m', 'nav_distance_m'),
+        ('Sonar', 'DVL', 'sonar_distance_m', 'nav_distance_m')
+    ]
+    
+    for sys1, sys2, col1, col2 in system_pairs:
+        if col1 in sync_df.columns and col2 in sync_df.columns:
+            valid_mask = sync_df[col1].notna() & sync_df[col2].notna()
+            if valid_mask.sum() > 0:
+                diff = sync_df.loc[valid_mask, col1] - sync_df.loc[valid_mask, col2]
+                pair_name = f"{sys1}-{sys2}"
+                stats['distance_differences'][pair_name] = {
+                    'count': len(diff),
+                    'mean': float(diff.mean()),
+                    'std': float(diff.std()),
+                    'rmse': float(np.sqrt((diff**2).mean())),
+                    'min': float(diff.min()),
+                    'max': float(diff.max())
+                }
+    
+    # Pitch differences
+    pitch_pairs = [
+        ('FFT', 'Sonar', 'fft_pitch_deg', 'sonar_pitch_deg'),
+        ('FFT', 'DVL', 'fft_pitch_deg', 'nav_pitch_deg'),
+        ('Sonar', 'DVL', 'sonar_pitch_deg', 'nav_pitch_deg')
+    ]
+    
+    for sys1, sys2, col1, col2 in pitch_pairs:
+        if col1 in sync_df.columns and col2 in sync_df.columns:
+            valid_mask = sync_df[col1].notna() & sync_df[col2].notna()
+            if valid_mask.sum() > 0:
+                diff = sync_df.loc[valid_mask, col1] - sync_df.loc[valid_mask, col2]
+                pair_name = f"{sys1}-{sys2}"
+                stats['pitch_differences'][pair_name] = {
+                    'count': len(diff),
+                    'mean': float(diff.mean()),
+                    'std': float(diff.std()),
+                    'rmse': float(np.sqrt((diff**2).mean())),
+                    'min': float(diff.min()),
+                    'max': float(diff.max())
+                }
+    
+    return stats
+
+
+def print_distance_pitch_statistics(stats: Dict):
+    """
+    Pretty-print distance and pitch statistics.
+    
+    Args:
+        stats: Statistics dictionary from compute_distance_pitch_statistics
+    """
+    print("=== DISTANCE & PITCH STATISTICS ===\n")
+    
+    # Distance measurements
+    print("Distance Measurements:")
+    for system, data in stats['distance'].items():
+        print(f"  {system}:")
+        print(f"    Mean: {data['mean']:.3f} m")
+        print(f"    Std: {data['std']:.3f} m")
+        print(f"    Min: {data['min']:.3f} m")
+        print(f"    Max: {data['max']:.3f} m")
+        print(f"    Range: {data['range']:.3f} m")
+    
+    # Pitch measurements
+    print("\nPitch/Angle Measurements:")
+    for system, data in stats['pitch'].items():
+        print(f"  {system}:")
+        print(f"    Mean: {data['mean']:.1f}°")
+        print(f"    Std: {data['std']:.1f}°")
+        print(f"    Min: {data['min']:.1f}°")
+        print(f"    Max: {data['max']:.1f}°")
+        print(f"    Range: {data['range']:.1f}°")
+    
+    # Cross-system comparisons
+    print("\n=== CROSS-SYSTEM COMPARISONS ===\n")
+    
+    print("Distance Differences:")
+    for pair, data in stats['distance_differences'].items():
+        print(f"  {pair}:")
+        print(f"    Mean: {data['mean']:.3f} m")
+        print(f"    Std: {data['std']:.3f} m")
+        print(f"    RMSE: {data['rmse']:.3f} m")
+    
+    print("\nPitch/Angle Differences:")
+    for pair, data in stats['pitch_differences'].items():
+        print(f"  {pair}:")
+        print(f"    Mean: {data['mean']:.2f}°")
+        print(f"    Std: {data['std']:.2f}°")
+        print(f"    RMSE: {data['rmse']:.2f}°")
+
+def apply_frame_range_filter(df_sonar: pd.DataFrame, df_nav: pd.DataFrame, df_fft: pd.DataFrame,
+                            frame_start: Optional[int] = None, frame_end: Optional[int] = None) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Apply frame range filtering to all dataframes.
+    
+    Args:
+        df_sonar: Sonar analysis DataFrame
+        df_nav: Navigation DataFrame
+        df_fft: FFT DataFrame
+        frame_start: Start frame index (None = from beginning)
+        frame_end: End frame index (None = to end)
+        
+    Returns:
+        Tuple of filtered (df_sonar, df_nav, df_fft)
+    """
+    if frame_start is None and frame_end is None:
+        return df_sonar, df_nav, df_fft
+    
+    print(f"Applying frame range filter: {frame_start or 'start'} to {frame_end or 'end'}\n")
+    
+    if df_sonar is not None and not df_sonar.empty:
+        original_len = len(df_sonar)
+        df_sonar = df_sonar.iloc[frame_start:frame_end].copy()
+        print(f"  Sonar: {original_len} → {len(df_sonar)} records")
+    
+    if df_nav is not None and not df_nav.empty:
+        original_len = len(df_nav)
+        df_nav = df_nav.iloc[frame_start:frame_end].copy()
+        print(f"  DVL: {original_len} → {len(df_nav)} records")
+    
+    if df_fft is not None and not df_fft.empty:
+        original_len = len(df_fft)
+        df_fft = df_fft.iloc[frame_start:frame_end].copy()
+        print(f"  FFT: {original_len} → {len(df_fft)} records")
+    
+    print()
+    return df_sonar, df_nav, df_fft
+
+
+def print_data_summaries(df_sonar: pd.DataFrame, df_nav: pd.DataFrame, df_fft: pd.DataFrame):
+    """Print data summaries for all three systems."""
+    print("\n=== DATA SUMMARIES ===\n")
+    
+    summaries = {
+        "Sonar": summarize_sonar_results(df_sonar),
+        "DVL": summarize_navigation_results(df_nav),
+        "FFT": summarize_fft_results(df_fft),
+    }
+    
+    for label, stats in summaries.items():
+        print(f"{label}:")
+        for key, value in stats.items():
+            if value is not None:
+                if isinstance(value, tuple):
+                    print(f"  {key}: {value[0]:.3f} to {value[1]:.3f}")
+                elif isinstance(value, float):
+                    print(f"  {key}: {value:.3f}")
+                else:
+                    print(f"  {key}: {value}")
+        print()
+
+
+def print_sample_data(df_sonar: pd.DataFrame, df_nav: pd.DataFrame, df_fft: pd.DataFrame):
+    """Print sample data from all three systems."""
+    if df_sonar is not None and not df_sonar.empty:
+        print("Sonar Analysis Sample:")
+        display_cols = ['timestamp', 'distance_meters', 'angle_degrees', 'detection_success']
+        display_cols = [c for c in display_cols if c in df_sonar.columns]
+        print(df_sonar[display_cols].head(5))
+        print()
+    
+    if df_nav is not None and not df_nav.empty:
+        print("DVL Navigation Sample:")
+        display_cols = ['timestamp', 'NetDistance', 'NetPitch']
+        display_cols = [c for c in display_cols if c in df_nav.columns]
+        print(df_nav[display_cols].head(5))
+        print()
+    
+    if df_fft is not None and not df_fft.empty:
+        print("FFT Data Sample:")
+        display_cols = ['timestamp', 'distance_m', 'pitch_deg']
+        display_cols = [c for c in display_cols if c in df_fft.columns]
+        print(df_fft[display_cols].head(5))
+
+
+def ensure_xy_columns(sync_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Ensure XY coordinate columns exist in synchronized DataFrame.
+    Handles column renaming and computation if needed.
+    
+    Args:
+        sync_df: Synchronized DataFrame
+        
+    Returns:
+        DataFrame with standardized XY column names
+    """
+    # Check if XY columns already exist (with _m suffix)
+    existing_xy = [c for c in sync_df.columns if ('_x_m' in c or '_y_m' in c or c.endswith('_x') or c.endswith('_y'))]
+    
+    if existing_xy:
+        print(f"✓ XY coordinates already exist: {existing_xy}")
+        
+        # Rename _m suffix columns to match visualizer expectations
+        rename_map = {}
+        if 'fft_x_m' in sync_df.columns:
+            rename_map['fft_x_m'] = 'fft_x'
+            rename_map['fft_y_m'] = 'fft_y'
+        if 'sonar_x_m' in sync_df.columns:
+            rename_map['sonar_x_m'] = 'sonar_x'
+            rename_map['sonar_y_m'] = 'sonar_y'
+        if 'nav_x_m' in sync_df.columns:
+            rename_map['nav_x_m'] = 'dvl_x'  # Note: nav → dvl
+            rename_map['nav_y_m'] = 'dvl_y'
+        
+        if rename_map:
+            sync_df = sync_df.rename(columns=rename_map)
+            print(f"   Renamed columns: {list(rename_map.keys())} → {list(rename_map.values())}")
+    else:
+        # Compute XY if they don't exist at all
+        print("⚠️  XY coordinates not found, computing...")
+        
+        # Compute XY for each system that has distance and pitch
+        if 'sonar_distance_m' in sync_df.columns and 'sonar_pitch_deg' in sync_df.columns:
+            print("  Computing Sonar XY...")
+            sync_df['sonar_x'] = sync_df['sonar_distance_m'] * np.sin(np.radians(sync_df['sonar_pitch_deg']))
+            sync_df['sonar_y'] = sync_df['sonar_distance_m'] * np.cos(np.radians(sync_df['sonar_pitch_deg']))
+        
+        if 'nav_distance_m' in sync_df.columns and 'nav_pitch_deg' in sync_df.columns:
+            print("  Computing DVL XY...")
+            sync_df['dvl_x'] = sync_df['nav_distance_m'] * np.sin(np.radians(sync_df['nav_pitch_deg']))
+            sync_df['dvl_y'] = sync_df['nav_distance_m'] * np.cos(np.radians(sync_df['nav_pitch_deg']))
+        
+        if 'fft_distance_m' in sync_df.columns and 'fft_pitch_deg' in sync_df.columns:
+            print("  Computing FFT XY...")
+            sync_df['fft_x'] = sync_df['fft_distance_m'] * np.sin(np.radians(sync_df['fft_pitch_deg']))
+            sync_df['fft_y'] = sync_df['fft_distance_m'] * np.cos(np.radians(sync_df['fft_pitch_deg']))
+        
+        # Report what was computed
+        xy_cols = [c for c in sync_df.columns if c.endswith('_x') or c.endswith('_y')]
+        print(f"  ✓ Computed XY columns: {xy_cols}")
+    
+    return sync_df
+
+
+def print_xy_position_statistics(sync_df: pd.DataFrame):
+    """Print XY position statistics for all systems."""
+    print("=== POSITION STATISTICS ===\n")
+    
+    xy_stats = summarize_xy_positions(sync_df)
+    
+    if xy_stats:
+        for system, stats in xy_stats.items():
+            print(f"{system}:")
+            print(f"  Data points: {stats['count']}")
+            print(f"  X position: {stats['x_mean']:.3f} ± {stats['x_std']:.3f} m")
+            print(f"  Y position: {stats['y_mean']:.3f} ± {stats['y_std']:.3f} m")
+            print(f"  Distance from origin: {stats['distance_mean']:.3f} ± {stats['distance_std']:.3f} m")
+            print()
+    else:
+        print("No XY position data available\n")
+
+def generate_and_save_xy_plots(sync_df: pd.DataFrame, visualizer, target_bag: str, 
+                               plots_dir: Path, lateral_speed_m_s: float = 0.2) -> Dict[str, bool]:
+    """
+    Generate and save all XY position plots.
+    
+    Args:
+        sync_df: Synchronized DataFrame with XY coordinates
+        visualizer: NetRelativeVisualizer instance
+        target_bag: Target bag identifier for filenames
+        plots_dir: Directory to save plots
+        lateral_speed_m_s: Lateral speed for 3D trajectory plot
+        
+    Returns:
+        Dictionary with success status for each plot type
+    """
+    results = {
+        'xy_trajectory': False,
+        'x_comparison': False,
+        'y_comparison': False
+    }
+    
+    print("=== DISPLAYING XY POSITION PLOTS ===\n")
+    
+    # Check which XY columns are available
+    has_sonar_xy = 'sonar_x' in sync_df.columns and 'sonar_y' in sync_df.columns
+    has_dvl_xy = 'dvl_x' in sync_df.columns and 'dvl_y' in sync_df.columns
+    has_fft_xy = 'fft_x' in sync_df.columns and 'fft_y' in sync_df.columns
+    
+    available_xy_systems = []
+    if has_sonar_xy:
+        available_xy_systems.append("Sonar")
+    if has_dvl_xy:
+        available_xy_systems.append("DVL")
+    if has_fft_xy:
+        available_xy_systems.append("FFT")
+    
+    print(f"Systems with XY coordinates: {', '.join(available_xy_systems)}")
+    
+    if len(available_xy_systems) == 0:
+        print("✗ No XY position data available")
+        print("  XY coordinates require distance and pitch measurements")
+        return results
+    
+    # Generate 3D XY trajectory plot
+    print(f"\nGenerating 3D XY trajectory plot...")
+    print(f"  Lateral speed: {lateral_speed_m_s} m/s")
+    try:
+        fig_xy = visualizer.plot_xy_trajectories(sync_df, lateral_speed_m_s=lateral_speed_m_s)
+        
+        if fig_xy is not None:
+            # Display the plot inline
+            try:
+                from IPython.display import display
+                display(fig_xy)
+            except:
+                fig_xy.show()
+            
+            # Save plot
+            save_path = plots_dir / f"{target_bag}_xy_trajectories_3d.html"
+            fig_xy.write_html(str(save_path))
+            print(f"✓ Saved: {save_path.name}\n")
+            results['xy_trajectory'] = True
+        else:
+            print("✗ Could not generate XY trajectory plot\n")
+            
+    except Exception as e:
+        print(f"✗ Error generating XY plot: {e}\n")
+        import traceback
+        traceback.print_exc()
+    
+    # Generate individual XY component comparison plots if multiple systems available
+    if len(available_xy_systems) >= 2:
+        print("\nGenerating XY component comparison plots...")
+        try:
+            # X position comparison (perpendicular distance to net)
+            print("\n--- Perpendicular Distance to Net Over Time ---")
+            fig_x = visualizer.plot_xy_component_comparison(sync_df, component='x')
+            if fig_x is not None:
+                try:
+                    from IPython.display import display
+                    display(fig_x)
+                except:
+                    fig_x.show()
+                save_path = plots_dir / f"{target_bag}_x_position_comparison.html"
+                fig_x.write_html(str(save_path))
+                print(f"✓ X position comparison saved: {save_path.name}\n")
+                results['x_comparison'] = True
+            
+            # Y position comparison (lateral position along net)
+            print("--- Lateral Position Along Net Over Time ---")
+            fig_y = visualizer.plot_xy_component_comparison(sync_df, component='y')
+            if fig_y is not None:
+                try:
+                    from IPython.display import display
+                    display(fig_y)
+                except:
+                    fig_y.show()
+                save_path = plots_dir / f"{target_bag}_y_position_comparison.html"
+                fig_y.write_html(str(save_path))
+                print(f"✓ Y position comparison saved: {save_path.name}\n")
+                results['y_comparison'] = True
+            
+        except Exception as e:
+            print(f"✗ Error generating component plots: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    print("✓ XY position plots complete")
+    return results
