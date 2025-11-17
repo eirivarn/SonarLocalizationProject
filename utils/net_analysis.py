@@ -535,39 +535,115 @@ def print_distance_pitch_statistics(stats: Dict):
         print(f"    Std: {data['std']:.2f}°")
         print(f"    RMSE: {data['rmse']:.2f}°")
 
-def apply_frame_range_filter(df_sonar: pd.DataFrame, df_nav: pd.DataFrame, df_fft: pd.DataFrame,
-                            frame_start: Optional[int] = None, frame_end: Optional[int] = None) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def apply_time_range_filter(df_sonar: pd.DataFrame, df_nav: pd.DataFrame, df_fft: pd.DataFrame,
+                           time_start: Optional[str] = None, time_end: Optional[str] = None) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
-    Apply frame range filtering to all dataframes.
+    Apply time range filtering to all dataframes using timestamps.
     
     Args:
         df_sonar: Sonar analysis DataFrame
         df_nav: Navigation DataFrame
         df_fft: FFT DataFrame
-        frame_start: Start frame index (None = from beginning)
-        frame_end: End frame index (None = to end)
+        time_start: Start time (ISO format string or seconds, None = from beginning)
+        time_end: End time (ISO format string or seconds, None = to end)
         
     Returns:
         Tuple of filtered (df_sonar, df_nav, df_fft)
     """
-    if frame_start is None and frame_end is None:
+    if time_start is None and time_end is None:
         return df_sonar, df_nav, df_fft
     
-    print(f"Applying frame range filter: {frame_start or 'start'} to {frame_end or 'end'}\n")
+    print(f"Applying time range filter: {time_start or 'start'} to {time_end or 'end'}\n")
     
-    if df_sonar is not None and not df_sonar.empty:
+    # Convert time strings to datetime if needed
+    if time_start is not None:
+        if isinstance(time_start, (int, float)):
+            # Relative seconds from start
+            time_start_dt = None  # Will be handled per-dataframe
+            time_start_seconds = time_start
+        else:
+            time_start_dt = pd.to_datetime(time_start, utc=True)
+            time_start_seconds = None
+    else:
+        time_start_dt = None
+        time_start_seconds = None
+    
+    if time_end is not None:
+        if isinstance(time_end, (int, float)):
+            time_end_dt = None
+            time_end_seconds = time_end
+        else:
+            time_end_dt = pd.to_datetime(time_end, utc=True)
+            time_end_seconds = None
+    else:
+        time_end_dt = None
+        time_end_seconds = None
+    
+    # Filter sonar
+    if df_sonar is not None and not df_sonar.empty and 'timestamp' in df_sonar.columns:
         original_len = len(df_sonar)
-        df_sonar = df_sonar.iloc[frame_start:frame_end].copy()
+        df_sonar_ts = pd.to_datetime(df_sonar['timestamp'], utc=True)
+        
+        if time_start_seconds is not None:
+            # Relative time from first timestamp
+            first_time = df_sonar_ts.min()
+            time_start_dt = first_time + pd.Timedelta(seconds=time_start_seconds)
+        
+        if time_end_seconds is not None:
+            first_time = df_sonar_ts.min()
+            time_end_dt = first_time + pd.Timedelta(seconds=time_end_seconds)
+        
+        mask = pd.Series(True, index=df_sonar.index)
+        if time_start_dt is not None:
+            mask &= (df_sonar_ts >= time_start_dt)
+        if time_end_dt is not None:
+            mask &= (df_sonar_ts <= time_end_dt)
+        
+        df_sonar = df_sonar[mask].copy()
         print(f"  Sonar: {original_len} → {len(df_sonar)} records")
     
-    if df_nav is not None and not df_nav.empty:
+    # Filter DVL
+    if df_nav is not None and not df_nav.empty and 'timestamp' in df_nav.columns:
         original_len = len(df_nav)
-        df_nav = df_nav.iloc[frame_start:frame_end].copy()
+        df_nav_ts = pd.to_datetime(df_nav['timestamp'], utc=True)
+        
+        if time_start_seconds is not None:
+            first_time = df_nav_ts.min()
+            time_start_dt = first_time + pd.Timedelta(seconds=time_start_seconds)
+        
+        if time_end_seconds is not None:
+            first_time = df_nav_ts.min()
+            time_end_dt = first_time + pd.Timedelta(seconds=time_end_seconds)
+        
+        mask = pd.Series(True, index=df_nav.index)
+        if time_start_dt is not None:
+            mask &= (df_nav_ts >= time_start_dt)
+        if time_end_dt is not None:
+            mask &= (df_nav_ts <= time_end_dt)
+        
+        df_nav = df_nav[mask].copy()
         print(f"  DVL: {original_len} → {len(df_nav)} records")
     
-    if df_fft is not None and not df_fft.empty:
+    # Filter FFT
+    if df_fft is not None and not df_fft.empty and 'timestamp' in df_fft.columns:
         original_len = len(df_fft)
-        df_fft = df_fft.iloc[frame_start:frame_end].copy()
+        df_fft_ts = pd.to_datetime(df_fft['timestamp'], utc=True)
+        
+        if time_start_seconds is not None:
+            first_time = df_fft_ts.min()
+            time_start_dt = first_time + pd.Timedelta(seconds=time_start_seconds)
+        
+        if time_end_seconds is not None:
+            first_time = df_fft_ts.min()
+            time_end_dt = first_time + pd.Timedelta(seconds=time_end_seconds)
+        
+        mask = pd.Series(True, index=df_fft.index)
+        if time_start_dt is not None:
+            mask &= (df_fft_ts >= time_start_dt)
+        if time_end_dt is not None:
+            mask &= (df_fft_ts <= time_end_dt)
+        
+        df_fft = df_fft[mask].copy()
         print(f"  FFT: {original_len} → {len(df_fft)} records")
     
     print()
@@ -805,3 +881,86 @@ def generate_and_save_xy_plots(sync_df: pd.DataFrame, visualizer, target_bag: st
     
     print("✓ XY position plots complete")
     return results
+
+def apply_exponential_smoothing(df: pd.DataFrame, columns: List[str], alpha: float = 0.3) -> pd.DataFrame:
+    """
+    Apply exponential moving average smoothing to specified columns.
+    This is a causal filter suitable for real-time processing.
+    
+    Args:
+        df: DataFrame to smooth
+        columns: List of column names to smooth
+        alpha: Smoothing factor (0-1). Higher = less smoothing, more responsive
+               0.1 = heavy smoothing (90% history, 10% current)
+               0.5 = balanced (50% history, 50% current)
+               0.9 = light smoothing (10% history, 90% current)
+        
+    Returns:
+        DataFrame with smoothed columns
+    """
+    if df is None or df.empty:
+        return df
+    
+    result_df = df.copy()
+    
+    for col in columns:
+        if col in result_df.columns:
+            # Apply exponential weighted moving average
+            # This only uses past and current values (causal/real-time compatible)
+            result_df[col] = result_df[col].ewm(alpha=alpha, adjust=False).mean()
+    
+    return result_df
+
+
+def apply_smoothing_to_all_systems(df_sonar: pd.DataFrame, df_nav: pd.DataFrame, 
+                                   df_fft: pd.DataFrame, alpha: float = 0.3) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Apply exponential smoothing to distance and pitch measurements for all systems.
+    
+    Args:
+        df_sonar: Sonar DataFrame
+        df_nav: Navigation DataFrame
+        df_fft: FFT DataFrame
+        alpha: Smoothing factor (0-1)
+        
+    Returns:
+        Tuple of smoothed (df_sonar, df_nav, df_fft)
+    """
+    if alpha is None or alpha >= 1.0:
+        # No smoothing
+        return df_sonar, df_nav, df_fft
+    
+    print(f"\n=== APPLYING EXPONENTIAL SMOOTHING (α={alpha:.2f}) ===")
+    print(f"  Lower α = more smoothing (e.g., 0.1 = heavy smoothing)")
+    print(f"  Higher α = less smoothing (e.g., 0.9 = light smoothing)\n")
+    
+    # Sonar columns to smooth
+    sonar_cols = ['distance_meters', 'angle_degrees']
+    if df_sonar is not None and not df_sonar.empty:
+        before_dist = df_sonar['distance_meters'].mean() if 'distance_meters' in df_sonar.columns else None
+        df_sonar = apply_exponential_smoothing(df_sonar, sonar_cols, alpha)
+        after_dist = df_sonar['distance_meters'].mean() if 'distance_meters' in df_sonar.columns else None
+        if before_dist and after_dist:
+            print(f"  Sonar distance: {before_dist:.3f} → {after_dist:.3f} m (mean)")
+    
+    # DVL/Navigation columns to smooth
+    nav_cols = ['NetDistance', 'NetPitch']
+    if df_nav is not None and not df_nav.empty:
+        before_dist = df_nav['NetDistance'].mean() if 'NetDistance' in df_nav.columns else None
+        df_nav = apply_exponential_smoothing(df_nav, nav_cols, alpha)
+        after_dist = df_nav['NetDistance'].mean() if 'NetDistance' in df_nav.columns else None
+        if before_dist and after_dist:
+            print(f"  DVL distance: {before_dist:.3f} → {after_dist:.3f} m (mean)")
+    
+    # FFT columns to smooth
+    fft_cols = ['distance_m', 'pitch_deg']
+    if df_fft is not None and not df_fft.empty:
+        before_dist = df_fft['distance_m'].mean() if 'distance_m' in df_fft.columns else None
+        df_fft = apply_exponential_smoothing(df_fft, fft_cols, alpha)
+        after_dist = df_fft['distance_m'].mean() if 'distance_m' in df_fft.columns else None
+        if before_dist and after_dist:
+            print(f"  FFT distance: {before_dist:.3f} → {after_dist:.3f} m (mean)")
+    
+    print("✓ Smoothing applied\n")
+    
+    return df_sonar, df_nav, df_fft
