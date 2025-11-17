@@ -186,7 +186,7 @@ Each SonoptixECHO message contains:
 **Float32MultiArray Structure:**
 ```python
 array_data = {
-    "layout": {
+    "layout": {932265
         "dim": [
             {"label": "range", "size": 1024, "stride": 262144},
             {"label": "beam",  "size": 256,  "stride": 256}

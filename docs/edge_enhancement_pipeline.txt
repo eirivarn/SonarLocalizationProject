@@ -1,0 +1,341 @@
+================================================================================
+    EDGE ENHANCEMENT PIPELINE: DETAILED BREAKDOWN
+    Step 2 of Main Sonar Processing Pipeline
+================================================================================
+
+OVERVIEW:
+This step transforms a simple black-and-white image into one where the net's 
+boundaries are clearly visible and ready for shape detection. Think of it as
+"sharpening a blurry photograph until the edges pop out."
+
+INPUT: Binary sonar frame (0 or 255, black/white only)
+OUTPUT: Enhanced edges (net boundaries highlighted, noise removed)
+
+================================================================================
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│  SUB-STEP 2.1: BINARY CONVERSION (Already Complete)                      │
+│  ───────────────────────────────                                         │
+│                                                                           │
+│  Input:  Binary frame from Step 1 (0 or 255 per pixel)                   │
+│  Status: No processing needed - already simplified                       │
+│  Output: Same binary frame                                               │
+│                                                                           │
+│  Why skip?: The main pipeline already converted to binary in Step 1      │
+└──────────────────────────────────────────────────────────────────────────┘
+    │
+    │  Binary Frame (black/white only)
+    │
+    ▼
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│  SUB-STEP 2.2: STRUCTURE ANALYSIS (Advanced Mode)                        │
+│  ──────────────────────────────────────                                  │
+│                                                                           │
+│  PURPOSE: Understand the LOCAL PATTERN at each pixel                     │
+│           Is it part of a LINE? Which direction? How strong?             │
+│                                                                           │
+│  ANALOGY: Like running your finger across the image - you can feel       │
+│           whether you're touching a vertical line, horizontal line,      │
+│           or just random noise                                           │
+│                                                                           │
+│  ╔════════════════════════════════════════════════════════════════════╗  │
+│  ║  2.2a: Compute Image Gradients                                     ║  │
+│  ╠════════════════════════════════════════════════════════════════════╣  │
+│  ║                                                                    ║  │
+│  ║  Input:  Binary frame (0 or 255)                                  ║  │
+│  ║  Process: Sobel filter (detects intensity changes)                ║  │
+│  ║                                                                    ║  │
+│  ║  Mathematical operation:                                          ║  │
+│  ║    grad_x = Sobel_x(image)  → Detects horizontal edges           ║  │
+│  ║    grad_y = Sobel_y(image)  → Detects vertical edges             ║  │
+│  ║                                                                    ║  │
+│  ║  What is Sobel?                                                   ║  │
+│  ║    A 3×3 filter that measures how much brightness changes         ║  │
+│  ║    when moving left-to-right (grad_x) or top-to-bottom (grad_y)  ║  │
+│  ║                                                                    ║  │
+│  ║    Sobel X kernel:         Sobel Y kernel:                        ║  │
+│  ║    ┌─────────────┐         ┌─────────────┐                       ║  │
+│  ║    │ -1  0  +1  │         │ -1  -2  -1 │                       ║  │
+│  ║    │ -2  0  +2  │         │  0   0   0 │                       ║  │
+│  ║    │ -1  0  +1  │         │ +1  +2  +1 │                       ║  │
+│  ║    └─────────────┘         └─────────────┘                       ║  │
+│  ║                                                                    ║  │
+│  ║  Visual example:                                                  ║  │
+│  ║    Image:          grad_x result:      grad_y result:            ║  │
+│  ║    ░░░░░░░         ░░░░░░░             ▓▓▓▓▓▓▓                   ║  │
+│  ║    ░░░░░░░         ░░░░░░░             ▓▓▓▓▓▓▓                   ║  │
+│  ║    ▓▓▓▓▓▓▓    →    ▓▓▓▓▓▓▓        →    ░░░░░░░                   ║  │
+│  ║    ▓▓▓▓▓▓▓         ▓▓▓▓▓▓▓             ░░░░░░░                   ║  │
+│  ║    ▓▓▓▓▓▓▓         ▓▓▓▓▓▓▓             ░░░░░░░                   ║  │
+│  ║   (horizontal       (detects            (quiet -                 ║  │
+│  ║    edge)            edge)               no vertical edge)        ║  │
+│  ║                                                                    ║  │
+│  ║  Output: Two gradient maps (grad_x, grad_y) showing edge          ║  │
+│  ║          directions and strengths at each pixel                   ║  │
+│  ╚════════════════════════════════════════════════════════════════════╝  │
+│                                                                           │
+│  ╔════════════════════════════════════════════════════════════════════╗  │
+│  ║  2.2b: Structure Tensor Computation                               ║  │
+│  ╠════════════════════════════════════════════════════════════════════╣  │
+│  ║                                                                    ║  │
+│  ║  Purpose: Combine grad_x and grad_y to understand LOCAL PATTERN   ║  │
+│  ║                                                                    ║  │
+│  ║  The Structure Tensor is a 2×2 matrix at each pixel:              ║  │
+│  ║                                                                    ║  │
+│  ║    J = ┌─────────────────────┐                                   ║  │
+│  ║        │ grad_x²    grad_x·grad_y │                               ║  │
+│  ║        │ grad_x·grad_y  grad_y²  │                               ║  │
+│  ║        └─────────────────────┘                                   ║  │
+│  ║                                                                    ║  │
+│  ║  This matrix is then SMOOTHED using Gaussian blur to capture      ║  │
+│  ║  the pattern over a small neighborhood (not just a single pixel)  ║  │
+│  ║                                                                    ║  │
+│  ║  From this matrix, we extract TWO KEY PROPERTIES:                 ║  │
+│  ║                                                                    ║  │
+│  ║  1) ORIENTATION: Which direction does the pattern point?          ║  │
+│  ║     Formula: angle = 0.5 × arctan2(2·Jxy, Jxx - Jyy)             ║  │
+│  ║     Result: 0-180° (straight line direction)                      ║  │
+│  ║                                                                    ║  │
+│  ║  2) LINEARITY (coherency): How line-like is the pattern?          ║  │
+│  ║     Formula: coherency = (λ₁ - λ₂) / λ₁                          ║  │
+│  ║              where λ₁, λ₂ are eigenvalues                         ║  │
+│  ║     Result: 0.0 = blob/noise, 1.0 = perfect line                  ║  │
+│  ║                                                                    ║  │
+│  ║  Visual interpretation:                                           ║  │
+│  ║                                                                    ║  │
+│  ║    Image region:     Orientation:    Linearity:                   ║  │
+│  ║    ░░░░░░░░         0° (→)          0.9 (strong line)            ║  │
+│  ║    ░░░░░░░░                                                       ║  │
+│  ║    ▓▓▓▓▓▓▓▓                                                       ║  │
+│  ║    ▓▓▓▓▓▓▓▓                                                       ║  │
+│  ║                                                                    ║  │
+│  ║    ░░▓▓░░▓▓         45° (↗)         0.3 (weak/noisy)             ║  │
+│  ║    ░▓░░▓░░▓                                                       ║  │
+│  ║    ▓░░░░▓░░                                                       ║  │
+│  ║    ░▓░░▓░░▓                                                       ║  │
+│  ║                                                                    ║  │
+│  ║  Output: Two maps covering the entire image:                      ║  │
+│  ║    - orientation_map[y,x] = angle in degrees (0-180)              ║  │
+│  ║    - linearity_map[y,x]   = strength (0.0-1.0)                    ║  │
+│  ╚════════════════════════════════════════════════════════════════════╝  │
+│                                                                           │
+│  ╔════════════════════════════════════════════════════════════════════╗  │
+│  ║  2.2c: Pattern-Based Enhancement                                  ║  │
+│  ╠════════════════════════════════════════════════════════════════════╣  │
+│  ║                                                                    ║  │
+│  ║  Purpose: Enhance lines while suppressing noise                   ║  │
+│  ║                                                                    ║  │
+│  ║  Strategy: Use ELONGATED KERNELS aligned with detected patterns   ║  │
+│  ║                                                                    ║  │
+│  ║  For each region with high linearity:                             ║  │
+│  ║    1. Create an elliptical kernel (oval-shaped blur)              ║  │
+│  ║    2. Orient the kernel along the detected line direction         ║  │
+│  ║    3. Apply blur ONLY in that direction                           ║  │
+│  ║                                                                    ║  │
+│  ║  Why elliptical?: Because it blurs ALONG the line (good!)         ║  │
+│  ║                   but NOT ACROSS the line (preserves edges!)      ║  │
+│  ║                                                                    ║  │
+│  ║  Visual example:                                                  ║  │
+│  ║                                                                    ║  │
+│  ║    Original noisy line:    Elliptical kernel:    Enhanced line:   ║  │
+│  ║    ░░▓░░░▓░░░░            ┌─────┐              ░░░░░░▓░░░░       ║  │
+│  ║    ░░░▓░░░▓░░░            │ ─── │              ░░░░░░▓░░░░       ║  │
+│  ║    ░░░░▓░░░▓░░      ×     │ ─── │       =      ░░░░░░▓░░░░       ║  │
+│  ║    ░░░░░▓░░░▓░            │ ─── │              ░░░░░░▓░░░░       ║  │
+│  ║    ░░░░░░▓░░░▓            └─────┘              ░░░░░░▓░░░░       ║  │
+│  ║   (spotty, broken)      (horizontal blur)    (smooth, continuous) ║  │
+│  ║                                                                    ║  │
+│  ║  Key parameters:                                                  ║  │
+│  ║    - Base radius: 3 pixels (kernel size)                          ║  │
+│  ║    - Elongation: 1.0-3.0× (how oval-shaped)                       ║  │
+│  ║    - Angle: From orientation_map                                  ║  │
+│  ║    - Strength: From linearity_map                                 ║  │
+│  ║                                                                    ║  │
+│  ║  The enhancement is SELECTIVE:                                    ║  │
+│  ║    - High linearity regions → strong enhancement                  ║  │
+│  ║    - Low linearity regions  → minimal/no enhancement              ║  │
+│  ║    - Random noise           → suppressed                          ║  │
+│  ║                                                                    ║  │
+│  ║  Output: Enhanced binary image where net lines are continuous     ║  │
+│  ║          and noise is reduced                                     ║  │
+│  ╚════════════════════════════════════════════════════════════════════╝  │
+└──────────────────────────────────────────────────────────────────────────┘
+    │
+    │  Enhanced Binary Frame (clean lines, reduced noise)
+    │
+    ▼
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│  SUB-STEP 2.3: EDGE EXTRACTION                                           │
+│  ───────────────────────                                                 │
+│                                                                           │
+│  Purpose: Find the BOUNDARIES between black and white regions            │
+│                                                                           │
+│  Method: Laplacian-like edge detection kernel                            │
+│                                                                           │
+│  Edge kernel (3×3):                                                       │
+│    ┌─────────────┐                                                       │
+│    │ -1  -1  -1 │                                                       │
+│    │ -1   8  -1 │  ← Center pixel gets +8                               │
+│    │ -1  -1  -1 │  ← Neighbors get -1 each                              │
+│    └─────────────┘                                                       │
+│                                                                           │
+│  How it works:                                                           │
+│    - If center pixel is DIFFERENT from neighbors → Large positive value  │
+│    - If center pixel is SAME as neighbors → ~Zero                        │
+│                                                                           │
+│  Visual example:                                                         │
+│                                                                           │
+│    Input frame:           Edge kernel applied:     Binary edges:         │
+│    ░░░░░░░░░             ░░░░░░░░░                 ░░░░░░░░░            │
+│    ░░░░░░░░░             ░░░░░░░░░                 ░░░░░░░░░            │
+│    ░░░░░░░░░             ░░░░░░░░░                 ░░░░░░░░░            │
+│    ▓▓▓▓▓▓▓▓▓      →      ▓▓▓▓▓▓▓▓▓         →       ▓▓▓▓▓▓▓▓▓            │
+│    ▓▓▓▓▓▓▓▓▓             ░░░░░░░░░                 ░░░░░░░░░            │
+│    ▓▓▓▓▓▓▓▓▓             ░░░░░░░░░                 ░░░░░░░░░            │
+│    ▓▓▓▓▓▓▓▓▓             ░░░░░░░░░                 ░░░░░░░░░            │
+│   (solid regions)      (edge highlighted)         (edge only)            │
+│                                                                           │
+│  The result: A binary image where ONLY boundaries are white              │
+│                                                                           │
+│  Output: Raw edges (from original binary)                                │
+│          Enhanced edges (from enhanced binary)                           │
+└──────────────────────────────────────────────────────────────────────────┘
+    │
+    │  Edge-only frames (boundaries highlighted)
+    │
+    ▼
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│  SUB-STEP 2.4: MORPHOLOGICAL REFINEMENT (Optional)                       │
+│  ────────────────────────────────────────                                │
+│                                                                           │
+│  Purpose: Clean up the edges further                                     │
+│                                                                           │
+│  ╔════════════════════════════════════════════════════════════════════╗  │
+│  ║  2.4a: Morphological Closing                                      ║  │
+│  ╠════════════════════════════════════════════════════════════════════╣  │
+│  ║                                                                    ║  │
+│  ║  Purpose: Fill small gaps in edge lines                           ║  │
+│  ║                                                                    ║  │
+│  ║  Operation: Dilation → Erosion                                    ║  │
+│  ║    1. Dilation: Expand white pixels slightly                      ║  │
+│  ║    2. Erosion: Shrink them back                                   ║  │
+│  ║                                                                    ║  │
+│  ║  Effect: Small gaps get filled, but overall shape preserved       ║  │
+│  ║                                                                    ║  │
+│  ║  Visual example:                                                  ║  │
+│  ║    Before:           After closing:                               ║  │
+│  ║    ▓▓▓░░▓▓▓         ▓▓▓▓▓▓▓▓▓                                    ║  │
+│  ║    ▓▓▓░░▓▓▓         ▓▓▓▓▓▓▓▓▓                                    ║  │
+│  ║    ▓▓▓░░▓▓▓         ▓▓▓▓▓▓▓▓▓                                    ║  │
+│  ║   (broken line)    (continuous line)                              ║  │
+│  ║                                                                    ║  │
+│  ║  Analogy: Like filling in cracks in a drawing                     ║  │
+│  ╚════════════════════════════════════════════════════════════════════╝  │
+│                                                                           │
+│  ╔════════════════════════════════════════════════════════════════════╗  │
+│  ║  2.4b: Edge Dilation                                              ║  │
+│  ╠════════════════════════════════════════════════════════════════════╣  │
+│  ║                                                                    ║  │
+│  ║  Purpose: Make edges slightly thicker for better detection        ║  │
+│  ║                                                                    ║  │
+│  ║  Operation: Expand white pixels by 1-2 pixels                     ║  │
+│  ║                                                                    ║  │
+│  ║  Visual example:                                                  ║  │
+│  ║    Before:           After dilation:                              ║  │
+│  ║    ░░░░░░░░░         ░░░░░░░░░                                    ║  │
+│  ║    ░░░▓░░░░░         ░░▓▓▓░░░░                                    ║  │
+│  ║    ░░░▓░░░░░         ░░▓▓▓░░░░                                    ║  │
+│  ║    ░░░▓░░░░░         ░░▓▓▓░░░░                                    ║  │
+│  ║    ░░░░░░░░░         ░░░░░░░░░                                    ║  │
+│  ║   (thin line)       (thicker line)                                ║  │
+│  ║                                                                    ║  │
+│  ║  Why?: Helps contour detection find edges more reliably           ║  │
+│  ╚════════════════════════════════════════════════════════════════════╝  │
+└──────────────────────────────────────────────────────────────────────────┘
+    │
+    │  Final Enhanced Edges
+    │
+    ▼
+
+OUTPUT: Two edge images
+  1. raw_edges: Edges from original binary (baseline)
+  2. enhanced_edges: Edges after structure analysis and refinement
+
+================================================================================
+KEY CONCEPTS EXPLAINED
+================================================================================
+
+1. GRADIENT
+   - Measures how fast brightness changes
+   - High gradient = edge/boundary
+   - Low gradient = uniform region
+   - Direction of gradient = perpendicular to edge
+
+2. STRUCTURE TENSOR
+   - 2×2 matrix capturing local pattern
+   - Answers: "Is this a line? What direction? How strong?"
+   - Based on combining horizontal and vertical gradients
+   - More robust than single-direction gradients
+
+3. ORIENTATION vs LINEARITY
+   - Orientation: Which way does the pattern point (0-180°)
+   - Linearity: How line-like is it (0=noise, 1=perfect line)
+   - These come from eigenvalue analysis of structure tensor
+
+4. ELLIPTICAL KERNEL
+   - Blur kernel shaped like an oval
+   - Long axis = blur along the line
+   - Short axis = preserve edge sharpness
+   - Result: Smooth lines without blurring across boundaries
+
+5. MORPHOLOGICAL OPERATIONS
+   - Opening = Erosion + Dilation (removes noise)
+   - Closing = Dilation + Erosion (fills gaps)
+   - Dilation = Expand white pixels
+   - Erosion = Shrink white pixels
+
+================================================================================
+PARAMETER TUNING GUIDE
+================================================================================
+
+Parameter                          Effect                    Typical Value
+─────────────────────────────────────────────────────────────────────────────
+binary_threshold                   Signal vs background      127 (0-255)
+adaptive_angle_steps               Angular resolution        36 (→ 5° bins)
+adaptive_base_radius               Blur kernel size          3 pixels
+adaptive_max_elongation            Max oval stretch          3.0×
+momentum_boost                     Enhancement strength      0.8
+adaptive_linearity_threshold       Min linearity to process  0.15
+morph_close_kernel                 Gap filling size          3-5 pixels
+edge_dilation_iterations           Edge thickness            1-2 iterations
+
+================================================================================
+COMPARISON: BASIC vs ADVANCED MODE
+================================================================================
+
+BASIC MODE (use_advanced_momentum_merging = False):
+  - Simple Gaussian blur or morphological opening
+  - Fast but less selective
+  - Good for: Clean images with low noise
+  - Processing time: ~1-5 ms per frame
+
+ADVANCED MODE (use_advanced_momentum_merging = True):
+  - Structure tensor analysis
+  - Direction-aware enhancement
+  - Selective processing based on linearity
+  - Good for: Noisy images, complex patterns
+  - Processing time: ~10-30 ms per frame
+
+================================================================================
+IMPLEMENTATION REFERENCES
+================================================================================
+
+Main function:           image_enhancement.py (preprocess_edges)
+Structure tensor:        image_enhancement.py (compute_structure_tensor_field_fast)
+Pattern enhancement:     image_enhancement.py (adaptive_linear_momentum_merge_fast)
+Morphological ops:       OpenCV (cv2.morphologyEx, cv2.dilate, cv2.erode)
+
+================================================================================

@@ -1,0 +1,212 @@
+================================================================================
+    SONAR-BASED NET DETECTION AND DISTANCE MEASUREMENT PIPELINE
+================================================================================
+
+INPUT: Raw Sonar Frame Sequence
+    │
+    │  • Grayscale image (0-255 intensity)
+    │  • Cone-view projection from multibeam sonar
+    │  • Timestamped frames at ~10-20 Hz
+    │
+    ▼
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│  STEP 1: BINARY THRESHOLDING                                             │
+│  ─────────────────────────────                                           │
+│                                                                           │
+│  Input:  Grayscale frame (0-255)                                         │
+│  Process: if pixel > 127: pixel = 255 (white)                            │
+│           else:            pixel = 0   (black)                            │
+│  Output: Binary image (black/white only)                                 │
+│                                                                           │
+│  Purpose: Removes intensity variations, keeps only structure             │
+│  Analogy: Converting photo to silhouette                                 │
+└──────────────────────────────────────────────────────────────────────────┘
+    │
+    │  Binary Image (0 or 255)
+    │
+    ▼
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│  STEP 2: EDGE ENHANCEMENT                                                │
+│  ──────────────────────                                                  │
+│                                                                           │
+│  Input:  Binary image                                                    │
+│  Process:                                                                │
+│    a) Opening:  Erosion → Dilation  (removes small noise)               │
+│    b) Dilation: Expand remaining edges (strengthens boundaries)         │
+│  Output: Enhanced edges                                                  │
+│                                                                           │
+│  Purpose: Clean up noise, make net boundaries clearer                    │
+│  Analogy: Tracing outlines with a marker                                 │
+└──────────────────────────────────────────────────────────────────────────┘
+    │
+    │  Enhanced Binary Edges
+    │
+    ▼
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│  STEP 3: CONTOUR DETECTION                                               │
+│  ───────────────────────                                                 │
+│                                                                           │
+│  Input:  Enhanced edges                                                  │
+│  Process:                                                                │
+│    1. Find all closed curves (contours) in image                         │
+│    2. Filter by minimum area (200 px²)                                   │
+│    3. Select best candidate:                                             │
+│       - Largest area                                                     │
+│       - Closest to previous detection (if tracking)                      │
+│  Output: Best contour (array of (x,y) points)                            │
+│                                                                           │
+│  Purpose: Identify the net structure among all detected shapes           │
+└──────────────────────────────────────────────────────────────────────────┘
+    │
+    │  Contour Points [(x₁,y₁), (x₂,y₂), ..., (xₙ,yₙ)]
+    │
+    ▼
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│  STEP 4: ELLIPSE FITTING                                                 │
+│  ─────────────────────                                                   │
+│                                                                           │
+│  Input:  Contour points                                                  │
+│  Process: Fit smallest ellipse containing all points                     │
+│           using least-squares optimization                               │
+│  Output: Ellipse parameters:                                             │
+│          • Center (cx, cy)                                               │
+│          • Size (width, height)                                          │
+│          • Angle θ (major axis orientation, 0-180°)                      │
+│                                                                           │
+│  Purpose: Represent net shape with simple geometric model                │
+│  Analogy: Drawing the smallest oval around the net                       │
+└──────────────────────────────────────────────────────────────────────────┘
+    │
+    │  Ellipse: (center, size, angle)
+    │
+    ▼
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│  STEP 5: DISTANCE CALCULATION                                            │
+│  ──────────────────────────                                              │
+│                                                                           │
+│  Input:  Ellipse center (cx, cy) and angle θ                             │
+│  Process:                                                                │
+│    1. Red line angle = θ + 90° (perpendicular to major axis)             │
+│    2. Project line from (cx, cy) in red line direction                   │
+│    3. Find intersection with image centerline (x = W/2)                  │
+│    4. Y-coordinate of intersection = distance_pixels                     │
+│                                                                           │
+│  Mathematical formula:                                                   │
+│    x = cx + t·cos(θ + 90°)  →  solve for t when x = W/2                 │
+│    y = cy + t·sin(θ + 90°)  →  distance = y                              │
+│                                                                           │
+│  Output: distance_pixels (y-coordinate), angle_degrees                   │
+│                                                                           │
+│  Purpose: Convert 2D position to 1D distance measurement                 │
+│  Analogy: Measuring how far down the screen the net appears              │
+│                                                                           │
+│  Visual representation:                                                  │
+│                                                                           │
+│      ROV (at top)                                                        │
+│      ↓                                                                   │
+│  ┌───────────────┐  ← Image frame                                       │
+│  │       ↓       │                                                       │
+│  │   ●────×      │  ● = Net center                                      │
+│  │   net  ↑      │  × = Intersection with centerline                    │
+│  │        distance│  ↕ = distance_pixels (vertical coordinate)          │
+│  └───────────────┘                                                       │
+└──────────────────────────────────────────────────────────────────────────┘
+    │
+    │  (distance_pixels, angle_degrees)
+    │
+    ▼
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│  STEP 6: TEMPORAL SMOOTHING                                              │
+│  ────────────────────────                                                │
+│                                                                           │
+│  Input:  Raw distance_pixels                                             │
+│  Process: Rate limiting filter                                           │
+│    If |distance_new - distance_old| > 20 pixels:                         │
+│       distance_new = distance_old ± 20                                   │
+│                                                                           │
+│  Output: Smoothed distance_pixels                                        │
+│                                                                           │
+│  Purpose: Prevent jittery measurements between frames                    │
+│  Analogy: Drawing a smooth path through noisy GPS points                 │
+│                                                                           │
+│  Example:                                                                │
+│    Frame 1: 100 px                                                       │
+│    Frame 2: 150 px (jump = 50) → clamped to 120 px                      │
+│    Frame 3: 145 px (jump = 25) → clamped to 140 px                      │
+└──────────────────────────────────────────────────────────────────────────┘
+    │
+    │  Smoothed distance_pixels
+    │
+    ▼
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│  STEP 7: PIXEL-TO-METER CONVERSION                                       │
+│  ───────────────────────────────                                         │
+│                                                                           │
+│  Input:  distance_pixels, sonar extent [x_min, x_max, y_min, y_max]     │
+│                                                                           │
+│  Process:                                                                │
+│    1. Calculate scaling factor:                                          │
+│       pixels_to_meters = (y_max - y_min) / image_height                  │
+│                                                                           │
+│    2. Convert to real-world distance:                                    │
+│       distance_m = y_min + distance_pixels × pixels_to_meters            │
+│                                                                           │
+│  Output: distance_meters (absolute distance from ROV)                    │
+│                                                                           │
+│  Purpose: Convert image coordinates to physical measurements             │
+│  Analogy: Converting inches on a map to actual miles                     │
+│                                                                           │
+│  Example:                                                                │
+│    Image height = 400 pixels                                             │
+│    Sonar range  = 0 to 10 meters                                         │
+│    Scaling      = 10m / 400px = 0.025 m/px                               │
+│    If distance_pixels = 200:                                             │
+│       distance_m = 0 + 200 × 0.025 = 5.0 meters                          │
+└──────────────────────────────────────────────────────────────────────────┘
+    │
+    │  Final Measurements
+    │
+    ▼
+
+OUTPUT: Time Series Data
+┌──────────────────────────────────────────────────────────────────────────┐
+│  For each frame:                                                         │
+│    • timestamp           (UTC time)                                      │
+│    • distance_meters     (0-10m typical range)                           │
+│    • angle_degrees       (0-360°, net orientation)                       │
+│    • detection_success   (True/False)                                    │
+│    • tracking_status     (TRACKED/SEARCHING/LOST)                        │
+│    • area                (contour size in pixels²)                       │
+└──────────────────────────────────────────────────────────────────────────┘
+
+================================================================================
+KEY PARAMETERS
+================================================================================
+
+Binary Threshold:        127 (0-255 scale)
+Min Contour Area:        200 pixels²
+Max Distance Change:     20 pixels/frame
+Ellipse Expansion:       50% for search area
+Smoothing Alphas:        
+  - Center:      0.4 (40% new, 60% old)
+  - Size:        0.01 (1% new, 99% old)  
+  - Angle:       0.2 (20% new, 80% old)
+
+================================================================================
+IMPLEMENTATION FILES
+================================================================================
+
+Main Pipeline:      sonar_analysis.py (analyze_npz_sequence)
+Edge Processing:    image_enhancement.py (preprocess_edges)
+Tracking Logic:     sonar_tracking.py (NetTracker class)
+Utilities:          sonar_utils.py, io_utils.py
+Configuration:      config.py (IMAGE_PROCESSING_CONFIG, TRACKING_CONFIG)
+
+================================================================================

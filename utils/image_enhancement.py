@@ -420,8 +420,8 @@ def preprocess_edges(frame_u8: np.ndarray, config: Dict) -> Tuple[np.ndarray, np
     # STEP 3: Extract edges from enhanced binary frame
     kernel_edge = np.array([[-1, -1, -1], [-1, 8, -1], [-1, -1, -1]], dtype=np.float32)
     
-    # Raw edges
-    raw_edges = cv2.filter2D(binary_frame, cv2.CV_32F, kernel_edge)
+    # Raw edges - FIX: use frame_u8 parameter instead of undefined binary_frame
+    raw_edges = cv2.filter2D(frame_u8, cv2.CV_32F, kernel_edge)
     raw_edges = np.clip(raw_edges, 0, 255).astype(np.uint8)
     raw_edges = (raw_edges > 0).astype(np.uint8) * 255
     

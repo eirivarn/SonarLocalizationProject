@@ -78,9 +78,15 @@ def analyze_npz_sequence(
     
     cones, timestamps, extent, _ = load_cone_run_npz(npz_path)
     
-    # Extract bag_id from filename
-    # Filename format: sensor_sonoptix_echo_image__YYYY-MM-DD_HH-MM-SS_video.npz
-    bag_id = npz_path.stem.replace('sensor_sonoptix_echo_image__', '').replace('_video', '')
+    # Extract bag_id from filename - handle multiple possible suffixes
+    # Filename formats:
+    #   sensor_sonoptix_echo_image__YYYY-MM-DD_HH-MM-SS_video.npz
+    #   sensor_sonoptix_echo_image__YYYY-MM-DD_HH-MM-SS_data_cones_video.npz
+    bag_id = npz_path.stem.replace('sensor_sonoptix_echo_image__', '')
+    
+    # Remove all possible suffixes to get clean bag_id
+    for suffix in ['_data_cones_video', '_video', '_data_cones', '_cones']:
+        bag_id = bag_id.replace(suffix, '')
     
     frame_indices = list(range(
         max(0, frame_start),

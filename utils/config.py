@@ -76,12 +76,12 @@ ENHANCE_DEFAULTS: Dict = {
 IMAGE_PROCESSING_CONFIG: Dict = {
     
     # === BINARY CONVERSION ===
-    'binary_threshold': 1,              # Threshold for binary conversion (0-255)
+    'binary_threshold': 128,              # Threshold for binary conversion (0-255)
                                         # Pixels > threshold become 255, others 0
                                         # Low threshold (1) means any non-zero signal is detected
     
     # === ADAPTIVE LINEAR MOMENTUM MERGING ===
-    'use_advanced_momentum_merging': True,  # Use structure tensor analysis vs basic Gaussian
+    'use_advanced_momentum_merging': False,  # Use structure tensor analysis vs basic Gaussian
     
     # Advanced momentum parameters
     'adaptive_angle_steps': 20,         # Number of angles tested for linearity
@@ -99,7 +99,7 @@ IMAGE_PROCESSING_CONFIG: Dict = {
     'basic_gaussian_sigma': 1.0,        # Sigma for basic Gaussian blur
     'basic_use_dilation': True,          # Use morphological dilation instead of blur
     'basic_dilation_kernel_size': 3,     # Kernel size for dilation (grows non-zero pixels)
-    'basic_dilation_iterations': 1,      # Number of dilation iterations
+    'basic_dilation_iterations': 3,      # Number of dilation iterations
     
     # === MORPHOLOGICAL POST-PROCESSING ===
     'morph_close_kernel': 0,            # Kernel size for morphological closing

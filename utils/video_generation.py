@@ -1276,13 +1276,16 @@ def create_enhanced_contour_detection_video(
             overlay[search_mask > 0] = [0, 255, 0]  # Green
             search_mask_display = cv2.addWeighted(search_mask_display, 0.7, overlay, 0.3, 0)
             
-            # Draw ellipse outline
+            # Draw ellipse outline (if tracker has established tracking)
             if tracker.center and tracker.size and tracker.angle is not None:
-                ell = ((int(tracker.center[0]), int(tracker.center[1])),
-                       (int(tracker.size[0] * (1 + config['ellipse_expansion_factor'])),
-                        int(tracker.size[1] * (1 + config['ellipse_expansion_factor']))),
-                       tracker.angle)
-                cv2.ellipse(search_mask_display, ell, (255, 0, 255), 2)
+                try:
+                    ell = ((int(tracker.center[0]), int(tracker.center[1])),
+                           (int(tracker.size[0] * (1 + config['ellipse_expansion_factor'])),
+                            int(tracker.size[1] * (1 + config['ellipse_expansion_factor']))),
+                           tracker.angle)
+                    cv2.ellipse(search_mask_display, ell, (255, 0, 255), 2)
+                except:
+                    pass
         
         # 5. Track using NetTracker
         contour = tracker.find_and_update(edges, (H, W))
@@ -1372,5 +1375,352 @@ def create_enhanced_contour_detection_video(
     print(f"\n✓ Video saved to: {output_path}")
     print(f"Grid layout: Raw | Momentum | Edges")
     print(f"             Search Mask | Best Contour | Distance")
+    
+    return output_path
+
+def save_pipeline_step_figures(
+    npz_file_index=0,
+    frame_start=0,
+    frame_count=10,
+    output_dir='pipeline_steps',
+    dpi=150
+):
+    """
+    Save individual figures for each step of the contour detection pipeline.
+    Creates one figure per step per frame for detailed analysis.
+    
+    Args:
+        npz_file_index: Index of NPZ file to process
+        frame_start: Starting frame index
+        frame_count: Number of consecutive frames to process
+        output_dir: Directory to save figures (will be created if not exists)
+        dpi: Resolution of saved figures
+        
+    Output Structure:
+        output_dir/
+            frame_0000/
+                step1_binary.png
+                step2_momentum.png
+                step3_edges.png
+                step4_search_mask.png
+                step5_contour.png
+                step6_distance.png
+            frame_0001/
+                ...
+    
+    Returns:
+        Path to output directory
+    """
+    import cv2
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from pathlib import Path
+    
+    from utils.sonar_utils import load_cone_run_npz, to_uint8_gray
+    from utils.io_utils import get_available_npz_files
+    from utils.sonar_tracking import NetTracker
+    
+    print("=== SAVING PIPELINE STEP FIGURES ===")
+    print(f"Processing {frame_count} frames starting from frame {frame_start}")
+    
+    # Load NPZ data
+    files = get_available_npz_files()
+    if npz_file_index >= len(files):
+        print(f"Error: NPZ file index {npz_file_index} not available")
+        return None
+    
+    print(f"Loading: {files[npz_file_index].name}")
+    cones, timestamps, extent, _ = load_cone_run_npz(files[npz_file_index])
+    T = len(cones)
+    
+    if frame_start + frame_count > T:
+        frame_count = T - frame_start
+        print(f"Adjusted frame_count to {frame_count} (available frames)")
+    
+    # Create output directory structure
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    # Initialize tracker
+    config = {**IMAGE_PROCESSING_CONFIG, **TRACKING_CONFIG}
+    tracker = NetTracker(config)
+    
+    print(f"Output directory: {output_path.absolute()}")
+    print(f"Image resolution: {dpi} DPI")
+    print(f"Tracker initialized with config:")
+    print(f"  binary_threshold: {config['binary_threshold']}")
+    print(f"  min_contour_area: {config.get('min_contour_area', 100)}")
+    print()
+    
+    # Process each frame
+    for i in range(frame_count):
+        idx = frame_start + i
+        frame_u8 = to_uint8_gray(cones[idx])
+        H, W = frame_u8.shape
+        
+        # Create frame directory
+        frame_dir = output_path / f"frame_{idx:04d}"
+        frame_dir.mkdir(exist_ok=True)
+        
+        print(f"Processing frame {idx} ({i+1}/{frame_count})...")
+        
+        # ===== STEP 1: Binary Conversion =====
+        binary_threshold = config['binary_threshold']
+        binary = (frame_u8 > binary_threshold).astype(np.uint8) * 255
+        
+        fig, ax = plt.subplots(figsize=(8, 8), facecolor='black')
+        fig.patch.set_facecolor('black')
+        ax.imshow(binary, cmap='gray', vmin=0, vmax=255, origin='lower')
+        ax.set_title(f'Step 1: Binary Conversion (threshold={binary_threshold})', 
+                    color='white', fontsize=14)
+        ax.axis('off')
+        ax.set_facecolor('black')
+        
+        # Add statistics
+        white_pct = 100 * np.sum(binary == 255) / binary.size
+        stats_text = f"White: {white_pct:.1f}%"
+        ax.text(10, 30, stats_text, color='white', fontsize=10,
+               bbox=dict(boxstyle='round', facecolor='black', alpha=0.7))
+        
+        plt.tight_layout()
+        plt.savefig(frame_dir / 'step1_binary.png', dpi=dpi, facecolor='black')
+        plt.close(fig)
+        
+        # ===== STEP 2: Momentum Merging =====
+        try:
+            use_advanced = config.get('use_advanced_momentum_merging', True)
+            if use_advanced:
+                momentum = adaptive_linear_momentum_merge_fast(
+                    binary,
+                    angle_steps=config['adaptive_angle_steps'],
+                    base_radius=config['adaptive_base_radius'],
+                    max_elongation=config['adaptive_max_elongation'],
+                    momentum_boost=config['momentum_boost'],
+                    linearity_threshold=config['adaptive_linearity_threshold'],
+                    downscale_factor=config['downscale_factor'],
+                    top_k_bins=config['top_k_bins'],
+                    min_coverage_percent=config['min_coverage_percent'],
+                    gaussian_sigma=config['gaussian_sigma']
+                )
+                method = "Advanced Adaptive Momentum"
+            else:
+                use_dilation = config.get('basic_use_dilation', True)
+                if use_dilation:
+                    kernel_size = config.get('basic_dilation_kernel_size', 3)
+                    iterations = config.get('basic_dilation_iterations', 1)
+                    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+                    momentum = cv2.dilate(binary, kernel, iterations=iterations)
+                    method = f"Basic Dilation ({kernel_size}x{kernel_size}, {iterations} iter)"
+                else:
+                    kernel_size = config.get('basic_gaussian_kernel_size', 3)
+                    gaussian_sigma = config.get('basic_gaussian_sigma', 1.0)
+                    momentum = cv2.GaussianBlur(binary, (kernel_size, kernel_size), gaussian_sigma)
+                    method = f"Gaussian Blur (σ={gaussian_sigma})"
+        except:
+            momentum = binary
+            method = "None (fallback)"
+        
+        fig, ax = plt.subplots(figsize=(8, 8), facecolor='black')
+        fig.patch.set_facecolor('black')
+        ax.imshow(momentum, cmap='gray', vmin=0, vmax=255, origin='lower')
+        ax.set_title(f'Step 2: Momentum Merging\n{method}', 
+                    color='white', fontsize=14)
+        ax.axis('off')
+        ax.set_facecolor('black')
+        
+        enhanced_pct = 100 * np.sum(momentum > 0) / momentum.size
+        stats_text = f"Enhanced: {enhanced_pct:.1f}%"
+        ax.text(10, 30, stats_text, color='white', fontsize=10,
+               bbox=dict(boxstyle='round', facecolor='black', alpha=0.7))
+        
+        plt.tight_layout()
+        plt.savefig(frame_dir / 'step2_momentum.png', dpi=dpi, facecolor='black')
+        plt.close(fig)
+        
+        # ===== STEP 3: Edge Detection =====
+        try:
+            _, edges = preprocess_edges(binary, config)
+            method = "Advanced Edge Detection"
+        except:
+            kernel_edge = np.array([[-1, -1, -1], [-1, 8, -1], [-1, -1, -1]], dtype=np.float32)
+            raw_edges = cv2.filter2D(binary, cv2.CV_32F, kernel_edge)
+            edges = np.clip(raw_edges, 0, 255).astype(np.uint8)
+            edges = (edges > 0).astype(np.uint8) * 255
+            method = "Basic Laplacian"
+        
+        fig, ax = plt.subplots(figsize=(8, 8), facecolor='black')
+        fig.patch.set_facecolor('black')
+        ax.imshow(edges, cmap='gray', vmin=0, vmax=255, origin='lower')
+        ax.set_title(f'Step 3: Edge Detection\n{method}', 
+                    color='white', fontsize=14)
+        ax.axis('off')
+        ax.set_facecolor('black')
+        
+        edge_pct = 100 * np.sum(edges > 0) / edges.size
+        stats_text = f"Edge pixels: {edge_pct:.2f}%"
+        ax.text(10, 30, stats_text, color='white', fontsize=10,
+               bbox=dict(boxstyle='round', facecolor='black', alpha=0.7))
+        
+        plt.tight_layout()
+        plt.savefig(frame_dir / 'step3_edges.png', dpi=dpi, facecolor='black')
+        plt.close(fig)
+        
+        # ===== STEP 4: Search Mask (AOI) =====
+        search_mask = tracker._get_search_mask((H, W))
+        
+        # Create RGB visualization
+        search_display = cv2.cvtColor(frame_u8, cv2.COLOR_GRAY2RGB)
+        if search_mask is not None:
+            # Green overlay for search area
+            overlay = search_display.copy()
+            overlay[search_mask > 0] = [0, 255, 0]
+            search_display = cv2.addWeighted(search_display, 0.7, overlay, 0.3, 0).astype(np.uint8)
+            
+            # Draw ellipse outline (if tracker has established tracking)
+            if tracker.center and tracker.size and tracker.angle is not None:
+                try:
+                    ell = ((int(tracker.center[0]), int(tracker.center[1])),
+                           (int(tracker.size[0] * (1 + config['ellipse_expansion_factor'])),
+                            int(tracker.size[1] * (1 + config['ellipse_expansion_factor']))),
+                           tracker.angle)
+                    cv2.ellipse(search_display, ell, (255, 0, 255), 2)
+                except:
+                    pass
+        
+        fig, ax = plt.subplots(figsize=(8, 8), facecolor='black')
+        fig.patch.set_facecolor('black')
+        ax.imshow(search_display, origin='lower')
+        ax.set_title(f'Step 4: Search Mask (AOI)\nStatus: {tracker.get_status()}', 
+                    color='white', fontsize=14)
+        ax.axis('off')
+        ax.set_facecolor('black')
+        
+        if search_mask is not None:
+            coverage = 100 * np.sum(search_mask > 0) / (H * W)
+            stats_text = f"Coverage: {coverage:.1f}%"
+            if tracker.center:
+                stats_text += f"\nCenter: ({tracker.center[0]:.0f}, {tracker.center[1]:.0f})"
+        else:
+            stats_text = "Full-frame search"
+        
+        ax.text(10, 30, stats_text, color='white', fontsize=10,
+               bbox=dict(boxstyle='round', facecolor='black', alpha=0.7))
+        
+        plt.tight_layout()
+        plt.savefig(frame_dir / 'step4_search_mask.png', dpi=dpi, facecolor='black')
+        plt.close(fig)
+        
+        # ===== STEP 5: Contour Detection =====
+        contour = tracker.find_and_update(edges, (H, W))
+        
+        contour_display = cv2.cvtColor(frame_u8, cv2.COLOR_GRAY2RGB)
+        if contour is not None:
+            cv2.drawContours(contour_display, [contour], -1, (0, 255, 0), 2)
+            
+            if len(contour) >= 5:
+                try:
+                    ell = cv2.fitEllipse(contour)
+                    cv2.ellipse(contour_display, ell, (255, 0, 255), 2)
+                    
+                    # Draw center point
+                    center = (int(ell[0][0]), int(ell[0][1]))
+                    cv2.circle(contour_display, center, 5, (0, 0, 255), -1)
+                    cv2.circle(contour_display, center, 5, (255, 255, 255), 2)
+                except:
+                    pass
+        
+        fig, ax = plt.subplots(figsize=(8, 8), facecolor='black')
+        fig.patch.set_facecolor('black')
+        ax.imshow(contour_display, origin='lower')
+        ax.set_title(f'Step 5: Contour Detection\n{tracker.get_status()}', 
+                    color='white', fontsize=14)
+        ax.axis('off')
+        ax.set_facecolor('black')
+        
+        if contour is not None:
+            stats_text = f"Contour points: {len(contour)}"
+            if tracker.center and tracker.size:
+                stats_text += f"\nCenter: ({tracker.center[0]:.1f}, {tracker.center[1]:.1f})"
+                stats_text += f"\nSize: ({tracker.size[0]:.1f}, {tracker.size[1]:.1f})"
+            if tracker.angle is not None:
+                stats_text += f"\nAngle: {tracker.angle:.1f}°"
+        else:
+            stats_text = "No contour detected"
+        
+        ax.text(10, 30, stats_text, color='white', fontsize=10,
+               bbox=dict(boxstyle='round', facecolor='black', alpha=0.7))
+        
+        plt.tight_layout()
+        plt.savefig(frame_dir / 'step5_contour.png', dpi=dpi, facecolor='black')
+        plt.close(fig)
+        
+        # ===== STEP 6: Distance Measurement =====
+        distance_result = tracker.calculate_distance(W, H)
+        
+        distance_display = cv2.cvtColor(frame_u8, cv2.COLOR_GRAY2RGB)
+        
+        # Draw center reference line
+        cv2.line(distance_display, (W//2, 0), (W//2, H), (128, 128, 128), 1)
+        
+        if distance_result is not None:
+            distance_px, angle_deg = distance_result
+            
+            # Draw the perpendicular distance line (red)
+            if tracker.center and tracker.size and tracker.angle is not None:
+                ang_r = np.radians(angle_deg)
+                half_len = max(tracker.size) / 2
+                
+                p1x = int(tracker.center[0] + half_len * np.cos(ang_r))
+                p1y = int(tracker.center[1] + half_len * np.sin(ang_r))
+                p2x = int(tracker.center[0] - half_len * np.cos(ang_r))
+                p2y = int(tracker.center[1] - half_len * np.sin(ang_r))
+                
+                cv2.line(distance_display, (p1x, p1y), (p2x, p2y), (0, 0, 255), 3)
+            
+            # Draw distance measurement point
+            cv2.circle(distance_display, (W//2, int(distance_px)), 10, (0, 0, 255), -1)
+            cv2.circle(distance_display, (W//2, int(distance_px)), 10, (255, 255, 255), 2)
+        
+        fig, ax = plt.subplots(figsize=(8, 8), facecolor='black')
+        fig.patch.set_facecolor('black')
+        ax.imshow(distance_display, origin='lower')
+        ax.set_title('Step 6: Distance Measurement', 
+                    color='white', fontsize=14)
+        ax.axis('off')
+        ax.set_facecolor('black')
+        
+        if distance_result is not None:
+            distance_px, angle_deg = distance_result
+            stats_text = f"Distance: {distance_px:.1f} px"
+            stats_text += f"\nAngle: {angle_deg:.1f}°"
+            
+            # Convert to meters if extent available
+            if extent:
+                px2m = (extent[3] - extent[2]) / H
+                distance_m = extent[2] + distance_px * px2m
+                stats_text += f"\nDistance: {distance_m:.2f} m"
+        else:
+            stats_text = "No distance measurement"
+        
+        ax.text(10, 30, stats_text, color='white', fontsize=10,
+               bbox=dict(boxstyle='round', facecolor='black', alpha=0.7))
+        
+        plt.tight_layout()
+        plt.savefig(frame_dir / 'step6_distance.png', dpi=dpi, facecolor='black')
+        plt.close(fig)
+        
+        print(f"  ✓ Saved 6 figures to {frame_dir.name}/")
+    
+    print(f"\n✓ COMPLETE! Processed {frame_count} frames")
+    print(f"Output directory: {output_path.absolute()}")
+    print(f"\nDirectory structure:")
+    print(f"  {output_path.name}/")
+    print(f"    frame_XXXX/")
+    print(f"      step1_binary.png")
+    print(f"      step2_momentum.png")
+    print(f"      step3_edges.png")
+    print(f"      step4_search_mask.png")
+    print(f"      step5_contour.png")
+    print(f"      step6_distance.png")
     
     return output_path
