@@ -4,6 +4,10 @@ from typing import List, Dict, Tuple, Optional, Any
 import os
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+from scipy import signal
+from matplotlib.colors import to_rgb
 
 from utils.config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
 
@@ -964,3 +968,454 @@ def apply_smoothing_to_all_systems(df_sonar: pd.DataFrame, df_nav: pd.DataFrame,
     print("✓ Smoothing applied\n")
     
     return df_sonar, df_nav, df_fft
+
+def compute_temporal_stability_metrics(sync_df: pd.DataFrame) -> Dict:
+    """
+    Compute temporal stability metrics for quality assessment without ground truth.
+    
+    Args:
+        sync_df: Synchronized DataFrame
+        
+    Returns:
+        Dictionary with stability metrics for each system
+    """
+    metrics = {}
+    
+    systems = {
+        'FFT': ('fft_distance_m', 'fft_pitch_deg'),
+        'Sonar': ('sonar_distance_m', 'sonar_pitch_deg'),
+        'DVL': ('nav_distance_m', 'nav_pitch_deg')
+    }
+    
+    for system, (dist_col, pitch_col) in systems.items():
+        if dist_col in sync_df.columns and pitch_col in sync_df.columns:
+            # Compute first-order differences (rate of change)
+            dist_diff = sync_df[dist_col].diff().dropna()
+            pitch_diff = sync_df[pitch_col].diff().dropna()
+            
+            # Temporal stability = inverse of standard deviation of changes
+            # Lower change variance = more stable
+            metrics[system] = {
+                'distance_change_std': float(dist_diff.std()),
+                'distance_change_mean_abs': float(dist_diff.abs().mean()),
+                'pitch_change_std': float(pitch_diff.std()),
+                'pitch_change_mean_abs': float(pitch_diff.abs().mean()),
+                'distance_smoothness': float(1.0 / (dist_diff.std() + 1e-6)),  # Inverse of variance
+                'pitch_smoothness': float(1.0 / (pitch_diff.std() + 1e-6))
+            }
+    
+    return metrics
+
+
+def compute_inter_system_agreement(sync_df: pd.DataFrame) -> Dict:
+    """
+    Compute agreement metrics between systems (correlation, MAE, consistency).
+    
+    Args:
+        sync_df: Synchronized DataFrame
+        
+    """
+    agreement = {}
+    
+    pairs = [
+        ('FFT', 'Sonar', 'fft_distance_m', 'sonar_distance_m', 'fft_pitch_deg', 'sonar_pitch_deg'),
+        ('FFT', 'DVL', 'fft_distance_m', 'nav_distance_m', 'fft_pitch_deg', 'nav_pitch_deg'),
+        ('Sonar', 'DVL', 'sonar_distance_m', 'nav_distance_m', 'sonar_pitch_deg', 'nav_pitch_deg')
+    ]
+    
+    for sys1, sys2, d1, d2, p1, p2 in pairs:
+        pair_name = f"{sys1}-{sys2}"
+        
+        # Distance agreement
+        if d1 in sync_df.columns and d2 in sync_df.columns:
+            valid = sync_df[[d1, d2]].dropna()
+            if len(valid) > 1:
+                corr = valid[d1].corr(valid[d2])
+                mae = (valid[d1] - valid[d2]).abs().mean()
+                agreement[pair_name] = {
+                    'distance_correlation': float(corr),
+                    'distance_mae': float(mae),
+                    'distance_agreement_score': float(corr * (1.0 / (mae + 0.1)))  # Combined metric
+                }
+        
+        # Pitch agreement
+        if p1 in sync_df.columns and p2 in sync_df.columns:
+            valid = sync_df[[p1, p2]].dropna()
+            if len(valid) > 1:
+                corr = valid[p1].corr(valid[p2])
+                mae = (valid[p1] - valid[p2]).abs().mean()
+                if pair_name not in agreement:
+                    agreement[pair_name] = {}
+                agreement[pair_name].update({
+                    'pitch_correlation': float(corr),
+                    'pitch_mae_deg': float(mae),
+                    'pitch_agreement_score': float(corr * (1.0 / (mae + 1.0)))
+                })
+    
+    return agreement
+
+
+def create_statistics_visualizations(sync_df: pd.DataFrame, target_bag: str) -> Dict[str, go.Figure]:
+    """
+    Create comprehensive statistical visualization plots.
+    
+    Args:
+        sync_df: Synchronized DataFrame
+        target_bag: Target bag identifier
+        
+    Returns:
+        Dictionary of plotly figures
+    """
+    figs = {}
+    
+    # 1. Distribution plots (histograms + box plots)
+    fig_dist = make_subplots(
+        rows=2, cols=2,
+        subplot_titles=('Distance Distributions', 'Distance Box Plots',
+                       'Pitch Distributions', 'Pitch Box Plots'),
+        specs=[[{'secondary_y': False}, {'secondary_y': False}],
+               [{'secondary_y': False}, {'secondary_y': False}]]
+    )
+    
+    systems = [
+        ('FFT', 'fft_distance_m', 'fft_pitch_deg', 'red'),
+        ('Sonar', 'sonar_distance_m', 'sonar_pitch_deg', 'blue'),
+        ('DVL', 'nav_distance_m', 'nav_pitch_deg', 'green')
+    ]
+    
+    for name, dist_col, pitch_col, color in systems:
+        if dist_col in sync_df.columns:
+            # Distance histogram
+            fig_dist.add_trace(
+                go.Histogram(x=sync_df[dist_col].dropna(), name=f'{name}',
+                           marker_color=color, opacity=0.6, nbinsx=30),
+                row=1, col=1
+            )
+            # Distance box plot
+            fig_dist.add_trace(
+                go.Box(y=sync_df[dist_col].dropna(), name=f'{name}',
+                      marker_color=color),
+                row=1, col=2
+            )
+        
+        if pitch_col in sync_df.columns:
+            # Pitch histogram
+            fig_dist.add_trace(
+                go.Histogram(x=sync_df[pitch_col].dropna(), name=f'{name}',
+                           marker_color=color, opacity=0.6, nbinsx=30,
+                           showlegend=False),
+                row=2, col=1
+            )
+            # Pitch box plot
+            fig_dist.add_trace(
+                go.Box(y=sync_df[pitch_col].dropna(), name=f'{name}',
+                      marker_color=color, showlegend=False),
+                row=2, col=2
+            )
+    
+    fig_dist.update_xaxes(title_text="Distance (m)", row=1, col=1)
+    fig_dist.update_xaxes(title_text="Distance (m)", row=1, col=2)
+    fig_dist.update_xaxes(title_text="Pitch (°)", row=2, col=1)
+    fig_dist.update_xaxes(title_text="Pitch (°)", row=2, col=2)
+    fig_dist.update_layout(height=800, title_text=f"Measurement Distributions: {target_bag}")
+    figs['distributions'] = fig_dist
+    
+    # 2. Temporal stability plot (rate of change)
+    fig_stability = go.Figure()
+    
+    for name, dist_col, pitch_col, color in systems:
+        if dist_col in sync_df.columns:
+            dist_changes = sync_df[dist_col].diff().abs()
+            fig_stability.add_trace(
+                go.Scatter(x=sync_df['sync_timestamp'], y=dist_changes,
+                          mode='lines', name=f'{name} Distance Change',
+                          line=dict(color=color, width=1))
+            )
+    
+    fig_stability.update_layout(
+        title=f"Temporal Stability (Absolute Rate of Change): {target_bag}",
+        xaxis_title="Time",
+        yaxis_title="Absolute Distance Change (m/sample)",
+        height=500
+    )
+    figs['stability'] = fig_stability
+    
+    # 3. Scatter plots for inter-system comparison
+    fig_scatter = make_subplots(
+        rows=1, cols=3,
+        subplot_titles=('FFT vs Sonar', 'FFT vs DVL', 'Sonar vs DVL')
+    )
+    
+    scatter_pairs = [
+        ('fft_distance_m', 'sonar_distance_m', 'red', 1, 1),
+        ('fft_distance_m', 'nav_distance_m', 'green', 1, 2),
+        ('sonar_distance_m', 'nav_distance_m', 'blue', 1, 3)
+    ]
+    
+    for col1, col2, color, row, col in scatter_pairs:
+        if col1 in sync_df.columns and col2 in sync_df.columns:
+            valid = sync_df[[col1, col2]].dropna()
+            if len(valid) > 0:
+                fig_scatter.add_trace(
+                    go.Scatter(x=valid[col1], y=valid[col2],
+                              mode='markers', marker=dict(color=color, size=3),
+                              showlegend=False),
+                    row=row, col=col
+                )
+                # Add ideal y=x line
+                min_val = min(valid[col1].min(), valid[col2].min())
+                max_val = max(valid[col1].max(), valid[col2].max())
+                fig_scatter.add_trace(
+                    go.Scatter(x=[min_val, max_val], y=[min_val, max_val],
+                              mode='lines', line=dict(color='black', dash='dash'),
+                              showlegend=False),
+                    row=row, col=col
+                )
+    
+    fig_scatter.update_xaxes(title_text="Distance (m)")
+    fig_scatter.update_yaxes(title_text="Distance (m)")
+    fig_scatter.update_layout(height=400, title_text=f"Inter-System Agreement: {target_bag}")
+    figs['scatter'] = fig_scatter
+    
+    return figs
+
+
+def print_quality_metrics(sync_df: pd.DataFrame):
+    """
+    Print comprehensive quality metrics without ground truth.
+    
+    Args:
+        sync_df: Synchronized DataFrame
+    """
+    print("\n=== QUALITY METRICS (NO GROUND TRUTH REQUIRED) ===\n")
+    
+    # Temporal stability
+    print("1. TEMPORAL STABILITY (Lower is more stable)")
+    print("   Measures consistency of measurements over time\n")
+    stability = compute_temporal_stability_metrics(sync_df)
+    for system, metrics in stability.items():
+        print(f"  {system}:")
+        print(f"    Distance change std: {metrics['distance_change_std']:.4f} m/sample")
+        print(f"    Distance smoothness:  {metrics['distance_smoothness']:.2f} (higher = smoother)")
+        print(f"    Pitch change std:     {metrics['pitch_change_std']:.3f} °/sample")
+        print(f"    Pitch smoothness:     {metrics['pitch_smoothness']:.2f} (higher = smoother)")
+    
+    # Inter-system agreement
+    print("\n2. INTER-SYSTEM AGREEMENT")
+    print("   Measures how well systems agree with each other\n")
+    agreement = compute_inter_system_agreement(sync_df)
+    for pair, metrics in agreement.items():
+        print(f"  {pair}:")
+        if 'distance_correlation' in metrics:
+            print(f"    Distance correlation: {metrics['distance_correlation']:.3f} (1.0 = perfect)")
+            print(f"    Distance MAE:         {metrics['distance_mae']:.3f} m")
+            print(f"    Distance agreement:   {metrics['distance_agreement_score']:.3f} (higher = better)")
+        if 'pitch_correlation' in metrics:
+            print(f"    Pitch correlation:    {metrics['pitch_correlation']:.3f} (1.0 = perfect)")
+            print(f"    Pitch MAE:            {metrics['pitch_mae_deg']:.2f}°")
+            print(f"    Pitch agreement:      {metrics['pitch_agreement_score']:.3f} (higher = better)")
+    
+    # Data completeness
+    print("\n3. DATA COMPLETENESS")
+    print("   Percentage of valid (non-NaN) measurements\n")
+    systems = [
+        ('FFT', 'fft_distance_m', 'fft_pitch_deg'),
+        ('Sonar', 'sonar_distance_m', 'sonar_pitch_deg'),
+        ('DVL', 'nav_distance_m', 'nav_pitch_deg')
+    ]
+    
+    for name, dist_col, pitch_col in systems:
+        if dist_col in sync_df.columns:
+            dist_valid = sync_df[dist_col].notna().sum()
+            pitch_valid = sync_df[pitch_col].notna().sum() if pitch_col in sync_df.columns else 0
+            total = len(sync_df)
+            print(f"  {name}:")
+            print(f"    Distance: {dist_valid}/{total} ({100*dist_valid/total:.1f}%)")
+            if pitch_col in sync_df.columns:
+                print(f"    Pitch:    {pitch_valid}/{total} ({100*pitch_valid/total:.1f}%)")
+
+def print_timeseries_analysis(sync_df: pd.DataFrame):
+    """
+    Print time series analysis metrics.
+    
+    Args:
+        sync_df: Synchronized DataFrame
+    """
+    print("\n=== TIME SERIES ANALYSIS ===\n")
+    
+    print("4. MEASUREMENT FREQUENCY")
+    print("   Average time between measurements\n")
+    
+    if 'sync_timestamp' in sync_df.columns:
+        time_diffs = sync_df['sync_timestamp'].diff().dt.total_seconds().dropna()
+        if len(time_diffs) > 0:
+            print(f"  Mean interval: {time_diffs.mean():.3f} seconds")
+            print(f"  Std interval:  {time_diffs.std():.3f} seconds")
+            print(f"  Median interval: {time_diffs.median():.3f} seconds")
+            print(f"  Sampling rate: ~{1.0/time_diffs.mean():.2f} Hz")
+    
+    print("\n5. MEASUREMENT CONSISTENCY")
+    print("   Coefficient of variation (CV = std/mean)\n")
+    
+    systems = [
+        ('FFT', 'fft_distance_m'),
+        ('Sonar', 'sonar_distance_m'),
+        ('DVL', 'nav_distance_m')
+    ]
+    
+    for name, col in systems:
+        if col in sync_df.columns:
+            data = sync_df[col].dropna()
+            if len(data) > 0 and data.mean() > 0:
+                cv = data.std() / data.mean()
+                print(f"  {name}: CV = {cv:.4f} ({'low' if cv < 0.1 else 'moderate' if cv < 0.2 else 'high'} variability)")
+
+
+def create_timeseries_visualizations(sync_df: pd.DataFrame, target_bag: str) -> Dict[str, go.Figure]:
+    """
+    Create time series analysis visualizations.
+    
+    Args:
+        sync_df: Synchronized DataFrame
+        target_bag: Target bag identifier
+        
+    Returns:
+        Dictionary of plotly figures
+    """
+    figs = {}
+    
+    # 1. Autocorrelation plots
+    fig_acf = make_subplots(
+        rows=2, cols=2,
+        subplot_titles=('Distance ACF (Full)', 'Pitch ACF (Full)',
+                       'Distance ACF (Zoomed)', 'Pitch ACF (Zoomed)'),
+        vertical_spacing=0.2,
+        horizontal_spacing=0.1
+    )
+    
+    systems = [
+        ('FFT', 'fft_distance_m', 'fft_pitch_deg', 'red'),
+        ('Sonar', 'sonar_distance_m', 'sonar_pitch_deg', 'blue'),
+        ('DVL', 'nav_distance_m', 'nav_pitch_deg', 'green')
+    ]
+    
+    for name, dist_col, pitch_col, color in systems:
+        if dist_col in sync_df.columns:
+            valid_data = sync_df[dist_col].dropna()
+            if len(valid_data) > 1:
+                acf_dist = signal.correlate(valid_data, valid_data, mode='full')
+                acf_dist = acf_dist[acf_dist.size // 2:] / acf_dist.max()
+                lags_dist = np.arange(len(acf_dist))
+                
+                fig_acf.add_trace(
+                    go.Scatter(x=lags_dist, y=acf_dist, mode='lines', name=f'{name} Dist',
+                              line=dict(color=color, width=2)),
+                    row=1, col=1
+                )
+                
+                fig_acf.add_trace(
+                    go.Scatter(x=lags_dist, y=acf_dist, mode='lines', name=f'{name} Dist (Zoom)',
+                              line=dict(color=color, width=2), showlegend=False),
+                    row=2, col=1
+                )
+        
+        if pitch_col in sync_df.columns:
+            valid_data = sync_df[pitch_col].dropna()
+            if len(valid_data) > 1:
+                acf_pitch = signal.correlate(valid_data, valid_data, mode='full')
+                acf_pitch = acf_pitch[acf_pitch.size // 2:] / acf_pitch.max()
+                lags_pitch = np.arange(len(acf_pitch))
+                
+                fig_acf.add_trace(
+                    go.Scatter(x=lags_pitch, y=acf_pitch, mode='lines', name=f'{name} Pitch',
+                              line=dict(color=color, width=2), showlegend=False),
+                    row=1, col=2
+                )
+                
+                fig_acf.add_trace(
+                    go.Scatter(x=lags_pitch, y=acf_pitch, mode='lines', name=f'{name} Pitch (Zoom)',
+                              line=dict(color=color, width=2), showlegend=False),
+                    row=2, col=2
+                )
+    
+    fig_acf.update_xaxes(title_text="Lag", row=1, col=1)
+    fig_acf.update_xaxes(title_text="Lag", row=1, col=2)
+    fig_acf.update_xaxes(title_text="Lag", range=[0, 50], row=2, col=1)
+    fig_acf.update_xaxes(title_text="Lag", range=[0, 50], row=2, col=2)
+    fig_acf.update_yaxes(title_text="Autocorrelation")
+    fig_acf.update_layout(height=700, title_text=f"Autocorrelation Analysis: {target_bag}")
+    figs['autocorrelation'] = fig_acf
+    
+    # 2. Rolling statistics (with uncertainty bands)
+    fig_rolling = make_subplots(
+        rows=2, cols=1,
+        subplot_titles=('Distance Rolling Mean ± Std', 'Pitch Rolling Mean ± Std'),
+        vertical_spacing=0.15
+    )
+    
+    window = 20  # Rolling window size
+    
+    for name, dist_col, pitch_col, color in systems:
+        if dist_col in sync_df.columns:
+            # Distance rolling stats
+            rolling_mean = sync_df[dist_col].rolling(window=window, center=True).mean()
+            rolling_std = sync_df[dist_col].rolling(window=window, center=True).std()
+            
+            rgb_tuple = to_rgb(color)
+            rgba_fill = f'rgba({int(rgb_tuple[0]*255)}, {int(rgb_tuple[1]*255)}, {int(rgb_tuple[2]*255)}, 0.2)'
+            
+            fig_rolling.add_trace(
+                go.Scatter(x=sync_df['sync_timestamp'], y=rolling_mean,
+                          mode='lines', name=f'{name}',
+                          line=dict(color=color, width=2)),
+                row=1, col=1
+            )
+            fig_rolling.add_trace(
+                go.Scatter(x=sync_df['sync_timestamp'], y=rolling_mean + rolling_std,
+                          mode='lines', line=dict(color=color, width=0.5, dash='dash'),
+                          showlegend=False, hoverinfo='skip'),
+                row=1, col=1
+            )
+            fig_rolling.add_trace(
+                go.Scatter(x=sync_df['sync_timestamp'], y=rolling_mean - rolling_std,
+                          mode='lines', line=dict(color=color, width=0.5, dash='dash'),
+                          fill='tonexty', fillcolor=rgba_fill,
+                          showlegend=False, hoverinfo='skip'),
+                row=1, col=1
+            )
+        
+        if pitch_col in sync_df.columns:
+            # Pitch rolling stats
+            rolling_mean = sync_df[pitch_col].rolling(window=window, center=True).mean()
+            rolling_std = sync_df[pitch_col].rolling(window=window, center=True).std()
+            
+            rgb_tuple = to_rgb(color)
+            rgba_fill = f'rgba({int(rgb_tuple[0]*255)}, {int(rgb_tuple[1]*255)}, {int(rgb_tuple[2]*255)}, 0.2)'
+            
+            fig_rolling.add_trace(
+                go.Scatter(x=sync_df['sync_timestamp'], y=rolling_mean,
+                          mode='lines', name=f'{name}',
+                          line=dict(color=color, width=2), showlegend=False),
+                row=2, col=1
+            )
+            fig_rolling.add_trace(
+                go.Scatter(x=sync_df['sync_timestamp'], y=rolling_mean + rolling_std,
+                          mode='lines', line=dict(color=color, width=0.5, dash='dash'),
+                          showlegend=False, hoverinfo='skip'),
+                row=2, col=1
+            )
+            fig_rolling.add_trace(
+                go.Scatter(x=sync_df['sync_timestamp'], y=rolling_mean - rolling_std,
+                          mode='lines', line=dict(color=color, width=0.5, dash='dash'),
+                          fill='tonexty', fillcolor=rgba_fill,
+                          showlegend=False, hoverinfo='skip'),
+                row=2, col=1
+            )
+    
+    fig_rolling.update_xaxes(title_text="Time")
+    fig_rolling.update_yaxes(title_text="Distance (m)", row=1, col=1)
+    fig_rolling.update_yaxes(title_text="Pitch (°)", row=2, col=1)
+    fig_rolling.update_layout(height=700, title_text=f"Rolling Statistics (window={window}): {target_bag}")
+    figs['rolling_stats'] = fig_rolling
+    
+    return figs
