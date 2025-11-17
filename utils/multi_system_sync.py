@@ -430,6 +430,111 @@ class NetRelativeVisualizer:
         
         return fig
     
+    def plot_xy_trajectories(self, sync_df: pd.DataFrame, lateral_speed_m_s: float = 0.2) -> go.Figure:
+        """
+        Create 3D XY trajectory plot showing all systems' paths relative to the net,
+        including lateral movement along the net.
+        
+        The coordinate system:
+        - X: Distance perpendicular to net (forward/back from robot to net)
+        - Y: Position along net (calculated from lateral speed and time)
+        - Z: Depth/height (not currently measured, set to 0)
+        
+        Args:
+            sync_df: Synchronized data from multiple systems
+            lateral_speed_m_s: Speed at which robot moves laterally along net (m/s)
+            
+        Returns:
+            Plotly figure with 3D XY trajectories
+        """
+        fig = go.Figure()
+        
+        # Calculate lateral position (Y) from timestamps
+        if 'sync_timestamp' in sync_df.columns:
+            # Convert timestamps to relative seconds from start
+            start_time = sync_df['sync_timestamp'].min()
+            sync_df_plot = sync_df.copy()
+            sync_df_plot['time_seconds'] = (sync_df_plot['sync_timestamp'] - start_time).dt.total_seconds()
+            sync_df_plot['lateral_position'] = sync_df_plot['time_seconds'] * lateral_speed_m_s
+        else:
+            print("Warning: No sync_timestamp column, cannot calculate lateral position")
+            sync_df_plot = sync_df.copy()
+            sync_df_plot['lateral_position'] = 0
+        
+        # Plot 3D trajectories for each system
+        # X = perpendicular distance to net (from measurements)
+        # Y = lateral position along net (from speed × time)
+        # Z = height (set to 0 for now, could add depth data later)
+        
+        systems = [
+            ('FFT', 'fft_x', 'red', 'circle'),
+            ('Sonar', 'sonar_x', 'blue', 'square'),
+            ('DVL', 'dvl_x', 'green', 'diamond')
+        ]
+        
+        for name, x_col, color, symbol in systems:
+            if x_col in sync_df_plot.columns:
+                valid_mask = sync_df_plot[x_col].notna() & sync_df_plot['lateral_position'].notna()
+                if valid_mask.sum() > 0:
+                    valid_data = sync_df_plot.loc[valid_mask]
+                    
+                    fig.add_trace(
+                        go.Scatter3d(
+                            x=valid_data[x_col],  # Perpendicular distance to net
+                            y=valid_data['lateral_position'],  # Position along net
+                            z=[0] * len(valid_data),  # Height (fixed at 0)
+                            mode='lines+markers',
+                            name=f'{name}',
+                            line=dict(color=color, width=3),
+                            marker=dict(size=3, color=color, symbol=symbol)
+                        )
+                    )
+        
+        # Add net line at origin (X=0) extending along lateral direction
+        if 'lateral_position' in sync_df_plot.columns:
+            y_range = [sync_df_plot['lateral_position'].min(), sync_df_plot['lateral_position'].max()]
+            fig.add_trace(
+                go.Scatter3d(
+                    x=[0, 0],  # Net is at X=0
+                    y=y_range,  # Extends along Y
+                    z=[0, 0],  # At surface
+                    mode='lines',
+                    name='Net Position',
+                    line=dict(color='black', width=5, dash='dash')
+                )
+            )
+        
+        # Add robot starting position marker
+        fig.add_trace(
+            go.Scatter3d(
+                x=[sync_df_plot[systems[0][1]].iloc[0] if systems[0][1] in sync_df_plot.columns else 0],
+                y=[0],
+                z=[0],
+                mode='markers',
+                name='Start Position',
+                marker=dict(size=8, color='orange', symbol='x')
+            )
+        )
+        
+        fig.update_layout(
+            title=f"3D Net-Relative Trajectories<br>Lateral Speed: {lateral_speed_m_s:.2f} m/s",
+            scene=dict(
+                xaxis_title="Distance to Net (m)<br>Perpendicular",
+                yaxis_title="Position Along Net (m)<br>Lateral Movement",
+                zaxis_title="Height (m)",
+                xaxis=dict(backgroundcolor="rgb(230, 230,230)"),
+                yaxis=dict(backgroundcolor="rgb(230, 230,230)"),
+                zaxis=dict(backgroundcolor="rgb(230, 230,230)"),
+                aspectmode='data'  # Equal aspect ratio
+            ),
+            height=700,
+            width=900,
+            showlegend=True,
+            hovermode='closest'
+        )
+        
+        return fig
+    
     def print_position_summary(self, sync_df: pd.DataFrame):
         """
         Print summary statistics for position data from all systems.
@@ -455,6 +560,68 @@ class NetRelativeVisualizer:
                           f"X: {x_data.mean():.2f}±{x_data.std():.2f}, "
                           f"Y: {y_data.mean():.2f}±{y_data.std():.2f}")
 
+
+    def plot_xy_component_comparison(self, sync_df: pd.DataFrame, component: str = 'x') -> go.Figure:
+        """
+        Create time-series comparison plot for X or Y position component.
+        
+        Args:
+            sync_df: Synchronized data from multiple systems
+            component: 'x' or 'y' to plot
+            
+        Returns:
+            Plotly figure with component comparison over time
+        """
+        if component.lower() not in ['x', 'y']:
+            raise ValueError(f"Invalid component: {component}. Must be 'x' or 'y'")
+        
+        fig = go.Figure()
+        
+        # Map component to column names
+        if component.lower() == 'x':
+            title = "X Position (Perpendicular to Net) Over Time"
+            y_label = "X Position (m) - Perpendicular Distance"
+            systems = [
+                ('FFT', 'fft_x', 'red'),
+                ('Sonar', 'sonar_x', 'blue'),
+                ('DVL', 'dvl_x', 'green')
+            ]
+        else:  # y
+            title = "Y Position (Along Net) Over Time"
+            y_label = "Y Position (m) - Lateral Position"
+            systems = [
+                ('FFT', 'fft_y', 'red'),
+                ('Sonar', 'sonar_y', 'blue'),
+                ('DVL', 'dvl_y', 'green')
+            ]
+        
+        # Plot each system
+        for name, col, color in systems:
+            if col in sync_df.columns:
+                valid_mask = sync_df[col].notna()
+                if valid_mask.sum() > 0:
+                    fig.add_trace(
+                        go.Scatter(
+                            x=sync_df.loc[valid_mask, 'sync_timestamp'],
+                            y=sync_df.loc[valid_mask, col],
+                            mode='lines+markers',
+                            name=f'{name}',
+                            line=dict(color=color, width=2),
+                            marker=dict(size=4)
+                        )
+                    )
+        
+        fig.update_layout(
+            title=title,
+            xaxis_title="Time",
+            yaxis_title=y_label,
+            height=500,
+            showlegend=True,
+            hovermode='closest'
+        )
+        
+        return fig
+    
 
 def run_complete_three_system_analysis(df_sonar: pd.DataFrame, df_nav: pd.DataFrame, 
                                       df_fft: pd.DataFrame, target_bag: str,

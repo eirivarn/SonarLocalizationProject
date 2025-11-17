@@ -121,6 +121,18 @@ TRACKING_CONFIG: Dict = {
     'use_elliptical_aoi': True,
     'ellipse_expansion_factor': 0.5,  # AOI expansion (0.5 = 50% larger)
     
+    # === CONTOUR SCORING WEIGHTS ===
+    'aoi_boost_factor': 10.0,              # Multiply score if inside AOI
+    'score_area_weight': 1.0,              # Weight for contour area
+    'score_linearity_weight': 2.0,         # Weight for linearity (straight edges)
+    'score_aspect_ratio_weight': 1.5,      # Weight for aspect ratio (prefer wide rectangles)
+    
+    # === FALLBACK RECTANGULAR AOI (when no tracking history) ===
+    'aoi_center_x_percent': 50,      # Horizontal center (50 = image center)
+    'aoi_center_y_percent': 60,      # Vertical center (higher = further away)
+    'aoi_width_percent': 60,         # Width as % of image
+    'aoi_height_percent': 70,        # Height as % of image (ignoring near field)
+    
     # === SMOOTHING PARAMETERS ===
     # CRITICAL: Lower alpha = more smoothing
     # Formula: new = old * (1 - alpha) + measured * alpha
@@ -138,8 +150,6 @@ TRACKING_CONFIG: Dict = {
     # === CORRIDOR EXTENSION (LEGACY - mostly unused) ===
     'corridor_band_k': 1.0,            # Corridor width relative to minor axis (used in some legacy code)
     'corridor_length_factor': 2.0,     # Length = major axis * factor (used in some legacy code)
-    'corridor_widen': 1.0,             # Legacy parameter
-    'corridor_both_directions': True,  # Legacy parameter
     
     # Note: The pipeline now primarily uses elliptical AOI instead of complex corridor splitting
     

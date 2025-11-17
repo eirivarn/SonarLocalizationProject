@@ -231,6 +231,14 @@ class NetTracker:
                         proximity = max(0.1, 1.0 - dist / 100.0)
                         score *= proximity
                 
+                # Linearity and aspect ratio scores
+                linearity_score = self._calculate_contour_linearity(c)
+                aspect_ratio_score = self._calculate_aspect_ratio_score(c)
+                
+                # Combine scores
+                score += linearity_score * self.config.get('linearity_score_weight', 1.0)
+                score += aspect_ratio_score * self.config.get('aspect_ratio_score_weight', 1.0)
+                
                 if score > best_score:
                     best = c
                     best_score = score
@@ -309,3 +317,82 @@ class NetTracker:
         else:
             max_frames = self.config.get('max_frames_without_detection', 30)
             return f"SEARCHING ({self.frames_lost}/{max_frames})"
+    
+    def _calculate_contour_linearity(self, contour):
+        """
+        Calculate how linear/straight a contour is.
+        
+        Returns:
+            float: Linearity score 0-1, where 1 = perfectly straight line
+        """
+        if len(contour) < 2:
+            return 0.0
+        
+        # Fit a line to the contour points
+        contour_points = contour.reshape(-1, 2).astype(np.float32)
+        
+        # Use PCA to find the principal axis
+        mean = np.mean(contour_points, axis=0)
+        centered = contour_points - mean
+        
+        # Covariance matrix
+        cov = np.cov(centered.T)
+        eigenvalues, eigenvectors = np.linalg.eig(cov)
+        
+        # Sort by eigenvalue (largest first)
+        idx = eigenvalues.argsort()[::-1]
+        eigenvalues = eigenvalues[idx]
+        
+        # Linearity = ratio of largest to smallest eigenvalue
+        # High ratio = very linear (points lie along a line)
+        # Low ratio = round blob (points spread in all directions)
+        if eigenvalues[1] < 1e-6:
+            return 1.0  # Perfectly linear
+        
+        linearity_ratio = eigenvalues[0] / (eigenvalues[0] + eigenvalues[1])
+        return float(linearity_ratio)
+    
+    def _calculate_aspect_ratio_score(self, contour):
+        """
+        Calculate aspect ratio preference score.
+        Prefers rectangular (wide) shapes over square or tall shapes.
+        
+        Returns:
+            float: Score 0-1, where 1 = ideal aspect ratio (wide rectangle)
+        """
+        if len(contour) < 5:
+            return 0.5  # Not enough points, neutral score
+        
+        try:
+            # Fit minimum area rectangle
+            rect = cv2.minAreaRect(contour)
+            (_, _), (width, height), angle = rect
+            
+            # Ensure width > height (normalize orientation)
+            if height > width:
+                width, height = height, width
+            
+            if height < 1e-6:
+                return 0.0
+            
+            aspect_ratio = width / height
+            
+            # Ideal aspect ratio for net edge: 2-5 (wide but not extreme)
+            # Score function: peaks at aspect_ratio = 3
+            ideal_ratio = 3.0
+            
+            if aspect_ratio < 1.0:
+                # Too tall/square - low score
+                return 0.3
+            elif aspect_ratio <= ideal_ratio:
+                # Linearly increase from 1.0 to ideal
+                return 0.5 + 0.5 * (aspect_ratio - 1.0) / (ideal_ratio - 1.0)
+            elif aspect_ratio <= ideal_ratio * 2:
+                # Slowly decrease after ideal
+                return 1.0 - 0.3 * (aspect_ratio - ideal_ratio) / ideal_ratio
+            else:
+                # Too elongated - moderate score
+                return 0.4
+                
+        except:
+            return 0.5  # Fallback neutral score

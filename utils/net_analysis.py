@@ -252,78 +252,106 @@ def summarize_distance_alignment(sync_df: pd.DataFrame) -> Dict[str, Any]:
     summary["difference_stats"] = stats
     return summary
 
-def summarize_xy_positions(
-    sync_df: Optional[pd.DataFrame],
-    systems: Optional[List[Tuple[str, str, str]]] = None,
-) -> Dict[str, Dict[str, Any]]:
-    if sync_df is None or sync_df.empty:
-        return {}
-
-    systems = systems or [
-        ("FFT", "fft_x_m", "fft_y_m"),
-        ("Sonar", "sonar_x_m", "sonar_y_m"),
-        ("DVL", "nav_x_m", "nav_y_m"),
+def summarize_xy_positions(sync_df: pd.DataFrame) -> Dict:
+    """
+    Summarize XY position data from synchronized DataFrame.
+    
+    Args:
+        sync_df: Synchronized DataFrame with XY position columns
+        
+    Returns:
+        Dictionary of statistics per system
+    """
+    stats = {}
+    
+    # Support both naming conventions: _x_m/_y_m and _x/_y
+    systems = [
+        ('FFT', ['fft_x_m', 'fft_y_m', 'fft_x', 'fft_y']),
+        ('Sonar', ['sonar_x_m', 'sonar_y_m', 'sonar_x', 'sonar_y']),
+        ('DVL', ['nav_x_m', 'nav_y_m', 'dvl_x', 'dvl_y'])
     ]
-    summary: Dict[str, Dict[str, Any]] = {}
-
-    for label, x_col, y_col in systems:
-        if x_col not in sync_df.columns or y_col not in sync_df.columns:
-            continue
-        valid = sync_df[x_col].notna() & sync_df[y_col].notna()
-        if not valid.any():
-            continue
-        x_vals = sync_df.loc[valid, x_col]
-        y_vals = sync_df.loc[valid, y_col]
-        distances = np.sqrt(x_vals**2 + y_vals**2)
-        summary[label] = {
-            "count": int(valid.sum()),
-            "x_mean": float(x_vals.mean()),
-            "x_std": float(x_vals.std()),
-            "y_mean": float(y_vals.mean()),
-            "y_std": float(y_vals.std()),
-            "distance_mean": float(distances.mean()),
-            "distance_std": float(distances.std()),
-        }
-
-    return summary
+    
+    for system_name, possible_cols in systems:
+        # Find which column names actually exist
+        x_col = None
+        y_col = None
+        
+        for col in possible_cols:
+            if col in sync_df.columns:
+                if '_x' in col:
+                    x_col = col
+                elif '_y' in col:
+                    y_col = col
+        
+        if x_col and y_col:
+            valid_mask = sync_df[x_col].notna() & sync_df[y_col].notna()
+            
+            if valid_mask.sum() > 0:
+                x_data = sync_df.loc[valid_mask, x_col]
+                y_data = sync_df.loc[valid_mask, y_col]
+                
+                # Calculate distance from origin
+                distances = np.sqrt(x_data**2 + y_data**2)
+                
+                stats[system_name] = {
+                    'count': len(x_data),
+                    'x_mean': float(x_data.mean()),
+                    'x_std': float(x_data.std()),
+                    'x_min': float(x_data.min()),
+                    'x_max': float(x_data.max()),
+                    'y_mean': float(y_data.mean()),
+                    'y_std': float(y_data.std()),
+                    'y_min': float(y_data.min()),
+                    'y_max': float(y_data.max()),
+                    'distance_mean': float(distances.mean()),
+                    'distance_std': float(distances.std()),
+                    'distance_min': float(distances.min()),
+                    'distance_max': float(distances.max())
+                }
+    
+    return stats
 
 def prepare_three_system_comparison(
     target_bag: str,
-    df_sonar: Optional[pd.DataFrame],
-    df_nav: Optional[pd.DataFrame],
-    df_fft: Optional[pd.DataFrame],
-    tolerance_seconds: float = 0.5,
-) -> Tuple[Optional[pd.DataFrame], Dict[str, Any], Optional[Any]]:
-    if df_fft is None or df_fft.empty:
-        return None, {}, None
-
-    try:
-        from utils.multi_system_sync import (
-            NetRelativePositionCalculator,
-            MultiSystemSynchronizer,
-            NetRelativeVisualizer,
-        )
-    except ImportError:
-        return None, {}, None
-
+    df_sonar: pd.DataFrame,
+    df_nav: pd.DataFrame, 
+    df_fft: pd.DataFrame,
+    tolerance_seconds: float = 0.5
+) -> Tuple[pd.DataFrame, Dict, 'NetRelativeVisualizer']:
+    """
+    Prepare synchronized data and create comparison visualizations.
+    
+    Returns:
+        Tuple of (sync_df, figs_dict, visualizer_instance)
+    """
+    from utils.multi_system_sync import (
+        NetRelativePositionCalculator,
+        MultiSystemSynchronizer,
+        NetRelativeVisualizer
+    )
+    
+    # Initialize components
     calculator = NetRelativePositionCalculator()
-    sonar_positions = calculator.calculate_sonar_net_position(df_sonar, apply_angle_correction=True) if df_sonar is not None and not df_sonar.empty else pd.DataFrame()
-    nav_positions = calculator.calculate_dvl_net_position(df_nav) if df_nav is not None and not df_nav.empty else pd.DataFrame()
-    fft_positions = _prepare_fft_dataframe(df_fft)
-
     synchronizer = MultiSystemSynchronizer(tolerance_seconds=tolerance_seconds)
-    sync_df = synchronizer.synchronize_three_systems(fft_positions, sonar_positions, nav_positions)
-
-    if sync_df.empty:
-        return sync_df, {}, None
-
     visualizer = NetRelativeVisualizer()
-    figures = {
-        "distance": visualizer.create_distance_comparison(sync_df, target_bag),
-        "pitch": visualizer.create_pitch_comparison(sync_df, target_bag),
-    }
-
-    return sync_df, figures, visualizer
+    
+    # Calculate positions for each system
+    df_sonar_pos = calculator.calculate_sonar_net_position(df_sonar) if df_sonar is not None else None
+    df_nav_pos = calculator.calculate_dvl_net_position(df_nav) if df_nav is not None else None
+    
+    # Process FFT data (already has positions typically)
+    df_fft_pos = df_fft.copy() if df_fft is not None else None
+    
+    # Synchronize systems
+    sync_df = synchronizer.synchronize_three_systems(df_fft_pos, df_sonar_pos, df_nav_pos)
+    
+    # Create comparison plots
+    figs = {}
+    if not sync_df.empty:
+        figs['distance_comparison'] = visualizer.create_distance_comparison(sync_df, target_bag)
+        figs['pitch_comparison'] = visualizer.create_pitch_comparison(sync_df, target_bag)
+    
+    return sync_df, figs, visualizer  # Return visualizer instance!
 
 def _prepare_fft_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     prepared = df.copy()
