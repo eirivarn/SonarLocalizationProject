@@ -33,3 +33,7 @@ Thumbs.db
 # --- Editors ---
 .vscode/
 .idea/
+
+
+# --- Generated Images/Figures ---
+Images/

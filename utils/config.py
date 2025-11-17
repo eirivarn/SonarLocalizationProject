@@ -81,7 +81,7 @@ IMAGE_PROCESSING_CONFIG: Dict = {
                                         # Low threshold (1) means any non-zero signal is detected
     
     # === ADAPTIVE LINEAR MOMENTUM MERGING ===
-    'use_advanced_momentum_merging': False,  # Use structure tensor analysis vs basic Gaussian
+    'use_advanced_momentum_merging': True,  # Use structure tensor analysis vs basic Gaussian
     
     # Advanced momentum parameters
     'adaptive_angle_steps': 20,         # Number of angles tested for linearity
