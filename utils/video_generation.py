@@ -318,11 +318,14 @@ def export_optimized_sonar_video(
     END_IDX: int | None = 600,
     STRIDE: int = 1,
     # --- camera (automated or manual) ---
-    VIDEO_SEQ_DIR: Path | None = None,   # if provided, overrides auto-detection
-    AUTO_DETECT_VIDEO: bool = True,      # if True, automatically find video files based on bag name
+    VIDEO_SEQ_DIR: Path | None = None,
+    AUTO_DETECT_VIDEO: bool = True,
     VIDEO_HEIGHT: int = 700,
     PAD_BETWEEN: int = 8,
     FONT_SCALE: float = 0.55,
+    # --- NEW: Overlay control ---
+    INCLUDE_TEXT_OVERLAYS: bool = False,
+    INCLUDE_NET_LINES: bool = True,
     # --- sonar / display params (optimized defaults) ---
     FOV_DEG: float = FOV_DEG_DEFAULT,
     RANGE_MIN_M: float = SONAR_VIS_DEFAULTS["range_min_m"],
@@ -352,17 +355,49 @@ def export_optimized_sonar_video(
     SONAR_RESULTS: pd.DataFrame | None = None,  # DataFrame with sonar analysis results
     # --- FFT net position overlay (optional) ---
     FFT_NET_DATA: pd.DataFrame | None = None,  # DataFrame with FFT net position data
-    # --- NEW: DVL data and sync parameters ---
-    DVL_NAV_DATA: pd.DataFrame | None = None,  # DataFrame with DVL navigation data
-    SYNC_WINDOW_SECONDS: float = 0.1,  # Time window for synchronization
+    # --- DVL navigation data (optional) ---
+    DVL_NAV_DATA: pd.DataFrame | None = None,
 ):
     """
     Optimized sonar + (optional) net-line overlay + (optional) sonar analysis overlay.
-    If VIDEO_SEQ_DIR is given, the output includes the actual camera frame (side-by-side).
-    If SONAR_RESULTS is provided, displays both DVL and sonar analysis distances.
-    If FFT_NET_DATA is provided, displays FFT net position overlay in cyan.
-
-    Output is saved under EXPORTS_FOLDER / 'videos' with an 'optimized_sync' name.
+    
+    Args:
+        TARGET_BAG: Target bag name (e.g., "2024-08-20_13-39-34")
+        EXPORTS_FOLDER: Path to exports directory
+        START_IDX: Starting frame index
+        END_IDX: Ending frame index (None for all frames)
+        STRIDE: Frame stride (1 for every frame)
+        VIDEO_SEQ_DIR: Path to video sequence directory (for camera frames)
+        AUTO_DETECT_VIDEO: Automatically detect video files for this bag
+        VIDEO_HEIGHT: Height for video frames (camera feed)
+        PAD_BETWEEN: Padding between camera and sonar frames
+        FONT_SCALE: Scale for text overlays
+        INCLUDE_TEXT_OVERLAYS: If False, disables all text annotations
+        INCLUDE_NET_LINES: If False, disables DVL/FFT/Sonar net detection lines
+        FOV_DEG: Field of view in degrees
+        RANGE_MIN_M: Minimum range in meters
+        RANGE_MAX_M: Maximum range in meters
+        DISPLAY_RANGE_MAX_M: Maximum display range in meters
+        FLIP_BEAMS: Flip sonar beams vertically
+        FLIP_RANGE: Flip range direction
+        USE_ENHANCED: Use enhanced intensity mapping
+        ENH_SCALE: Enhancement scale type
+        ENH_TVG: Enhancement TVG type
+        ENH_ALPHA_DB_PER_M: Alpha dB per meter for enhancement
+        ENH_R0: R0 value for enhancement
+        ENH_P_LOW: Low percentile for enhancement
+        ENH_P_HIGH: High percentile for enhancement
+        ENH_GAMMA: Gamma correction value
+        ENH_ZERO_AWARE: Zero-aware enhancement
+        ENH_EPS_LOG: Epsilon value for log enhancement
+        CONE_W: Cone width in pixels
+        CONE_H: Cone height in pixels
+        CONE_FLIP_VERTICAL: Flip cone display vertically
+        CMAP_NAME: Color map name for display
+        NET_DISTANCE_TOLERANCE: Time tolerance for net distance synchronization
+        NET_PITCH_TOLERANCE: Time tolerance for net pitch synchronization
+        SONAR_RESULTS: DataFrame with sonar analysis results
+        FFT_NET_DATA: DataFrame with FFT net position data
     """
     import time
     import matplotlib.cm as cm
@@ -393,8 +428,8 @@ def export_optimized_sonar_video(
             print(f"Video overlay disabled in configuration (enable_video_overlay=False)")
     
     print(f"Camera: {'enabled' if VIDEO_SEQ_DIR is not None else 'disabled'}")
-    print(f"Net-line: {'enabled' if INCLUDE_NET else 'disabled'}"
-          + (f" (dist tol={NET_DISTANCE_TOLERANCE}s, pitch tol={NET_PITCH_TOLERANCE}s)" if INCLUDE_NET else ""))
+    print(f"Net-line: {'enabled' if INCLUDE_NET_LINES else 'disabled'}"
+          + (f" (dist tol={NET_DISTANCE_TOLERANCE}s, pitch tol={NET_PITCH_TOLERANCE}s)" if INCLUDE_NET_LINES else ""))
     print(f"Sonar Analysis: {'enabled' if SONAR_RESULTS is not None else 'disabled'}")
     print(f"FFT Data: {'enabled' if FFT_NET_DATA is not None else 'disabled'}")
 
@@ -418,7 +453,7 @@ def export_optimized_sonar_video(
     # --- STEP 1: Load and synchronize all three systems using comparison analysis approach ---
     
     # Load DVL data if not provided explicitly (same method as comparison analysis)
-    if DVL_NAV_DATA is None and INCLUDE_NET:
+    if DVL_NAV_DATA is None and INCLUDE_NET_LINES:
         try:
             # Use same loading method as comparison analysis
             import utils.distance_measurement as sda
@@ -490,7 +525,7 @@ def export_optimized_sonar_video(
         print(f"   Using synchronized DVL data: {len(nav_complete)} records")
         avail = [c for c in ["NetDistance", "NetPitch", "timestamp"] if c in nav_complete.columns]
         print(f"      Available: {avail}")
-    elif INCLUDE_NET:
+    elif INCLUDE_NET_LINES:
         # Fallback to original loading method
         nav_file = exports_root / EXPORTS_SUBDIRS.get('by_bag', 'by_bag') / f"navigation_plane_approximation__{TARGET_BAG}_data.csv"
         if nav_file.exists():
@@ -503,7 +538,7 @@ def export_optimized_sonar_video(
             print(f"      Available: {avail}")
         else:
             print("Navigation file not found; net-line overlay disabled")
-            INCLUDE_NET = False
+            INCLUDE_NET_LINES = False
 
     # --- Optional: load camera index ---
     dfv = None
@@ -535,7 +570,7 @@ def export_optimized_sonar_video(
     out_dir = Path(EXPORTS_FOLDER) / "videos"
     out_dir.mkdir(exist_ok=True)
     first_ts = pd.to_datetime(df.loc[frame_indices[0], "ts_utc"], utc=True, errors="coerce")
-    out_name = f"{TARGET_BAG}_optimized_sync_{'withcam_' if VIDEO_SEQ_DIR is not None else ''}{'withsonar_' if SONAR_RESULTS is not None else ''}{'nonet_' if not INCLUDE_NET else ''}{ts_for_name(first_ts)}.mp4"
+    out_name = f"{TARGET_BAG}_optimized_sync_{'withcam_' if VIDEO_SEQ_DIR is not None else ''}{'withsonar_' if SONAR_RESULTS is not None else ''}{'nonet_' if not INCLUDE_NET_LINES else ''}{ts_for_name(first_ts)}.mp4"
     out_path = out_dir / out_name
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     
@@ -627,7 +662,7 @@ def export_optimized_sonar_video(
             # --- optional net-line overlay (optimized sync with FFT support) ---
             status_text = None
             line_color = (128, 128, 128)
-            if INCLUDE_NET or SONAR_RESULTS is not None or FFT_NET_DATA is not None:
+            if INCLUDE_NET_LINES and (DVL_NAV_DATA is not None or FFT_NET_DATA is not None or SONAR_RESULTS is not None):
                 net_angle_deg = 0.0
                 net_distance = None
                 sonar_distance_m = None
@@ -642,7 +677,7 @@ def export_optimized_sonar_video(
                     ts_target = ts_target.tz_localize(None)
 
                 # --- DVL Navigation Data ---
-                if INCLUDE_NET:
+                if DVL_NAV_DATA is not None and len(DVL_NAV_DATA) > 0:
                     if nav_complete is not None and len(nav_complete) > 0:
                         # Ensure nav_complete timestamps are timezone-naive
                         nav_timestamps = nav_complete["timestamp"]
@@ -878,25 +913,25 @@ def export_optimized_sonar_video(
                         cv2.circle(cone_bgr, (center_px, center_py), center_radius, sonar_center_color, -1)
                         cv2.circle(cone_bgr, (center_px, center_py), center_radius, (255, 255, 255), center_outline)
 
-            # Create status text with all three systems
-            status_lines = []
-            if net_distance is not None:
-                status_lines.append(dvl_label if 'dvl_label' in locals() else f"DVL: {net_distance:.2f}m")
-            if fft_distance_m is not None:
-                status_lines.append(fft_label)
-            if sonar_distance_m is not None:
-                status_lines.append(sonar_label if 'sonar_label' in locals() else f"SONAR: {sonar_distance_m:.2f}m")
-            if status_lines:
-                status_text = " | ".join(status_lines)
+            # Create status text only if text overlays are enabled
+            if INCLUDE_TEXT_OVERLAYS:
+                status_lines = []
+                if net_distance is not None:
+                    status_lines.append(dvl_label if 'dvl_label' in locals() else f"DVL: {net_distance:.2f}m")
+                if fft_distance_m is not None:
+                    status_lines.append(fft_label)
+                if sonar_distance_m is not None:
+                    status_lines.append(sonar_label if 'sonar_label' in locals() else f"SONAR: {sonar_distance_m:.2f}m")
+                if status_lines:
+                    status_text = " | ".join(status_lines)
+                    # Status with black outline for better visibility
+                    cv2.putText(cone_bgr, status_text, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3, cv2.LINE_AA)
+                    cv2.putText(cone_bgr, status_text, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
 
-                # Status with black outline for better visibility
-                cv2.putText(cone_bgr, status_text, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3, cv2.LINE_AA)
-                cv2.putText(cone_bgr, status_text, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
-
-            # footer info with three-system indicator
-            frame_info = f"Frame {frame_idx}/{len(frame_indices)} | {TARGET_BAG} | 3-Sys.Sync"
-            cv2.putText(cone_bgr, frame_info, (10, CONE_H - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2, cv2.LINE_AA)
-            cv2.putText(cone_bgr, frame_info, (10, CONE_H - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
+                # Footer info
+                frame_info = f"Frame {frame_idx}/{len(frame_indices)} | {TARGET_BAG} | 3-Sys.Sync"
+                cv2.putText(cone_bgr, frame_info, (10, CONE_H - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2, cv2.LINE_AA)
+                cv2.putText(cone_bgr, frame_info, (10, CONE_H - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
 
             # CRITICAL FIX: After all alpha blending operations, ensure uint8
             # The alpha blend operations return float32, but VideoWriter needs uint8
@@ -965,10 +1000,12 @@ def export_optimized_sonar_video(
                     pad = np.zeros((CONE_H, PAD_BETWEEN, 3), dtype=np.uint8)
                     composite = np.hstack([cam_resized, pad, cone_frame])
 
-                    ts_cam_loc   = to_local(ts_cam,   "Europe/Oslo")
-                    ts_sonar_loc = to_local(ts_target,"Europe/Oslo")
-                    put_text(composite, f"VIDEO  @ {ts_cam_loc:%Y-%m-%d %H:%M:%S.%f %Z}", 24, scale=FONT_SCALE)
-                    put_text(composite, f"SONAR  @ {ts_sonar_loc:%Y-%m-%d %H:%M:%S.%f %Z}   Δt={dt.total_seconds():.3f}s", 48, scale=FONT_SCALE)
+                    # Add timestamp overlays only if text is enabled
+                    if INCLUDE_TEXT_OVERLAYS and dt <= max_sync_tolerance:
+                        ts_cam_loc   = to_local(ts_cam,   "Europe/Oslo")
+                        ts_sonar_loc = to_local(ts_target,"Europe/Oslo")
+                        put_text(composite, f"VIDEO  @ {ts_cam_loc:%Y-%m-%d %H:%M:%S.%f %Z}", 24, scale=FONT_SCALE)
+                        put_text(composite, f"SONAR  @ {ts_sonar_loc:%Y-%m-%d %H:%M:%S.%f %Z}   Δt={dt.total_seconds():.3f}s", 48, scale=FONT_SCALE)
 
         else:
             # sonar-only output canvas - PAD to match expected width
@@ -1007,7 +1044,7 @@ def export_optimized_sonar_video(
             "cone_h": int(CONE_H),
             "cone_flip_vertical": bool(CONE_FLIP_VERTICAL),
             "cmap": str(CMAP_NAME),
-            "include_net": bool(INCLUDE_NET),
+            "include_net": bool(INCLUDE_NET_LINES),
             "include_sonar_analysis": SONAR_RESULTS is not None,
             "include_fft_data": FFT_NET_DATA is not None,
             "fft_units_converted": True,
@@ -1037,16 +1074,17 @@ def export_optimized_sonar_video(
 def generate_three_system_video(
     target_bag: str,
     exports_folder: Path,
-    net_analysis_results: pd.DataFrame | None = None,  # Now optional
-    raw_data: dict | None = None,  # Now optional
+    net_analysis_results: pd.DataFrame | None = None,
+    raw_data: dict | None = None,
     fft_csv_path: Path | None = None,
     start_idx: int = 1,
     end_idx: int = 1200,
+    include_text_overlays: bool = False,
+    include_net_lines: bool = True,
     **video_kwargs
 ) -> Path:
     """
     Simplified three-system video generation with automatic data loading.
-    Falls back gracefully to two-system mode if FFT data is not available.
     
     Args:
         target_bag: Bag name to process
@@ -1058,6 +1096,8 @@ def generate_three_system_video(
         fft_csv_path: Optional path to FFT data CSV
         start_idx: Starting frame index
         end_idx: Ending frame index
+        include_text_overlays: If False, generates clean video without text annotations
+        include_net_lines: If False, hides all net detection lines (DVL/FFT/Sonar)
         **video_kwargs: Additional arguments passed to export_optimized_sonar_video
         
     Returns:
@@ -1132,9 +1172,10 @@ def generate_three_system_video(
         END_IDX=end_idx,
         STRIDE=1,
         AUTO_DETECT_VIDEO=True,
-        INCLUDE_NET=True,
+        INCLUDE_TEXT_OVERLAYS=include_text_overlays,
+        INCLUDE_NET_LINES=include_net_lines,
         SONAR_RESULTS=net_analysis_sync,
-        FFT_NET_DATA=fft_net_data_sync,  # Can be None
+        FFT_NET_DATA=fft_net_data_sync,
         NET_DISTANCE_TOLERANCE=0.5,
         NET_PITCH_TOLERANCE=2.0,
         **video_kwargs
