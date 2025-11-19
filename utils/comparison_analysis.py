@@ -166,12 +166,28 @@ def detect_stable_segments(df, sampling_rate, rolling_window_sec=3.0,
     
     print("Computing rolling statistics...")
     
-    # Rolling std for each method
+    # New: prioritize X/Y stability per system
+    position_axes = {
+        'fft': ('fft_x', 'fft_y'),
+        'sonar': ('sonar_x', 'sonar_y'),
+        'dvl': ('dvl_x', 'dvl_y'),
+        'nav': ('dvl_x', 'dvl_y'),  # alias for legacy naming
+    }
+    for label, (col_x, col_y) in position_axes.items():
+        if col_x in df.columns:
+            df[f'rolling_std_{col_x}'] = df[col_x].rolling(window_samples, center=True).std()
+        if col_y in df.columns:
+            df[f'rolling_std_{col_y}'] = df[col_y].rolling(window_samples, center=True).std()
+
+    # Existing distance/pitch rolling stats now optional
     if 'fft_distance_m' in df.columns:
+        df['rolling_mean_fft'] = df['fft_distance_m'].rolling(window_samples, center=True).mean()
         df['rolling_std_fft'] = df['fft_distance_m'].rolling(window_samples, center=True).std()
     if 'sonar_distance_m' in df.columns:
+        df['rolling_mean_sonar'] = df['sonar_distance_m'].rolling(window_samples, center=True).mean()
         df['rolling_std_sonar'] = df['sonar_distance_m'].rolling(window_samples, center=True).std()
     if 'nav_distance_m' in df.columns:
+        df['rolling_mean_dvl'] = df['nav_distance_m'].rolling(window_samples, center=True).mean()
         df['rolling_std_dvl'] = df['nav_distance_m'].rolling(window_samples, center=True).std()
     
     # Rolling mean and std of differences
@@ -183,24 +199,30 @@ def detect_stable_segments(df, sampling_rate, rolling_window_sec=3.0,
         df['rolling_mean_diff_sonar_nav'] = df['diff_sonar_nav'].rolling(window_samples, center=True).mean()
         df['rolling_std_diff_sonar_nav'] = df['diff_sonar_nav'].rolling(window_samples, center=True).std()
     
-    # Define stability criteria
+    # Define stability criteria (X/Y driven)
     print("Applying stability criteria...")
     stable_mask = pd.Series(True, index=df.index)
-    
-    # Low variance in each method
-    if 'rolling_std_fft' in df.columns:
-        stable_mask &= (df['rolling_std_fft'] < sigma_thresh)
-    if 'rolling_std_sonar' in df.columns:
-        stable_mask &= (df['rolling_std_sonar'] < sigma_thresh)
-    if 'rolling_std_dvl' in df.columns:
-        stable_mask &= (df['rolling_std_dvl'] < sigma_thresh)
-    
-    # Small mutual differences
-    if 'rolling_mean_diff_fft_nav' in df.columns:
-        stable_mask &= (df['rolling_mean_diff_fft_nav'].abs() < delta_thresh)
-    if 'rolling_mean_diff_sonar_nav' in df.columns:
-        stable_mask &= (df['rolling_mean_diff_sonar_nav'].abs() < delta_thresh)
-    
+
+    for label, (col_x, col_y) in position_axes.items():
+        if f'rolling_std_{col_x}' in df.columns:
+            stable_mask &= (df[f'rolling_std_{col_x}'] < sigma_thresh)
+        if f'rolling_std_{col_y}' in df.columns:
+            stable_mask &= (df[f'rolling_std_{col_y}'] < sigma_thresh)
+
+    # X/Y inter-system deltas
+    xy_diff_pairs = [
+        ('diff_x_fft_nav', 'diff_y_fft_nav'),
+        ('diff_x_fft_sonar', 'diff_y_fft_sonar'),
+        ('diff_x_sonar_nav', 'diff_y_sonar_nav'),
+    ]
+    for diff_x_col, diff_y_col in xy_diff_pairs:
+        if diff_x_col in df.columns:
+            df[f'rolling_mean_{diff_x_col}'] = df[diff_x_col].rolling(window_samples, center=True).mean()
+            stable_mask &= df[f'rolling_mean_{diff_x_col}'].abs() < delta_thresh
+        if diff_y_col in df.columns:
+            df[f'rolling_mean_{diff_y_col}'] = df[diff_y_col].rolling(window_samples, center=True).mean()
+            stable_mask &= df[f'rolling_mean_{diff_y_col}'].abs() < delta_thresh
+
     # No NaNs in distance measurements
     for col in ['fft_distance_m', 'sonar_distance_m', 'nav_distance_m']:
         if col in df.columns:
@@ -562,7 +584,16 @@ def analyze_outlier_characteristics(df, outlier_cols):
 
 
 # Update generate_multi_bag_summary_csv to include outlier characteristics
-def generate_multi_bag_summary_csv(comparison_data_dir, output_path=None):
+def generate_multi_bag_summary_csv(
+    comparison_data_dir,
+    output_path=None,
+    smoothing_alpha=None,
+    rolling_window_sec=3.0,
+    sigma_thresh=0.15,
+    delta_thresh=0.15,
+    min_segment_sec=1.0,
+    outlier_k=3.5,
+):
     """
     Generate a comprehensive CSV summary of all bags in the comparison data directory.
     
@@ -598,10 +629,24 @@ def generate_multi_bag_summary_csv(comparison_data_dir, output_path=None):
         print(f"Processing: {bag_id}")
         
         try:
-            # Load comparison data
             df = pd.read_csv(csv_path)
             df['timestamp'] = pd.to_datetime(df['sync_timestamp'])
             df = df.set_index('timestamp').sort_index()
+
+            if smoothing_alpha is not None and smoothing_alpha < 1.0:
+                print(f"\nApplying exponential smoothing (α={smoothing_alpha:.2f})...")
+                
+                smooth_cols = [
+                    'fft_distance_m', 'fft_pitch_deg', 'fft_x', 'fft_y',
+                    'sonar_distance_m', 'sonar_pitch_deg', 'sonar_x', 'sonar_y',
+                    'nav_distance_m', 'nav_pitch_deg', 'dvl_x', 'dvl_y'
+                ]
+                
+                for col in smooth_cols:
+                    if col in df.columns:
+                        df[col] = df[col].ewm(alpha=smoothing_alpha, adjust=False).mean()
+                
+                print(f"  ✓ Smoothed {sum(1 for c in smooth_cols if c in df.columns)} columns")
             
             # Calculate sampling rate
             time_diffs = df.index.to_series().diff().dt.total_seconds()
@@ -628,16 +673,15 @@ def generate_multi_bag_summary_csv(comparison_data_dir, output_path=None):
                 'end_time': df.index[-1].isoformat(),
             }
             
-            # Compute pairwise differences
             df = compute_pairwise_differences(df)
-            
-            # Detect stable segments (using default parameters)
+
             df, segments, window_samples = detect_stable_segments(
-                df, sampling_rate,
-                rolling_window_sec=3.0,
-                sigma_thresh=0.15,
-                delta_thresh=0.15,
-                min_segment_sec=1.0
+                df,
+                sampling_rate,
+                rolling_window_sec=rolling_window_sec,
+                sigma_thresh=sigma_thresh,
+                delta_thresh=delta_thresh,
+                min_segment_sec=min_segment_sec,
             )
             
             # Stable segment statistics
@@ -769,8 +813,7 @@ def generate_multi_bag_summary_csv(comparison_data_dir, output_path=None):
                         row[f'{name}_slope'] = reg.coef_[0]
                         row[f'{name}_intercept'] = reg.intercept_
             
-            # Outlier detection with detailed characteristics
-            df, outlier_stats = detect_outliers(df, window_samples, outlier_k=3.5)
+            df, outlier_stats = detect_outliers(df, window_samples, outlier_k=outlier_k)
             
             outlier_cols = [c for c in df.columns if c.endswith('_outlier')]
             for col in outlier_cols:
@@ -1094,15 +1137,26 @@ def print_multi_bag_summary(summary_csv_path):
                 print(f"  {system.upper()}: mean={data.mean():.4f}°, median={data.median():.4f}°, "
                       f"min={data.min():.4f}°, max={data.max():.4f}°")
     
+    # Position (X/Y) noise levels
+    print(f"\n🧭 POSITION NOISE (Baseline STD)")
+    for axis_label, axis in [("X", "x"), ("Y", "y")]:
+        for system in ['fft', 'sonar', 'dvl']:
+            col = f'{system}_{axis}_std_m'
+            if col in summary_df.columns:
+                data = summary_df[col].dropna()
+                if len(data) > 0:
+                    print(f"  {axis_label} {system.upper()}: mean={data.mean():.4f}m, "
+                          f"median={data.median():.4f}m, min={data.min():.4f}m, max={data.max():.4f}m")
+
     # Pairwise bias (systematic differences)
     print(f"\n⚖️  PAIRWISE BIASES (Systematic Differences)")
-    bias_pairs = [
+    distance_pairs = [
         ('FFT vs DVL', 'distance_bias_fft_dvl_m'),
         ('Sonar vs DVL', 'distance_bias_sonar_dvl_m'),
         ('FFT vs Sonar', 'distance_bias_fft_sonar_m')
     ]
     
-    for name, col in bias_pairs:
+    for name, col in distance_pairs:
         if col in summary_df.columns:
             data = summary_df[col].dropna()
             if len(data) > 0:
@@ -1389,6 +1443,51 @@ def create_visualizations(df, segments, target_bag, plots_dir, sigma_thresh, out
                       hovermode='x unified')
     figs['outliers'] = fig3
     
+    # New XY trajectory visualization
+    if any(col in df.columns for col in ['fft_x', 'sonar_x', 'dvl_x']):
+        fig_xy = make_subplots(
+            rows=2,
+            cols=1,
+            subplot_titles=("X Position vs Time", "Y Position vs Time"),
+            vertical_spacing=0.12,
+            shared_xaxes=True,
+        )
+
+        xy_traces = [
+            ('FFT', 'fft_x', 'fft_y', 'red'),
+            ('Sonar', 'sonar_x', 'sonar_y', 'blue'),
+            ('DVL', 'dvl_x', 'dvl_y', 'green'),
+        ]
+
+        for label, col_x, col_y, color in xy_traces:
+            if col_x in df.columns:
+                fig_xy.add_trace(
+                    go.Scatter(x=df.index, y=df[col_x], mode='lines', name=f'{label} X', line=dict(color=color)),
+                    row=1, col=1
+                )
+            if col_y in df.columns:
+                fig_xy.add_trace(
+                    go.Scatter(x=df.index, y=df[col_y], mode='lines', name=f'{label} Y', line=dict(color=color, dash='dot')),
+                    row=2, col=1
+                )
+
+        for seg in segments:
+            fig_xy.add_vrect(x0=seg['start'], x1=seg['end'], fillcolor="LightGreen", opacity=0.15, line_width=0)
+
+        fig_xy.update_layout(
+            title=f"XY Position Stability: {target_bag}",
+            height=700,
+            xaxis2_title="Time",
+            yaxis_title="X (m)",
+            yaxis2_title="Y (m)",
+            hovermode='x unified'
+        )
+
+        figs['xy_positions'] = fig_xy
+        save_path = plots_dir / f"{target_bag}_xy_positions.html"
+        fig_xy.write_html(str(save_path))
+        print(f"Saved: {save_path.name}")
+
     # Save all plots
     for name, fig in figs.items():
         save_path = plots_dir / f"{target_bag}_{name}.html"
