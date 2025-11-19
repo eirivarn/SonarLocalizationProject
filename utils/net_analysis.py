@@ -1419,3 +1419,77 @@ def create_timeseries_visualizations(sync_df: pd.DataFrame, target_bag: str) -> 
     figs['rolling_stats'] = fig_rolling
     
     return figs
+
+def export_raw_comparison_data(df_sonar_raw: pd.DataFrame, df_nav_raw: pd.DataFrame, 
+                               df_fft_raw: pd.DataFrame, target_bag: str, 
+                               output_dir: Path, tolerance_seconds: float = 0.5) -> Optional[Path]:
+    """
+    Generate and export raw (unsmoothed) synchronized comparison data to CSV.
+    
+    Args:
+        df_sonar_raw: Raw sonar DataFrame
+        df_nav_raw: Raw navigation DataFrame
+        df_fft_raw: Raw FFT DataFrame
+        target_bag: Target bag identifier for filename
+        output_dir: Directory to save the CSV file
+        tolerance_seconds: Time tolerance for synchronization
+        
+    Returns:
+        Path to saved CSV file, or None if export failed
+    """
+    print("\n=== GENERATING RAW COMPARISON DATA ===\n")
+    print("Creating unsmoothed synchronized dataset for export...")
+    
+    # Create synchronized dataset from raw data
+    three_sync_df_raw, _, _ = prepare_three_system_comparison(
+        target_bag,
+        df_sonar_raw,
+        df_nav_raw,
+        df_fft_raw,
+        tolerance_seconds=tolerance_seconds
+    )
+    
+    if three_sync_df_raw is None or three_sync_df_raw.empty:
+        print("✗ Could not generate raw comparison data")
+        return None
+    
+    # Ensure XY columns exist
+    three_sync_df_raw = ensure_xy_columns(three_sync_df_raw)
+    
+    # Select columns for export
+    export_cols = [
+        'sync_timestamp',
+        # FFT data
+        'fft_distance_m', 'fft_pitch_deg', 'fft_x', 'fft_y',
+        # Sonar data
+        'sonar_distance_m', 'sonar_pitch_deg', 'sonar_x', 'sonar_y',
+        # DVL data
+        'nav_distance_m', 'nav_pitch_deg', 'dvl_x', 'dvl_y'
+    ]
+    
+    # Filter to only existing columns
+    export_cols = [c for c in export_cols if c in three_sync_df_raw.columns]
+    
+    # Ensure output directory exists
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Save to CSV
+    output_path = output_dir / f"{target_bag}_raw_comparison.csv"
+    three_sync_df_raw[export_cols].to_csv(output_path, index=False)
+    
+    # Report what was saved
+    available_systems = []
+    if any('fft' in c for c in export_cols):
+        available_systems.append('FFT')
+    if any('sonar' in c for c in export_cols):
+        available_systems.append('Sonar')
+    if any('nav' in c or 'dvl' in c for c in export_cols):
+        available_systems.append('DVL')
+    
+    print(f"✓ Saved raw comparison data: {output_path.name}")
+    print(f"  Records: {len(three_sync_df_raw)}")
+    print(f"  Columns: {len(export_cols)}")
+    print(f"  Available systems: {', '.join(available_systems)}")
+    print(f"  File size: {output_path.stat().st_size / 1024:.1f} KB\n")
+    
+    return output_path
