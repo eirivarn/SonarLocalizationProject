@@ -1462,12 +1462,24 @@ def create_visualizations(df, segments, target_bag, plots_dir, sigma_thresh, out
         for label, col_x, col_y, color in xy_traces:
             if col_x in df.columns:
                 fig_xy.add_trace(
-                    go.Scatter(x=df.index, y=df[col_x], mode='lines', name=f'{label} X', line=dict(color=color)),
+                    go.Scatter(
+                        x=df.index,
+                        y=df[col_x],
+                        mode='lines',
+                        name=f'{label} X',
+                        line=dict(color=color)  # solid line
+                    ),
                     row=1, col=1
                 )
             if col_y in df.columns:
                 fig_xy.add_trace(
-                    go.Scatter(x=df.index, y=df[col_y], mode='lines', name=f'{label} Y', line=dict(color=color, dash='dot')),
+                    go.Scatter(
+                        x=df.index,
+                        y=df[col_y],
+                        mode='lines',
+                        name=f'{label} Y',
+                        line=dict(color=color)  # solid line (no dash)
+                    ),
                     row=2, col=1
                 )
 
