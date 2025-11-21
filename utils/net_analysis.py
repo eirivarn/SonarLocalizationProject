@@ -21,31 +21,46 @@ def load_sonar_analysis_results(
     target_bag: str,
     exports_dir: str | Path | None = None,
     filenames: Optional[List[str]] = None,
+    filename_suffix: str = "_analysis.csv"
 ) -> Tuple[Optional[pd.DataFrame], Dict[str, Any]]:
-    _, outputs_dir, _ = _resolve_export_paths(exports_dir)
-    candidates = filenames or [
-        f"{target_bag}_analysis.csv",
-        f"{target_bag}_data_cones_analysis.csv",
-        f"{target_bag}_video_cones_analysis.csv",
+    base_dir = (
+        Path(exports_dir).expanduser().resolve()
+        if exports_dir is not None
+        else Path(SONAR_ANALYSIS_DIR).expanduser().resolve()
+        if "SONAR_ANALYSIS_DIR" in globals() and SONAR_ANALYSIS_DIR is not None
+        else (Path(EXPORTS_DIR_DEFAULT) / EXPORTS_SUBDIRS.get("outputs", "outputs")).expanduser().resolve()
+    )
+    candidate_files = [
+        base_dir / f"{target_bag}_analysis.csv",
+        base_dir / f"{target_bag}_data_cones_analysis.csv",
     ]
-    tried_paths = [outputs_dir / name for name in candidates]
-    for path in tried_paths:
-        if path.exists():
-            df = pd.read_csv(path)
-            if 'timestamp' in df.columns:
-                df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
-                df = df.dropna(subset=['timestamp']).sort_values('timestamp')
-            return df, {
-                "resolved_path": str(path),
-                "rows": len(df),
-                "paths_checked": [str(p) for p in tried_paths],
-            }
+    csv_path = next((p for p in candidate_files if p.exists()), None)
+    if csv_path is None:
+        raise FileNotFoundError(
+            f"Sonar analysis CSV not found. Tried: {', '.join(str(p) for p in candidate_files)}"
+        )
 
-    return None, {
-        "resolved_path": None,
-        "rows": 0,
-        "paths_checked": [str(p) for p in tried_paths],
+    try:
+        df = pd.read_csv(csv_path, encoding="utf-8")
+    except UnicodeDecodeError:
+        df = pd.read_csv(csv_path, encoding="ISO-8859-1")
+
+    if "timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+    else:
+        print(f"[load_sonar_analysis_results] ⚠️  'timestamp' column missing in {csv_path.name}")
+
+    metadata = {
+        "rows": len(df),
+        "resolved_path": str(csv_path),
+        "paths_checked": [str(csv_path)],
     }
+    
+    if "timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+        df = df.dropna(subset=["timestamp"]).sort_values("timestamp")
+    
+    return df, metadata
 
 def load_navigation_dataset(
     target_bag: str,
@@ -56,20 +71,20 @@ def load_navigation_dataset(
 
     if nav_path.exists():
         df = pd.read_csv(nav_path)
-        timestamp_source = 'timestamp' if 'timestamp' in df.columns else 'ts_utc'
-        df['timestamp'] = pd.to_datetime(df[timestamp_source], errors='coerce')
-        df = df.sort_values('timestamp')
+        timestamp_source = "timestamp" if "timestamp" in df.columns else "ts_utc"
+        df["timestamp"] = pd.to_datetime(df[timestamp_source], errors="coerce")
+        df = df.sort_values("timestamp")
         return df, {"resolved_path": str(nav_path), "rows": len(df)}
 
     try:
         import utils.distance_measurement as distance_api
 
         raw_data, _ = distance_api.load_all_distance_data_for_bag(target_bag, by_bag_dir)
-        df = raw_data.get('navigation') if raw_data else None
+        df = raw_data.get("navigation") if raw_data else None
         if df is not None:
             df = df.copy()
-            df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
-            df = df.sort_values('timestamp')
+            df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+            df = df.sort_values("timestamp")
             return df, {"resolved_path": "distance_measurement_fallback", "rows": len(df)}
     except Exception:
         pass
@@ -93,7 +108,10 @@ def load_fft_dataset(
         path = base / f"{target_bag}_relative_pose_fft.csv"
         tried_paths.append(str(path))
         if path.exists():
-            df = pd.read_csv(path)
+            try:
+                df = pd.read_csv(path, encoding="utf-8")
+            except UnicodeDecodeError:
+                df = pd.read_csv(path, encoding="ISO-8859-1")
             prepared = _prepare_fft_dataframe(df)
             return prepared, {
                 "resolved_path": str(path),
@@ -123,13 +141,13 @@ def summarize_sonar_results(df: Optional[pd.DataFrame]) -> Dict[str, Any]:
     summary["detections"] = int(detection_mask.sum())
     summary["detection_rate"] = float(detection_mask.mean()) * 100.0
 
-    if 'distance_meters' in df.columns:
-        distances = df['distance_meters'].dropna()
+    if "distance_meters" in df.columns:
+        distances = df["distance_meters"].dropna()
         if not distances.empty:
             summary["distance_range_m"] = (float(distances.min()), float(distances.max()))
 
-    if 'angle_degrees' in df.columns:
-        angles = df['angle_degrees'].dropna()
+    if "angle_degrees" in df.columns:
+        angles = df["angle_degrees"].dropna()
         if not angles.empty:
             summary["angle_range_deg"] = (float(angles.min()), float(angles.max()))
 
@@ -147,15 +165,15 @@ def summarize_navigation_results(df: Optional[pd.DataFrame]) -> Dict[str, Any]:
         return summary
 
     summary["rows"] = len(df)
-    if 'NetDistance' in df.columns:
-        dist = df['NetDistance'].dropna()
+    if "NetDistance" in df.columns:
+        dist = df["NetDistance"].dropna()
         if not dist.empty:
             summary["distance_range_m"] = (float(dist.min()), float(dist.max()))
             summary["distance_mean_m"] = float(dist.mean())
             summary["distance_std_m"] = float(dist.std())
 
-    if 'NetPitch' in df.columns:
-        pitch = np.degrees(df['NetPitch'].dropna())
+    if "NetPitch" in df.columns:
+        pitch = np.degrees(df["NetPitch"].dropna())
         if not pitch.empty:
             summary["pitch_range_deg"] = (float(pitch.min()), float(pitch.max()))
 
@@ -173,15 +191,15 @@ def summarize_fft_results(df: Optional[pd.DataFrame]) -> Dict[str, Any]:
         return summary
 
     summary["rows"] = len(df)
-    if 'distance_m' in df.columns:
-        distances = pd.to_numeric(df['distance_m'], errors='coerce').dropna()
+    if "distance_m" in df.columns:
+        distances = pd.to_numeric(df["distance_m"], errors="coerce").dropna()
         if not distances.empty:
             summary["distance_range_m"] = (float(distances.min()), float(distances.max()))
             summary["distance_mean_m"] = float(distances.mean())
             summary["distance_std_m"] = float(distances.std())
 
-    if 'pitch_deg' in df.columns:
-        pitch = pd.to_numeric(df['pitch_deg'], errors='coerce').dropna()
+    if "pitch_deg" in df.columns:
+        pitch = pd.to_numeric(df["pitch_deg"], errors="coerce").dropna()
         if not pitch.empty:
             summary["pitch_range_deg"] = (float(pitch.min()), float(pitch.max()))
 
@@ -196,35 +214,35 @@ def synchronize_sonar_and_dvl(
         return pd.DataFrame()
 
     sonar = df_sonar.copy()
-    sonar['timestamp'] = pd.to_datetime(sonar['timestamp'], errors='coerce')
-    sonar = sonar.dropna(subset=['timestamp']).sort_values('timestamp')
+    sonar["timestamp"] = pd.to_datetime(sonar["timestamp"], errors="coerce")
+    sonar = sonar.dropna(subset=["timestamp"]).sort_values("timestamp")
 
     nav = df_nav.copy()
-    timestamp_col = 'timestamp' if 'timestamp' in nav.columns else 'ts_utc'
-    nav['timestamp'] = pd.to_datetime(nav[timestamp_col], errors='coerce')
-    nav = nav.dropna(subset=['timestamp']).sort_values('timestamp')
+    timestamp_col = "timestamp" if "timestamp" in nav.columns else "ts_utc"
+    nav["timestamp"] = pd.to_datetime(nav[timestamp_col], errors="coerce")
+    nav = nav.dropna(subset=["timestamp"]).sort_values("timestamp")
 
     if nav.empty or sonar.empty:
         return pd.DataFrame()
 
-    nav_times = nav['timestamp'].to_numpy(dtype='datetime64[ns]')
+    nav_times = nav["timestamp"].to_numpy(dtype="datetime64[ns]")
     rows: List[Dict[str, Any]] = []
 
     for sonar_row in sonar.itertuples(index=False):
         sonar_ts = np.datetime64(sonar_row.timestamp)
         deltas = np.abs(nav_times - sonar_ts)
         idx = int(deltas.argmin())
-        diff_sec = float(deltas[idx] / np.timedelta64(1, 's'))
+        diff_sec = float(deltas[idx] / np.timedelta64(1, "s"))
         if diff_sec <= tolerance_seconds:
             nav_row = nav.iloc[idx]
             rows.append({
-                'timestamp': pd.Timestamp(sonar_row.timestamp),
-                'sonar_distance_m': getattr(sonar_row, 'distance_meters', None),
-                'sonar_angle_deg': getattr(sonar_row, 'angle_degrees', None),
-                'sonar_detection': bool(getattr(sonar_row, 'detection_success', False)),
-                'dvl_distance_m': nav_row.get('NetDistance'),
-                'dvl_pitch_deg': float(np.degrees(nav_row['NetPitch'])) if 'NetPitch' in nav_row and pd.notna(nav_row['NetPitch']) else None,
-                'time_diff_s': diff_sec,
+                "timestamp": pd.Timestamp(sonar_row.timestamp),
+                "sonar_distance_m": getattr(sonar_row, "distance_meters", None),
+                "sonar_angle_deg": getattr(sonar_row, "angle_degrees", None),
+                "sonar_detection": bool(getattr(sonar_row, "detection_success", False)),
+                "dvl_distance_m": nav_row.get("NetDistance"),
+                "dvl_pitch_deg": float(np.degrees(nav_row["NetPitch"])) if "NetPitch" in nav_row and pd.notna(nav_row["NetPitch"]) else None,
+                "time_diff_s": diff_sec,
             })
 
     return pd.DataFrame(rows)
@@ -238,12 +256,12 @@ def summarize_distance_alignment(sync_df: pd.DataFrame) -> Dict[str, Any]:
     if sync_df.empty:
         return summary
 
-    valid = sync_df['sonar_distance_m'].notna() & sync_df['dvl_distance_m'].notna()
+    valid = sync_df["sonar_distance_m"].notna() & sync_df["dvl_distance_m"].notna()
     summary["valid_pairs"] = int(valid.sum())
     if not valid.any():
         return summary
 
-    diff = sync_df.loc[valid, 'sonar_distance_m'] - sync_df.loc[valid, 'dvl_distance_m']
+    diff = sync_df.loc[valid, "sonar_distance_m"] - sync_df.loc[valid, "dvl_distance_m"]
     stats = {
         "mean": float(diff.mean()),
         "std": float(diff.std()),
@@ -252,7 +270,7 @@ def summarize_distance_alignment(sync_df: pd.DataFrame) -> Dict[str, Any]:
         "p95": float(np.percentile(diff, 95)),
     }
     if len(diff) > 10:
-        stats["correlation"] = float(sync_df.loc[valid, 'sonar_distance_m'].corr(sync_df.loc[valid, 'dvl_distance_m']))
+        stats["correlation"] = float(sync_df.loc[valid, "sonar_distance_m"].corr(sync_df.loc[valid, "dvl_distance_m"]))
     summary["difference_stats"] = stats
     return summary
 
@@ -270,9 +288,9 @@ def summarize_xy_positions(sync_df: pd.DataFrame) -> Dict:
     
     # Support both naming conventions: _x_m/_y_m and _x/_y
     systems = [
-        ('FFT', ['fft_x_m', 'fft_y_m', 'fft_x', 'fft_y']),
-        ('Sonar', ['sonar_x_m', 'sonar_y_m', 'sonar_x', 'sonar_y']),
-        ('DVL', ['nav_x_m', 'nav_y_m', 'dvl_x', 'dvl_y'])
+        ("FFT", ["fft_x_m", "fft_y_m", "fft_x", "fft_y"]),
+        ("Sonar", ["sonar_x_m", "sonar_y_m", "sonar_x", "sonar_y"]),
+        ("DVL", ["nav_x_m", "nav_y_m", "dvl_x", "dvl_y"])
     ]
     
     for system_name, possible_cols in systems:
@@ -282,9 +300,9 @@ def summarize_xy_positions(sync_df: pd.DataFrame) -> Dict:
         
         for col in possible_cols:
             if col in sync_df.columns:
-                if '_x' in col:
+                if "_x" in col:
                     x_col = col
-                elif '_y' in col:
+                elif "_y" in col:
                     y_col = col
         
         if x_col and y_col:
@@ -298,19 +316,19 @@ def summarize_xy_positions(sync_df: pd.DataFrame) -> Dict:
                 distances = np.sqrt(x_data**2 + y_data**2)
                 
                 stats[system_name] = {
-                    'count': len(x_data),
-                    'x_mean': float(x_data.mean()),
-                    'x_std': float(x_data.std()),
-                    'x_min': float(x_data.min()),
-                    'x_max': float(x_data.max()),
-                    'y_mean': float(y_data.mean()),
-                    'y_std': float(y_data.std()),
-                    'y_min': float(y_data.min()),
-                    'y_max': float(y_data.max()),
-                    'distance_mean': float(distances.mean()),
-                    'distance_std': float(distances.std()),
-                    'distance_min': float(distances.min()),
-                    'distance_max': float(distances.max())
+                    "count": len(x_data),
+                    "x_mean": float(x_data.mean()),
+                    "x_std": float(x_data.std()),
+                    "x_min": float(x_data.min()),
+                    "x_max": float(x_data.max()),
+                    "y_mean": float(y_data.mean()),
+                    "y_std": float(y_data.std()),
+                    "y_min": float(y_data.min()),
+                    "y_max": float(y_data.max()),
+                    "distance_mean": float(distances.mean()),
+                    "distance_std": float(distances.std()),
+                    "distance_min": float(distances.min()),
+                    "distance_max": float(distances.max())
                 }
     
     return stats
@@ -352,40 +370,40 @@ def prepare_three_system_comparison(
     # Create comparison plots
     figs = {}
     if not sync_df.empty:
-        figs['distance_comparison'] = visualizer.create_distance_comparison(sync_df, target_bag)
-        figs['pitch_comparison'] = visualizer.create_pitch_comparison(sync_df, target_bag)
+        figs["distance_comparison"] = visualizer.create_distance_comparison(sync_df, target_bag)
+        figs["pitch_comparison"] = visualizer.create_pitch_comparison(sync_df, target_bag)
     
     return sync_df, figs, visualizer  # Return visualizer instance!
 
 def _prepare_fft_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     prepared = df.copy()
-    if 'timestamp' not in prepared.columns:
-        if 'time' in prepared.columns:
-            prepared['timestamp'] = pd.to_datetime(pd.to_numeric(prepared['time'], errors='coerce'), unit='s', errors='coerce')
+    if "timestamp" not in prepared.columns:
+        if "time" in prepared.columns:
+            prepared["timestamp"] = pd.to_datetime(pd.to_numeric(prepared["time"], errors="coerce"), unit="s", errors="coerce")
         else:
-            prepared['timestamp'] = pd.NaT
+            prepared["timestamp"] = pd.NaT
     else:
-        prepared['timestamp'] = pd.to_datetime(prepared['timestamp'], errors='coerce')
+        prepared["timestamp"] = pd.to_datetime(prepared["timestamp"], errors="coerce")
 
-    if 'distance' in prepared.columns and 'distance_m' not in prepared.columns:
-        distances = pd.to_numeric(prepared['distance'], errors='coerce')
+    if "distance" in prepared.columns and "distance_m" not in prepared.columns:
+        distances = pd.to_numeric(prepared["distance"], errors="coerce")
         max_abs = float(distances.abs().max()) if distances.notna().any() else 0.0
         if max_abs > 50.0:
-            prepared['distance_m'] = distances / 100.0
+            prepared["distance_m"] = distances / 100.0
         else:
-            prepared['distance_m'] = distances
-    elif 'distance_m' in prepared.columns:
-        prepared['distance_m'] = pd.to_numeric(prepared['distance_m'], errors='coerce')
+            prepared["distance_m"] = distances
+    elif "distance_m" in prepared.columns:
+        prepared["distance_m"] = pd.to_numeric(prepared["distance_m"], errors="coerce")
 
-    if 'pitch' in prepared.columns and 'pitch_rad' not in prepared.columns:
-        prepared['pitch_rad'] = pd.to_numeric(prepared['pitch'], errors='coerce')
-    elif 'pitch_rad' in prepared.columns:
-        prepared['pitch_rad'] = pd.to_numeric(prepared['pitch_rad'], errors='coerce')
+    if "pitch" in prepared.columns and "pitch_rad" not in prepared.columns:
+        prepared["pitch_rad"] = pd.to_numeric(prepared["pitch"], errors="coerce")
+    elif "pitch_rad" in prepared.columns:
+        prepared["pitch_rad"] = pd.to_numeric(prepared["pitch_rad"], errors="coerce")
 
-    if 'pitch_rad' in prepared.columns:
-        prepared['pitch_deg'] = np.degrees(prepared['pitch_rad'])
-        prepared['fft_x_m'] = prepared['distance_m'] * np.cos(prepared['pitch_rad'])
-        prepared['fft_y_m'] = prepared['distance_m'] * np.sin(prepared['pitch_rad'])
+    if "pitch_rad" in prepared.columns:
+        prepared["pitch_deg"] = np.degrees(prepared["pitch_rad"])
+        prepared["fft_x_m"] = prepared["distance_m"] * np.cos(prepared["pitch_rad"])
+        prepared["fft_y_m"] = prepared["distance_m"] * np.sin(prepared["pitch_rad"])
 
     return prepared
 
@@ -400,23 +418,23 @@ def compute_distance_pitch_statistics(sync_df: pd.DataFrame) -> Dict:
         Dictionary containing statistics for each system and cross-system comparisons
     """
     stats = {
-        'distance': {},
-        'pitch': {},
-        'distance_differences': {},
-        'pitch_differences': {}
+        "distance": {},
+        "pitch": {},
+        "distance_differences": {},
+        "pitch_differences": {}
     }
     
     # Define column mappings
     distance_cols = {
-        'FFT': 'fft_distance_m',
-        'Sonar': 'sonar_distance_m',
-        'DVL': 'nav_distance_m'
+        "FFT": "fft_distance_m",
+        "Sonar": "sonar_distance_m",
+        "DVL": "nav_distance_m"
     }
     
     pitch_cols = {
-        'FFT': 'fft_pitch_deg',
-        'Sonar': 'sonar_pitch_deg',
-        'DVL': 'nav_pitch_deg'
+        "FFT": "fft_pitch_deg",
+        "Sonar": "sonar_pitch_deg",
+        "DVL": "nav_pitch_deg"
     }
     
     # Compute per-system statistics
@@ -424,33 +442,33 @@ def compute_distance_pitch_statistics(sync_df: pd.DataFrame) -> Dict:
         if col in sync_df.columns:
             valid_data = sync_df[col].dropna()
             if len(valid_data) > 0:
-                stats['distance'][system] = {
-                    'count': len(valid_data),
-                    'mean': float(valid_data.mean()),
-                    'std': float(valid_data.std()),
-                    'min': float(valid_data.min()),
-                    'max': float(valid_data.max()),
-                    'range': float(valid_data.max() - valid_data.min())
+                stats["distance"][system] = {
+                    "count": len(valid_data),
+                    "mean": float(valid_data.mean()),
+                    "std": float(valid_data.std()),
+                    "min": float(valid_data.min()),
+                    "max": float(valid_data.max()),
+                    "range": float(valid_data.max() - valid_data.min())
                 }
     
     for system, col in pitch_cols.items():
         if col in sync_df.columns:
             valid_data = sync_df[col].dropna()
             if len(valid_data) > 0:
-                stats['pitch'][system] = {
-                    'count': len(valid_data),
-                    'mean': float(valid_data.mean()),
-                    'std': float(valid_data.std()),
-                    'min': float(valid_data.min()),
-                    'max': float(valid_data.max()),
-                    'range': float(valid_data.max() - valid_data.min())
+                stats["pitch"][system] = {
+                    "count": len(valid_data),
+                    "mean": float(valid_data.mean()),
+                    "std": float(valid_data.std()),
+                    "min": float(valid_data.min()),
+                    "max": float(valid_data.max()),
+                    "range": float(valid_data.max() - valid_data.min())
                 }
     
     # Compute cross-system comparisons
     system_pairs = [
-        ('FFT', 'Sonar', 'fft_distance_m', 'sonar_distance_m'),
-        ('FFT', 'DVL', 'fft_distance_m', 'nav_distance_m'),
-        ('Sonar', 'DVL', 'sonar_distance_m', 'nav_distance_m')
+        ("FFT", "Sonar", "fft_distance_m", "sonar_distance_m"),
+        ("FFT", "DVL", "fft_distance_m", "nav_distance_m"),
+        ("Sonar", "DVL", "sonar_distance_m", "nav_distance_m")
     ]
     
     for sys1, sys2, col1, col2 in system_pairs:
@@ -459,20 +477,20 @@ def compute_distance_pitch_statistics(sync_df: pd.DataFrame) -> Dict:
             if valid_mask.sum() > 0:
                 diff = sync_df.loc[valid_mask, col1] - sync_df.loc[valid_mask, col2]
                 pair_name = f"{sys1}-{sys2}"
-                stats['distance_differences'][pair_name] = {
-                    'count': len(diff),
-                    'mean': float(diff.mean()),
-                    'std': float(diff.std()),
-                    'rmse': float(np.sqrt((diff**2).mean())),
-                    'min': float(diff.min()),
-                    'max': float(diff.max())
+                stats["distance_differences"][pair_name] = {
+                    "count": len(diff),
+                    "mean": float(diff.mean()),
+                    "std": float(diff.std()),
+                    "rmse": float(np.sqrt((diff**2).mean())),
+                    "min": float(diff.min()),
+                    "max": float(diff.max())
                 }
     
     # Pitch differences
     pitch_pairs = [
-        ('FFT', 'Sonar', 'fft_pitch_deg', 'sonar_pitch_deg'),
-        ('FFT', 'DVL', 'fft_pitch_deg', 'nav_pitch_deg'),
-        ('Sonar', 'DVL', 'sonar_pitch_deg', 'nav_pitch_deg')
+        ("FFT", "Sonar", "fft_pitch_deg", "sonar_pitch_deg"),
+        ("FFT", "DVL", "fft_pitch_deg", "nav_pitch_deg"),
+        ("Sonar", "DVL", "sonar_pitch_deg", "nav_pitch_deg")
     ]
     
     for sys1, sys2, col1, col2 in pitch_pairs:
@@ -481,13 +499,13 @@ def compute_distance_pitch_statistics(sync_df: pd.DataFrame) -> Dict:
             if valid_mask.sum() > 0:
                 diff = sync_df.loc[valid_mask, col1] - sync_df.loc[valid_mask, col2]
                 pair_name = f"{sys1}-{sys2}"
-                stats['pitch_differences'][pair_name] = {
-                    'count': len(diff),
-                    'mean': float(diff.mean()),
-                    'std': float(diff.std()),
-                    'rmse': float(np.sqrt((diff**2).mean())),
-                    'min': float(diff.min()),
-                    'max': float(diff.max())
+                stats["pitch_differences"][pair_name] = {
+                    "count": len(diff),
+                    "mean": float(diff.mean()),
+                    "std": float(diff.std()),
+                    "rmse": float(np.sqrt((diff**2).mean())),
+                    "min": float(diff.min()),
+                    "max": float(diff.max())
                 }
     
     return stats
@@ -504,7 +522,7 @@ def print_distance_pitch_statistics(stats: Dict):
     
     # Distance measurements
     print("Distance Measurements:")
-    for system, data in stats['distance'].items():
+    for system, data in stats["distance"].items():
         print(f"  {system}:")
         print(f"    Mean: {data['mean']:.3f} m")
         print(f"    Std: {data['std']:.3f} m")
@@ -514,7 +532,7 @@ def print_distance_pitch_statistics(stats: Dict):
     
     # Pitch measurements
     print("\nPitch/Angle Measurements:")
-    for system, data in stats['pitch'].items():
+    for system, data in stats["pitch"].items():
         print(f"  {system}:")
         print(f"    Mean: {data['mean']:.1f}°")
         print(f"    Std: {data['std']:.1f}°")
@@ -526,14 +544,14 @@ def print_distance_pitch_statistics(stats: Dict):
     print("\n=== CROSS-SYSTEM COMPARISONS ===\n")
     
     print("Distance Differences:")
-    for pair, data in stats['distance_differences'].items():
+    for pair, data in stats["distance_differences"].items():
         print(f"  {pair}:")
         print(f"    Mean: {data['mean']:.3f} m")
         print(f"    Std: {data['std']:.3f} m")
         print(f"    RMSE: {data['rmse']:.3f} m")
     
     print("\nPitch/Angle Differences:")
-    for pair, data in stats['pitch_differences'].items():
+    for pair, data in stats["pitch_differences"].items():
         print(f"  {pair}:")
         print(f"    Mean: {data['mean']:.2f}°")
         print(f"    Std: {data['std']:.2f}°")
@@ -584,9 +602,9 @@ def apply_time_range_filter(df_sonar: pd.DataFrame, df_nav: pd.DataFrame, df_fft
         time_end_seconds = None
     
     # Filter sonar
-    if df_sonar is not None and not df_sonar.empty and 'timestamp' in df_sonar.columns:
+    if df_sonar is not None and not df_sonar.empty and "timestamp" in df_sonar.columns:
         original_len = len(df_sonar)
-        df_sonar_ts = pd.to_datetime(df_sonar['timestamp'], utc=True)
+        df_sonar_ts = pd.to_datetime(df_sonar["timestamp"], utc=True)
         
         if time_start_seconds is not None:
             # Relative time from first timestamp
@@ -607,9 +625,9 @@ def apply_time_range_filter(df_sonar: pd.DataFrame, df_nav: pd.DataFrame, df_fft
         print(f"  Sonar: {original_len} → {len(df_sonar)} records")
     
     # Filter DVL
-    if df_nav is not None and not df_nav.empty and 'timestamp' in df_nav.columns:
+    if df_nav is not None and not df_nav.empty and "timestamp" in df_nav.columns:
         original_len = len(df_nav)
-        df_nav_ts = pd.to_datetime(df_nav['timestamp'], utc=True)
+        df_nav_ts = pd.to_datetime(df_nav["timestamp"], utc=True)
         
         if time_start_seconds is not None:
             first_time = df_nav_ts.min()
@@ -629,9 +647,9 @@ def apply_time_range_filter(df_sonar: pd.DataFrame, df_nav: pd.DataFrame, df_fft
         print(f"  DVL: {original_len} → {len(df_nav)} records")
     
     # Filter FFT
-    if df_fft is not None and not df_fft.empty and 'timestamp' in df_fft.columns:
+    if df_fft is not None and not df_fft.empty and "timestamp" in df_fft.columns:
         original_len = len(df_fft)
-        df_fft_ts = pd.to_datetime(df_fft['timestamp'], utc=True)
+        df_fft_ts = pd.to_datetime(df_fft["timestamp"], utc=True)
         
         if time_start_seconds is not None:
             first_time = df_fft_ts.min()
@@ -662,7 +680,7 @@ def print_data_summaries(df_sonar: pd.DataFrame, df_nav: pd.DataFrame, df_fft: p
         "Sonar": summarize_sonar_results(df_sonar),
         "DVL": summarize_navigation_results(df_nav),
         "FFT": summarize_fft_results(df_fft),
-    }
+    };
     
     for label, stats in summaries.items():
         print(f"{label}:")
@@ -681,21 +699,21 @@ def print_sample_data(df_sonar: pd.DataFrame, df_nav: pd.DataFrame, df_fft: pd.D
     """Print sample data from all three systems."""
     if df_sonar is not None and not df_sonar.empty:
         print("Sonar Analysis Sample:")
-        display_cols = ['timestamp', 'distance_meters', 'angle_degrees', 'detection_success']
+        display_cols = ["timestamp", "distance_meters", "angle_degrees", "detection_success"]
         display_cols = [c for c in display_cols if c in df_sonar.columns]
         print(df_sonar[display_cols].head(5))
         print()
     
     if df_nav is not None and not df_nav.empty:
         print("DVL Navigation Sample:")
-        display_cols = ['timestamp', 'NetDistance', 'NetPitch']
+        display_cols = ["timestamp", "NetDistance", "NetPitch"]
         display_cols = [c for c in display_cols if c in df_nav.columns]
         print(df_nav[display_cols].head(5))
         print()
     
     if df_fft is not None and not df_fft.empty:
         print("FFT Data Sample:")
-        display_cols = ['timestamp', 'distance_m', 'pitch_deg']
+        display_cols = ["timestamp", "distance_m", "pitch_deg"]
         display_cols = [c for c in display_cols if c in df_fft.columns]
         print(df_fft[display_cols].head(5))
 
@@ -712,22 +730,22 @@ def ensure_xy_columns(sync_df: pd.DataFrame) -> pd.DataFrame:
         DataFrame with standardized XY column names
     """
     # Check if XY columns already exist (with _m suffix)
-    existing_xy = [c for c in sync_df.columns if ('_x_m' in c or '_y_m' in c or c.endswith('_x') or c.endswith('_y'))]
+    existing_xy = [c for c in sync_df.columns if ("_x_m" in c or "_y_m" in c or c.endswith("_x") or c.endswith("_y"))]
     
     if existing_xy:
         print(f"✓ XY coordinates already exist: {existing_xy}")
         
         # Rename _m suffix columns to match visualizer expectations
         rename_map = {}
-        if 'fft_x_m' in sync_df.columns:
-            rename_map['fft_x_m'] = 'fft_x'
-            rename_map['fft_y_m'] = 'fft_y'
-        if 'sonar_x_m' in sync_df.columns:
-            rename_map['sonar_x_m'] = 'sonar_x'
-            rename_map['sonar_y_m'] = 'sonar_y'
-        if 'nav_x_m' in sync_df.columns:
-            rename_map['nav_x_m'] = 'dvl_x'  # Note: nav → dvl
-            rename_map['nav_y_m'] = 'dvl_y'
+        if "fft_x_m" in sync_df.columns:
+            rename_map["fft_x_m"] = "fft_x"
+            rename_map["fft_y_m"] = "fft_y"
+        if "sonar_x_m" in sync_df.columns:
+            rename_map["sonar_x_m"] = "sonar_x"
+            rename_map["sonar_y_m"] = "sonar_y"
+        if "nav_x_m" in sync_df.columns:
+            rename_map["nav_x_m"] = "dvl_x"  # Note: nav → dvl
+            rename_map["nav_y_m"] = "dvl_y"
         
         if rename_map:
             sync_df = sync_df.rename(columns=rename_map)
@@ -737,23 +755,23 @@ def ensure_xy_columns(sync_df: pd.DataFrame) -> pd.DataFrame:
         print("⚠️  XY coordinates not found, computing...")
         
         # Compute XY for each system that has distance and pitch
-        if 'sonar_distance_m' in sync_df.columns and 'sonar_pitch_deg' in sync_df.columns:
+        if "sonar_distance_m" in sync_df.columns and "sonar_pitch_deg" in sync_df.columns:
             print("  Computing Sonar XY...")
-            sync_df['sonar_x'] = sync_df['sonar_distance_m'] * np.sin(np.radians(sync_df['sonar_pitch_deg']))
-            sync_df['sonar_y'] = sync_df['sonar_distance_m'] * np.cos(np.radians(sync_df['sonar_pitch_deg']))
+            sync_df["sonar_x"] = sync_df["sonar_distance_m"] * np.sin(np.radians(sync_df["sonar_pitch_deg"]))
+            sync_df["sonar_y"] = sync_df["sonar_distance_m"] * np.cos(np.radians(sync_df["sonar_pitch_deg"]))
         
-        if 'nav_distance_m' in sync_df.columns and 'nav_pitch_deg' in sync_df.columns:
+        if "nav_distance_m" in sync_df.columns and "nav_pitch_deg" in sync_df.columns:
             print("  Computing DVL XY...")
-            sync_df['dvl_x'] = sync_df['nav_distance_m'] * np.sin(np.radians(sync_df['nav_pitch_deg']))
-            sync_df['dvl_y'] = sync_df['nav_distance_m'] * np.cos(np.radians(sync_df['nav_pitch_deg']))
+            sync_df["dvl_x"] = sync_df["nav_distance_m"] * np.sin(np.radians(sync_df["nav_pitch_deg"]))
+            sync_df["dvl_y"] = sync_df["nav_distance_m"] * np.cos(np.radians(sync_df["nav_pitch_deg"]))
         
-        if 'fft_distance_m' in sync_df.columns and 'fft_pitch_deg' in sync_df.columns:
+        if "fft_distance_m" in sync_df.columns and "fft_pitch_deg" in sync_df.columns:
             print("  Computing FFT XY...")
-            sync_df['fft_x'] = sync_df['fft_distance_m'] * np.sin(np.radians(sync_df['fft_pitch_deg']))
-            sync_df['fft_y'] = sync_df['fft_distance_m'] * np.cos(np.radians(sync_df['fft_pitch_deg']))
+            sync_df["fft_x"] = sync_df["fft_distance_m"] * np.sin(np.radians(sync_df["fft_pitch_deg"]))
+            sync_df["fft_y"] = sync_df["fft_distance_m"] * np.cos(np.radians(sync_df["fft_pitch_deg"]))
         
         # Report what was computed
-        xy_cols = [c for c in sync_df.columns if c.endswith('_x') or c.endswith('_y')]
+        xy_cols = [c for c in sync_df.columns if c.endswith("_x") or c.endswith("_y")]
         print(f"  ✓ Computed XY columns: {xy_cols}")
     
     return sync_df
@@ -792,17 +810,17 @@ def generate_and_save_xy_plots(sync_df: pd.DataFrame, visualizer, target_bag: st
         Dictionary with success status for each plot type
     """
     results = {
-        'xy_trajectory': False,
-        'x_comparison': False,
-        'y_comparison': False
+        "xy_trajectory": False,
+        "x_comparison": False,
+        "y_comparison": False
     }
     
     print("=== DISPLAYING XY POSITION PLOTS ===\n")
     
     # Check which XY columns are available
-    has_sonar_xy = 'sonar_x' in sync_df.columns and 'sonar_y' in sync_df.columns
-    has_dvl_xy = 'dvl_x' in sync_df.columns and 'dvl_y' in sync_df.columns
-    has_fft_xy = 'fft_x' in sync_df.columns and 'fft_y' in sync_df.columns
+    has_sonar_xy = "sonar_x" in sync_df.columns and "sonar_y" in sync_df.columns
+    has_dvl_xy = "dvl_x" in sync_df.columns and "dvl_y" in sync_df.columns
+    has_fft_xy = "fft_x" in sync_df.columns and "fft_y" in sync_df.columns
     
     available_xy_systems = []
     if has_sonar_xy:
@@ -837,7 +855,7 @@ def generate_and_save_xy_plots(sync_df: pd.DataFrame, visualizer, target_bag: st
             save_path = plots_dir / f"{target_bag}_xy_trajectories_3d.html"
             fig_xy.write_html(str(save_path))
             print(f"✓ Saved: {save_path.name}\n")
-            results['xy_trajectory'] = True
+            results["xy_trajectory"] = True
         else:
             print("✗ Could not generate XY trajectory plot\n")
             
@@ -852,7 +870,7 @@ def generate_and_save_xy_plots(sync_df: pd.DataFrame, visualizer, target_bag: st
         try:
             # X position comparison (perpendicular distance to net)
             print("\n--- Perpendicular Distance to Net Over Time ---")
-            fig_x = visualizer.plot_xy_component_comparison(sync_df, component='x')
+            fig_x = visualizer.plot_xy_component_comparison(sync_df, component="x")
             if fig_x is not None:
                 try:
                     from IPython.display import display
@@ -862,11 +880,11 @@ def generate_and_save_xy_plots(sync_df: pd.DataFrame, visualizer, target_bag: st
                 save_path = plots_dir / f"{target_bag}_x_position_comparison.html"
                 fig_x.write_html(str(save_path))
                 print(f"✓ X position comparison saved: {save_path.name}\n")
-                results['x_comparison'] = True
+                results["x_comparison"] = True
             
             # Y position comparison (lateral position along net)
             print("--- Lateral Position Along Net Over Time ---")
-            fig_y = visualizer.plot_xy_component_comparison(sync_df, component='y')
+            fig_y = visualizer.plot_xy_component_comparison(sync_df, component="y")
             if fig_y is not None:
                 try:
                     from IPython.display import display
@@ -876,7 +894,7 @@ def generate_and_save_xy_plots(sync_df: pd.DataFrame, visualizer, target_bag: st
                 save_path = plots_dir / f"{target_bag}_y_position_comparison.html"
                 fig_y.write_html(str(save_path))
                 print(f"✓ Y position comparison saved: {save_path.name}\n")
-                results['y_comparison'] = True
+                results["y_comparison"] = True
             
         except Exception as e:
             print(f"✗ Error generating component plots: {e}")
@@ -939,29 +957,29 @@ def apply_smoothing_to_all_systems(df_sonar: pd.DataFrame, df_nav: pd.DataFrame,
     print(f"  Higher α = less smoothing (e.g., 0.9 = light smoothing)\n")
     
     # Sonar columns to smooth
-    sonar_cols = ['distance_meters', 'angle_degrees']
+    sonar_cols = ["distance_meters", "angle_degrees"]
     if df_sonar is not None and not df_sonar.empty:
-        before_dist = df_sonar['distance_meters'].mean() if 'distance_meters' in df_sonar.columns else None
+        before_dist = df_sonar["distance_meters"].mean() if "distance_meters" in df_sonar.columns else None
         df_sonar = apply_exponential_smoothing(df_sonar, sonar_cols, alpha)
-        after_dist = df_sonar['distance_meters'].mean() if 'distance_meters' in df_sonar.columns else None
+        after_dist = df_sonar["distance_meters"].mean() if "distance_meters" in df_sonar.columns else None
         if before_dist and after_dist:
             print(f"  Sonar distance: {before_dist:.3f} → {after_dist:.3f} m (mean)")
     
     # DVL/Navigation columns to smooth
-    nav_cols = ['NetDistance', 'NetPitch']
+    nav_cols = ["NetDistance", "NetPitch"]
     if df_nav is not None and not df_nav.empty:
-        before_dist = df_nav['NetDistance'].mean() if 'NetDistance' in df_nav.columns else None
+        before_dist = df_nav["NetDistance"].mean() if "NetDistance" in df_nav.columns else None
         df_nav = apply_exponential_smoothing(df_nav, nav_cols, alpha)
-        after_dist = df_nav['NetDistance'].mean() if 'NetDistance' in df_nav.columns else None
+        after_dist = df_nav["NetDistance"].mean() if "NetDistance" in df_nav.columns else None
         if before_dist and after_dist:
             print(f"  DVL distance: {before_dist:.3f} → {after_dist:.3f} m (mean)")
     
     # FFT columns to smooth
-    fft_cols = ['distance_m', 'pitch_deg']
+    fft_cols = ["distance_m", "pitch_deg"]
     if df_fft is not None and not df_fft.empty:
-        before_dist = df_fft['distance_m'].mean() if 'distance_m' in df_fft.columns else None
+        before_dist = df_fft["distance_m"].mean() if "distance_m" in df_fft.columns else None
         df_fft = apply_exponential_smoothing(df_fft, fft_cols, alpha)
-        after_dist = df_fft['distance_m'].mean() if 'distance_m' in df_fft.columns else None
+        after_dist = df_fft["distance_m"].mean() if "distance_m" in df_fft.columns else None
         if before_dist and after_dist:
             print(f"  FFT distance: {before_dist:.3f} → {after_dist:.3f} m (mean)")
     
@@ -982,9 +1000,9 @@ def compute_temporal_stability_metrics(sync_df: pd.DataFrame) -> Dict:
     metrics = {}
     
     systems = {
-        'FFT': ('fft_distance_m', 'fft_pitch_deg'),
-        'Sonar': ('sonar_distance_m', 'sonar_pitch_deg'),
-        'DVL': ('nav_distance_m', 'nav_pitch_deg')
+        "FFT": ("fft_distance_m", "fft_pitch_deg"),
+        "Sonar": ("sonar_distance_m", "sonar_pitch_deg"),
+        "DVL": ("nav_distance_m", "nav_pitch_deg")
     }
     
     for system, (dist_col, pitch_col) in systems.items():
@@ -996,12 +1014,12 @@ def compute_temporal_stability_metrics(sync_df: pd.DataFrame) -> Dict:
             # Temporal stability = inverse of standard deviation of changes
             # Lower change variance = more stable
             metrics[system] = {
-                'distance_change_std': float(dist_diff.std()),
-                'distance_change_mean_abs': float(dist_diff.abs().mean()),
-                'pitch_change_std': float(pitch_diff.std()),
-                'pitch_change_mean_abs': float(pitch_diff.abs().mean()),
-                'distance_smoothness': float(1.0 / (dist_diff.std() + 1e-6)),  # Inverse of variance
-                'pitch_smoothness': float(1.0 / (pitch_diff.std() + 1e-6))
+                "distance_change_std": float(dist_diff.std()),
+                "distance_change_mean_abs": float(dist_diff.abs().mean()),
+                "pitch_change_std": float(pitch_diff.std()),
+                "pitch_change_mean_abs": float(pitch_diff.abs().mean()),
+                "distance_smoothness": float(1.0 / (dist_diff.std() + 1e-6)),  # Inverse of variance
+                "pitch_smoothness": float(1.0 / (pitch_diff.std() + 1e-6))
             }
     
     return metrics
@@ -1018,9 +1036,9 @@ def compute_inter_system_agreement(sync_df: pd.DataFrame) -> Dict:
     agreement = {}
     
     pairs = [
-        ('FFT', 'Sonar', 'fft_distance_m', 'sonar_distance_m', 'fft_pitch_deg', 'sonar_pitch_deg'),
-        ('FFT', 'DVL', 'fft_distance_m', 'nav_distance_m', 'fft_pitch_deg', 'nav_pitch_deg'),
-        ('Sonar', 'DVL', 'sonar_distance_m', 'nav_distance_m', 'sonar_pitch_deg', 'nav_pitch_deg')
+        ("FFT", "Sonar", "fft_distance_m", "sonar_distance_m", "fft_pitch_deg", "sonar_pitch_deg"),
+        ("FFT", "DVL", "fft_distance_m", "nav_distance_m", "fft_pitch_deg", "nav_pitch_deg"),
+        ("Sonar", "DVL", "sonar_distance_m", "nav_distance_m", "sonar_pitch_deg", "nav_pitch_deg")
     ]
     
     for sys1, sys2, d1, d2, p1, p2 in pairs:
@@ -1033,9 +1051,9 @@ def compute_inter_system_agreement(sync_df: pd.DataFrame) -> Dict:
                 corr = valid[d1].corr(valid[d2])
                 mae = (valid[d1] - valid[d2]).abs().mean()
                 agreement[pair_name] = {
-                    'distance_correlation': float(corr),
-                    'distance_mae': float(mae),
-                    'distance_agreement_score': float(corr * (1.0 / (mae + 0.1)))  # Combined metric
+                    "distance_correlation": float(corr),
+                    "distance_mae": float(mae),
+                    "distance_agreement_score": float(corr * (1.0 / (mae + 0.1)))  # Combined metric
                 }
         
         # Pitch agreement
@@ -1047,9 +1065,9 @@ def compute_inter_system_agreement(sync_df: pd.DataFrame) -> Dict:
                 if pair_name not in agreement:
                     agreement[pair_name] = {}
                 agreement[pair_name].update({
-                    'pitch_correlation': float(corr),
-                    'pitch_mae_deg': float(mae),
-                    'pitch_agreement_score': float(corr * (1.0 / (mae + 1.0)))
+                    "pitch_correlation": float(corr),
+                    "pitch_mae_deg": float(mae),
+                    "pitch_agreement_score": float(corr * (1.0 / (mae + 1.0)))
                 })
     
     return agreement
@@ -1071,29 +1089,29 @@ def create_statistics_visualizations(sync_df: pd.DataFrame, target_bag: str) -> 
     # 1. Distribution plots (histograms + box plots)
     fig_dist = make_subplots(
         rows=2, cols=2,
-        subplot_titles=('Distance Distributions', 'Distance Box Plots',
-                       'Pitch Distributions', 'Pitch Box Plots'),
-        specs=[[{'secondary_y': False}, {'secondary_y': False}],
-               [{'secondary_y': False}, {'secondary_y': False}]]
+        subplot_titles=("Distance Distributions", "Distance Box Plots",
+                       "Pitch Distributions", "Pitch Box Plots"),
+        specs=[[{"secondary_y": False}, {"secondary_y": False}],
+               [{"secondary_y": False}, {"secondary_y": False}]]
     )
     
     systems = [
-        ('FFT', 'fft_distance_m', 'fft_pitch_deg', 'red'),
-        ('Sonar', 'sonar_distance_m', 'sonar_pitch_deg', 'blue'),
-        ('DVL', 'nav_distance_m', 'nav_pitch_deg', 'green')
+        ("FFT", "fft_distance_m", "fft_pitch_deg", "red"),
+        ("Sonar", "sonar_distance_m", "sonar_pitch_deg", "blue"),
+        ("DVL", "nav_distance_m", "nav_pitch_deg", "green")
     ]
     
     for name, dist_col, pitch_col, color in systems:
         if dist_col in sync_df.columns:
             # Distance histogram
             fig_dist.add_trace(
-                go.Histogram(x=sync_df[dist_col].dropna(), name=f'{name}',
+                go.Histogram(x=sync_df[dist_col].dropna(), name=f"{name}",
                            marker_color=color, opacity=0.6, nbinsx=30),
                 row=1, col=1
             )
             # Distance box plot
             fig_dist.add_trace(
-                go.Box(y=sync_df[dist_col].dropna(), name=f'{name}',
+                go.Box(y=sync_df[dist_col].dropna(), name=f"{name}",
                       marker_color=color),
                 row=1, col=2
             )
@@ -1101,14 +1119,14 @@ def create_statistics_visualizations(sync_df: pd.DataFrame, target_bag: str) -> 
         if pitch_col in sync_df.columns:
             # Pitch histogram
             fig_dist.add_trace(
-                go.Histogram(x=sync_df[pitch_col].dropna(), name=f'{name}',
+                go.Histogram(x=sync_df[pitch_col].dropna(), name=f"{name}",
                            marker_color=color, opacity=0.6, nbinsx=30,
                            showlegend=False),
                 row=2, col=1
             )
             # Pitch box plot
             fig_dist.add_trace(
-                go.Box(y=sync_df[pitch_col].dropna(), name=f'{name}',
+                go.Box(y=sync_df[pitch_col].dropna(), name=f"{name}",
                       marker_color=color, showlegend=False),
                 row=2, col=2
             )
@@ -1118,7 +1136,7 @@ def create_statistics_visualizations(sync_df: pd.DataFrame, target_bag: str) -> 
     fig_dist.update_xaxes(title_text="Pitch (°)", row=2, col=1)
     fig_dist.update_xaxes(title_text="Pitch (°)", row=2, col=2)
     fig_dist.update_layout(height=800, title_text=f"Measurement Distributions: {target_bag}")
-    figs['distributions'] = fig_dist
+    figs["distributions"] = fig_dist
     
     # 2. Temporal stability plot (rate of change)
     fig_stability = go.Figure()
@@ -1127,8 +1145,8 @@ def create_statistics_visualizations(sync_df: pd.DataFrame, target_bag: str) -> 
         if dist_col in sync_df.columns:
             dist_changes = sync_df[dist_col].diff().abs()
             fig_stability.add_trace(
-                go.Scatter(x=sync_df['sync_timestamp'], y=dist_changes,
-                          mode='lines', name=f'{name} Distance Change',
+                go.Scatter(x=sync_df["sync_timestamp"], y=dist_changes,
+                          mode="lines", name=f"{name} Distance Change",
                           line=dict(color=color, width=1))
             )
     
@@ -1138,18 +1156,18 @@ def create_statistics_visualizations(sync_df: pd.DataFrame, target_bag: str) -> 
         yaxis_title="Absolute Distance Change (m/sample)",
         height=500
     )
-    figs['stability'] = fig_stability
+    figs["stability"] = fig_stability
     
     # 3. Scatter plots for inter-system comparison
     fig_scatter = make_subplots(
         rows=1, cols=3,
-        subplot_titles=('FFT vs Sonar', 'FFT vs DVL', 'Sonar vs DVL')
+        subplot_titles=("FFT vs Sonar", "FFT vs DVL", "Sonar vs DVL")
     )
     
     scatter_pairs = [
-        ('fft_distance_m', 'sonar_distance_m', 'red', 1, 1),
-        ('fft_distance_m', 'nav_distance_m', 'green', 1, 2),
-        ('sonar_distance_m', 'nav_distance_m', 'blue', 1, 3)
+        ("fft_distance_m", "sonar_distance_m", "red", 1, 1),
+        ("fft_distance_m", "nav_distance_m", "green", 1, 2),
+        ("sonar_distance_m", "nav_distance_m", "blue", 1, 3)
     ]
     
     for col1, col2, color, row, col in scatter_pairs:
@@ -1158,7 +1176,7 @@ def create_statistics_visualizations(sync_df: pd.DataFrame, target_bag: str) -> 
             if len(valid) > 0:
                 fig_scatter.add_trace(
                     go.Scatter(x=valid[col1], y=valid[col2],
-                              mode='markers', marker=dict(color=color, size=3),
+                              mode="markers", marker=dict(color=color, size=3),
                               showlegend=False),
                     row=row, col=col
                 )
@@ -1167,7 +1185,7 @@ def create_statistics_visualizations(sync_df: pd.DataFrame, target_bag: str) -> 
                 max_val = max(valid[col1].max(), valid[col2].max())
                 fig_scatter.add_trace(
                     go.Scatter(x=[min_val, max_val], y=[min_val, max_val],
-                              mode='lines', line=dict(color='black', dash='dash'),
+                              mode="lines", line=dict(color="black", dash="dash"),
                               showlegend=False),
                     row=row, col=col
                 )
@@ -1175,7 +1193,7 @@ def create_statistics_visualizations(sync_df: pd.DataFrame, target_bag: str) -> 
     fig_scatter.update_xaxes(title_text="Distance (m)")
     fig_scatter.update_yaxes(title_text="Distance (m)")
     fig_scatter.update_layout(height=400, title_text=f"Inter-System Agreement: {target_bag}")
-    figs['scatter'] = fig_scatter
+    figs["scatter"] = fig_scatter
     
     return figs
 
@@ -1206,11 +1224,11 @@ def print_quality_metrics(sync_df: pd.DataFrame):
     agreement = compute_inter_system_agreement(sync_df)
     for pair, metrics in agreement.items():
         print(f"  {pair}:")
-        if 'distance_correlation' in metrics:
+        if "distance_correlation" in metrics:
             print(f"    Distance correlation: {metrics['distance_correlation']:.3f} (1.0 = perfect)")
             print(f"    Distance MAE:         {metrics['distance_mae']:.3f} m")
             print(f"    Distance agreement:   {metrics['distance_agreement_score']:.3f} (higher = better)")
-        if 'pitch_correlation' in metrics:
+        if "pitch_correlation" in metrics:
             print(f"    Pitch correlation:    {metrics['pitch_correlation']:.3f} (1.0 = perfect)")
             print(f"    Pitch MAE:            {metrics['pitch_mae_deg']:.2f}°")
             print(f"    Pitch agreement:      {metrics['pitch_agreement_score']:.3f} (higher = better)")
@@ -1219,9 +1237,9 @@ def print_quality_metrics(sync_df: pd.DataFrame):
     print("\n3. DATA COMPLETENESS")
     print("   Percentage of valid (non-NaN) measurements\n")
     systems = [
-        ('FFT', 'fft_distance_m', 'fft_pitch_deg'),
-        ('Sonar', 'sonar_distance_m', 'sonar_pitch_deg'),
-        ('DVL', 'nav_distance_m', 'nav_pitch_deg')
+        ("FFT", "fft_distance_m", "fft_pitch_deg"),
+        ("Sonar", "sonar_distance_m", "sonar_pitch_deg"),
+        ("DVL", "nav_distance_m", "nav_pitch_deg")
     ]
     
     for name, dist_col, pitch_col in systems:
@@ -1246,8 +1264,8 @@ def print_timeseries_analysis(sync_df: pd.DataFrame):
     print("4. MEASUREMENT FREQUENCY")
     print("   Average time between measurements\n")
     
-    if 'sync_timestamp' in sync_df.columns:
-        time_diffs = sync_df['sync_timestamp'].diff().dt.total_seconds().dropna()
+    if "sync_timestamp" in sync_df.columns:
+        time_diffs = sync_df["sync_timestamp"].diff().dt.total_seconds().dropna()
         if len(time_diffs) > 0:
             print(f"  Mean interval: {time_diffs.mean():.3f} seconds")
             print(f"  Std interval:  {time_diffs.std():.3f} seconds")
@@ -1258,9 +1276,9 @@ def print_timeseries_analysis(sync_df: pd.DataFrame):
     print("   Coefficient of variation (CV = std/mean)\n")
     
     systems = [
-        ('FFT', 'fft_distance_m'),
-        ('Sonar', 'sonar_distance_m'),
-        ('DVL', 'nav_distance_m')
+        ("FFT", "fft_distance_m"),
+        ("Sonar", "sonar_distance_m"),
+        ("DVL", "nav_distance_m")
     ]
     
     for name, col in systems:
@@ -1287,34 +1305,34 @@ def create_timeseries_visualizations(sync_df: pd.DataFrame, target_bag: str) -> 
     # 1. Autocorrelation plots
     fig_acf = make_subplots(
         rows=2, cols=2,
-        subplot_titles=('Distance ACF (Full)', 'Pitch ACF (Full)',
-                       'Distance ACF (Zoomed)', 'Pitch ACF (Zoomed)'),
+        subplot_titles=("Distance ACF (Full)", "Pitch ACF (Full)",
+                       "Distance ACF (Zoomed)", "Pitch ACF (Zoomed)"),
         vertical_spacing=0.2,
         horizontal_spacing=0.1
     )
     
     systems = [
-        ('FFT', 'fft_distance_m', 'fft_pitch_deg', 'red'),
-        ('Sonar', 'sonar_distance_m', 'sonar_pitch_deg', 'blue'),
-        ('DVL', 'nav_distance_m', 'nav_pitch_deg', 'green')
+        ("FFT", "fft_distance_m", "fft_pitch_deg", "red"),
+        ("Sonar", "sonar_distance_m", "sonar_pitch_deg", "blue"),
+        ("DVL", "nav_distance_m", "nav_pitch_deg", "green")
     ]
     
     for name, dist_col, pitch_col, color in systems:
         if dist_col in sync_df.columns:
             valid_data = sync_df[dist_col].dropna()
             if len(valid_data) > 1:
-                acf_dist = signal.correlate(valid_data, valid_data, mode='full')
+                acf_dist = signal.correlate(valid_data, valid_data, mode="full")
                 acf_dist = acf_dist[acf_dist.size // 2:] / acf_dist.max()
                 lags_dist = np.arange(len(acf_dist))
                 
                 fig_acf.add_trace(
-                    go.Scatter(x=lags_dist, y=acf_dist, mode='lines', name=f'{name} Dist',
+                    go.Scatter(x=lags_dist, y=acf_dist, mode="lines", name=f"{name} Dist",
                               line=dict(color=color, width=2)),
                     row=1, col=1
                 )
                 
                 fig_acf.add_trace(
-                    go.Scatter(x=lags_dist, y=acf_dist, mode='lines', name=f'{name} Dist (Zoom)',
+                    go.Scatter(x=lags_dist, y=acf_dist, mode="lines", name=f"{name} Dist (Zoom)",
                               line=dict(color=color, width=2), showlegend=False),
                     row=2, col=1
                 )
@@ -1322,18 +1340,18 @@ def create_timeseries_visualizations(sync_df: pd.DataFrame, target_bag: str) -> 
         if pitch_col in sync_df.columns:
             valid_data = sync_df[pitch_col].dropna()
             if len(valid_data) > 1:
-                acf_pitch = signal.correlate(valid_data, valid_data, mode='full')
+                acf_pitch = signal.correlate(valid_data, valid_data, mode="full")
                 acf_pitch = acf_pitch[acf_pitch.size // 2:] / acf_pitch.max()
                 lags_pitch = np.arange(len(acf_pitch))
                 
                 fig_acf.add_trace(
-                    go.Scatter(x=lags_pitch, y=acf_pitch, mode='lines', name=f'{name} Pitch',
+                    go.Scatter(x=lags_pitch, y=acf_pitch, mode="lines", name=f"{name} Pitch",
                               line=dict(color=color, width=2), showlegend=False),
                     row=1, col=2
                 )
                 
                 fig_acf.add_trace(
-                    go.Scatter(x=lags_pitch, y=acf_pitch, mode='lines', name=f'{name} Pitch (Zoom)',
+                    go.Scatter(x=lags_pitch, y=acf_pitch, mode="lines", name=f"{name} Pitch (Zoom)",
                               line=dict(color=color, width=2), showlegend=False),
                     row=2, col=2
                 )
@@ -1344,12 +1362,12 @@ def create_timeseries_visualizations(sync_df: pd.DataFrame, target_bag: str) -> 
     fig_acf.update_xaxes(title_text="Lag", range=[0, 50], row=2, col=2)
     fig_acf.update_yaxes(title_text="Autocorrelation")
     fig_acf.update_layout(height=700, title_text=f"Autocorrelation Analysis: {target_bag}")
-    figs['autocorrelation'] = fig_acf
+    figs["autocorrelation"] = fig_acf
     
     # 2. Rolling statistics (with uncertainty bands)
     fig_rolling = make_subplots(
         rows=2, cols=1,
-        subplot_titles=('Distance Rolling Mean ± Std', 'Pitch Rolling Mean ± Std'),
+        subplot_titles=("Distance Rolling Mean ± Std", "Pitch Rolling Mean ± Std"),
         vertical_spacing=0.15
     )
     
@@ -1362,25 +1380,25 @@ def create_timeseries_visualizations(sync_df: pd.DataFrame, target_bag: str) -> 
             rolling_std = sync_df[dist_col].rolling(window=window, center=True).std()
             
             rgb_tuple = to_rgb(color)
-            rgba_fill = f'rgba({int(rgb_tuple[0]*255)}, {int(rgb_tuple[1]*255)}, {int(rgb_tuple[2]*255)}, 0.2)'
+            rgba_fill = f"rgba({int(rgb_tuple[0]*255)}, {int(rgb_tuple[1]*255)}, {int(rgb_tuple[2]*255)}, 0.2)"
             
             fig_rolling.add_trace(
-                go.Scatter(x=sync_df['sync_timestamp'], y=rolling_mean,
-                          mode='lines', name=f'{name}',
+                go.Scatter(x=sync_df["sync_timestamp"], y=rolling_mean,
+                          mode="lines", name=f"{name}",
                           line=dict(color=color, width=2)),
                 row=1, col=1
             )
             fig_rolling.add_trace(
-                go.Scatter(x=sync_df['sync_timestamp'], y=rolling_mean + rolling_std,
-                          mode='lines', line=dict(color=color, width=0.5, dash='dash'),
-                          showlegend=False, hoverinfo='skip'),
+                go.Scatter(x=sync_df["sync_timestamp"], y=rolling_mean + rolling_std,
+                          mode="lines", line=dict(color=color, width=0.5, dash="dash"),
+                          showlegend=False, hoverinfo="skip"),
                 row=1, col=1
             )
             fig_rolling.add_trace(
-                go.Scatter(x=sync_df['sync_timestamp'], y=rolling_mean - rolling_std,
-                          mode='lines', line=dict(color=color, width=0.5, dash='dash'),
-                          fill='tonexty', fillcolor=rgba_fill,
-                          showlegend=False, hoverinfo='skip'),
+                go.Scatter(x=sync_df["sync_timestamp"], y=rolling_mean - rolling_std,
+                          mode="lines", line=dict(color=color, width=0.5, dash="dash"),
+                          fill="tonexty", fillcolor=rgba_fill,
+                          showlegend=False, hoverinfo="skip"),
                 row=1, col=1
             )
         
@@ -1390,25 +1408,25 @@ def create_timeseries_visualizations(sync_df: pd.DataFrame, target_bag: str) -> 
             rolling_std = sync_df[pitch_col].rolling(window=window, center=True).std()
             
             rgb_tuple = to_rgb(color)
-            rgba_fill = f'rgba({int(rgb_tuple[0]*255)}, {int(rgb_tuple[1]*255)}, {int(rgb_tuple[2]*255)}, 0.2)'
+            rgba_fill = f"rgba({int(rgb_tuple[0]*255)}, {int(rgb_tuple[1]*255)}, {int(rgb_tuple[2]*255)}, 0.2)"
             
             fig_rolling.add_trace(
-                go.Scatter(x=sync_df['sync_timestamp'], y=rolling_mean,
-                          mode='lines', name=f'{name}',
+                go.Scatter(x=sync_df["sync_timestamp"], y=rolling_mean,
+                          mode="lines", name=f"{name}",
                           line=dict(color=color, width=2), showlegend=False),
                 row=2, col=1
             )
             fig_rolling.add_trace(
-                go.Scatter(x=sync_df['sync_timestamp'], y=rolling_mean + rolling_std,
-                          mode='lines', line=dict(color=color, width=0.5, dash='dash'),
-                          showlegend=False, hoverinfo='skip'),
+                go.Scatter(x=sync_df["sync_timestamp"], y=rolling_mean + rolling_std,
+                          mode="lines", line=dict(color=color, width=0.5, dash="dash"),
+                          showlegend=False, hoverinfo="skip"),
                 row=2, col=1
             )
             fig_rolling.add_trace(
-                go.Scatter(x=sync_df['sync_timestamp'], y=rolling_mean - rolling_std,
-                          mode='lines', line=dict(color=color, width=0.5, dash='dash'),
-                          fill='tonexty', fillcolor=rgba_fill,
-                          showlegend=False, hoverinfo='skip'),
+                go.Scatter(x=sync_df["sync_timestamp"], y=rolling_mean - rolling_std,
+                          mode="lines", line=dict(color=color, width=0.5, dash="dash"),
+                          fill="tonexty", fillcolor=rgba_fill,
+                          showlegend=False, hoverinfo="skip"),
                 row=2, col=1
             )
     
@@ -1416,7 +1434,7 @@ def create_timeseries_visualizations(sync_df: pd.DataFrame, target_bag: str) -> 
     fig_rolling.update_yaxes(title_text="Distance (m)", row=1, col=1)
     fig_rolling.update_yaxes(title_text="Pitch (°)", row=2, col=1)
     fig_rolling.update_layout(height=700, title_text=f"Rolling Statistics (window={window}): {target_bag}")
-    figs['rolling_stats'] = fig_rolling
+    figs["rolling_stats"] = fig_rolling
     
     return figs
 
@@ -1458,13 +1476,13 @@ def export_raw_comparison_data(df_sonar_raw: pd.DataFrame, df_nav_raw: pd.DataFr
     
     # Select columns for export
     export_cols = [
-        'sync_timestamp',
+        "sync_timestamp",
         # FFT data
-        'fft_distance_m', 'fft_pitch_deg', 'fft_x', 'fft_y',
+        "fft_distance_m", "fft_pitch_deg", "fft_x", "fft_y",
         # Sonar data
-        'sonar_distance_m', 'sonar_pitch_deg', 'sonar_x', 'sonar_y',
+        "sonar_distance_m", "sonar_pitch_deg", "sonar_x", "sonar_y",
         # DVL data
-        'nav_distance_m', 'nav_pitch_deg', 'dvl_x', 'dvl_y'
+        "nav_distance_m", "nav_pitch_deg", "dvl_x", "dvl_y"
     ]
     
     # Filter to only existing columns
@@ -1479,12 +1497,12 @@ def export_raw_comparison_data(df_sonar_raw: pd.DataFrame, df_nav_raw: pd.DataFr
     
     # Report what was saved
     available_systems = []
-    if any('fft' in c for c in export_cols):
-        available_systems.append('FFT')
-    if any('sonar' in c for c in export_cols):
-        available_systems.append('Sonar')
-    if any('nav' in c or 'dvl' in c for c in export_cols):
-        available_systems.append('DVL')
+    if any("fft" in c for c in export_cols):
+        available_systems.append("FFT")
+    if any("sonar" in c for c in export_cols):
+        available_systems.append("Sonar")
+    if any("nav" in c or "dvl" in c for c in export_cols):
+        available_systems.append("DVL")
     
     print(f"✓ Saved raw comparison data: {output_path.name}")
     print(f"  Records: {len(three_sync_df_raw)}")
