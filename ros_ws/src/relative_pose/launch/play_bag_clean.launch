@@ -1,0 +1,12 @@
+<launch>
+  <!-- Play a rosbag from a configurable path (useful for external drives) -->
+  <arg name="bag_path" default="/data/raw_data/2024-08-20_13-39-34_data.bag" />
+
+  <!-- rosbag play node: clock is passed to simulate ROS time -->
+  <node pkg="rosbag" type="play" name="bag_play" args="$(arg bag_path) -&#45;clock" output="screen" />
+
+  <!-- Optional: start other nodes/launches here, e.g. fft node or relative_pose launch -->
+  <!-- Example: run fft node launch if you have one
+  <include file="$(find fft)/launch/fft.launch" />
+  -->
+</launch>

@@ -1,0 +1,6 @@
+# RelativePose message definition
+Header header
+
+float32 relative_net_distance
+float32 relative_net_pitch
+float32 relative_net_heading

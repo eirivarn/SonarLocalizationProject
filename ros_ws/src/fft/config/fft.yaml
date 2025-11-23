@@ -1,0 +1,52 @@
+fft:
+  rows_of_ROIs: 6          # 20 initially
+  cols_of_ROIs: 5         # 15 initially
+  border_buffer: 5
+  size_of_ROI: 512        # 300 for 2023, 512 for 2024
+  mesh_grid_size: 2.75   # 2.0 for 2023, 2.75 for 2024
+
+camera:
+  # Original data
+  # frame: "camera_frame"
+  
+  # width: 1280
+  # height: 720
+
+  image_topic: "/image/compressed_image/data"
+
+  fx: 882
+  fy: 821
+  cx: 680
+  cy: 360
+
+  k1: 0.203700
+  k2: 0.857360
+  p1: 0.013247
+  p2: -0.004259
+  k3: -0.940367
+
+  # Blender data
+  # fx: 853
+  # fy: 667
+  # cx: 640
+  # cy: 480
+
+  # k1: 0.0
+  # k2: 0.0
+  # k3: 0.0
+  # p1: 0.0
+  # p2: 0.0
+
+  # Alphasense data
+  # image_topic: "/alphasense_driver_ros/cam0"
+
+  # fx: 466.058
+  # fy: 466.116
+  # cx: 361.688
+  # cy: 269.634
+
+  # k1: -0.273
+  # k2: 0.176
+  # p1: -0.051
+  # p2: 0.0
+  # k3: 0.0

@@ -1,0 +1,8 @@
+<launch>
+    <arg name="use_local_config" default="true" />
+    <group if="$(arg use_local_config)">
+        <rosparam file="$(find fft)/config/fft.yaml" command="load"/>
+    </group>
+
+    <node pkg="fft" name="fft_node" type="fft_node" respawn="false" output="screen"/>
+</launch>
