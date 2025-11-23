@@ -20,6 +20,8 @@ This document provides a deep technical explanation of the SOLAQUA sonar process
 8. [Video Generation](#8-synchronized-video-generation)
 9. [Configuration Parameters](#9-configuration-parameters)
 10. [Code Reference Map](#10-code-reference-map)
+11. [End-to-End Data Flow (Bag → Distance Series)](#11-end-to-end-data-flow-bag--distance-series)
+12. [Proposed Single-Call Pipeline](#12-proposed-single-call-pipeline)
 
 ---
 
@@ -734,6 +736,78 @@ This section provides a high-level map of the SOLAQUA codebase, linking the docu
 | Distance Measurement              | Converts pixel measurements to meters            | `utils/distance_measurement.py`                    |
 | DVL Data Integration              | Integrates DVL data with sonar measurements     | `utils/dvl_integration.py`                         |
 | Video Generation                  | Generates annotated video outputs                | `utils/video_generation.py`                        |
+
+---
+
+## 11. End-to-End Data Flow (Bag → Distance Series)
+
+1. **Acquisition & Export (`scripts/solaqua_export.py`)**
+   - `SOLAQUACompleteExporter.export_csv_data()` reads `*_data.bag` and `*_video.bag` files, flattening ROS topics into `exports/by_bag/*.csv` (telemetry, sonar, nav, DVL).  
+   - `export_all_video_bags_to_mp4/png` (invoked via `export_videos` / `export_frames`) produces camera references.  
+   - `create_cone_npz()` wraps `utils.sonar_utils.save_cone_run_npz()` to rasterize SonoptixECHO frames into `exports/outputs/{bag}_cones.npz`, embedding `extent` metadata needed later.
+
+2. **Sonar Processing (`utils/sonar_analysis.py`)**
+   - `analyze_npz_sequence()` consumes the NPZ cones plus `IMAGE_PROCESSING_CONFIG` / `TRACKING_CONFIG`, runs the tracker pipeline described in §§3–5, and emits a per-frame DataFrame with `distance_pixels`, `distance_meters`, and `angle_degrees`.  
+   - Optional CSV export (`save_outputs=True`) writes `{bag}_analysis.csv` into the batch folder (e.g., `basic_full_batch/`).
+
+3. **Fusion & Comparison (`utils/net_analysis.py`, `utils/comparison_analysis.py`)**
+   - `prepare_three_system_comparison()` loads the sonar analysis CSV, DVL navigation CSV, and FFT pose CSV, time-aligns them, adds XY estimates, and saves `{bag}_raw_comparison.csv`.  
+   - `load_and_prepare_data()` + downstream routines (`detect_stable_segments`, `compute_distance_pitch_statistics`, etc.) perform the statistical evaluation used in `06_full_net_analysis.ipynb`.
+
+---
+
+## 12. Proposed Single-Call Pipeline
+
+The following helper coordinates the full workflow for a single bag ID—exporting required assets (if missing), generating cone NPZ files, running the sonar tracker, fusing DVL/FFT data, and returning net-relative distance/orientation series.
+
+```python
+def compute_net_distance_and_orientation(
+    bag_id: str,
+    data_dir: Path,
+    exports_dir: Path,
+    *,
+    frame_count: int = 3000,
+    frame_step: int = 1,
+    tolerance_s: float = 0.5,
+) -> pd.DataFrame:
+    """Return a synchronized time series with sonar/DVL/FFT distances & orientations."""
+    # 1) Ensure exports exist
+    exporter = SOLAQUACompleteExporter(data_dir, exports_dir)
+    exporter.export_csv_data()
+    exporter.create_cone_npz(max_bags=None)  # no-op if NPZ already present
+
+    # 2) Run sonar analysis (frames → distance_meters / angle_degrees)
+    npz_files = iau.get_available_npz_files()
+    target_idx = next(i for i, p in enumerate(npz_files) if bag_id in p.name)
+    sonar_df = iau.analyze_npz_sequence(
+        npz_file_index=target_idx,
+        frame_start=1,
+        frame_count=frame_count,
+        frame_step=frame_step,
+        save_outputs=True,
+    )
+
+    # 3) Build three-system comparison & return synchronized dataset
+    df_sonar, _ = load_sonar_analysis_results(bag_id)
+    df_nav, _ = load_navigation_dataset(bag_id)
+    df_fft, _ = load_fft_dataset(bag_id, fft_root=Path("/Volumes/LaCie/SOLAQUA/relative_fft_pose"))
+
+    comparison_df, _, _ = prepare_three_system_comparison(
+        bag_id,
+        df_sonar,
+        df_nav,
+        df_fft,
+        tolerance_seconds=tolerance_s,
+    )
+    return ensure_xy_columns(comparison_df)
+```
+
+**Characteristics:**
+- **Input:** `bag_id` plus data/export roots.
+- **Side effects:** Reuses the existing export/analysis machinery; skips steps automatically when artifacts already exist.
+- **Output:** A synchronized DataFrame containing `sonar_distance_m`, `nav_distance_m`, `fft_distance_m`, `sonar_pitch_deg`, `fft_pitch_deg`, `nav_pitch_deg`, and XY columns—exactly what downstream notebooks consume for statistics, plots, or real-time monitoring.
+
+This orchestration wraps the entire pipeline into a single call suitable for CLI tools, dashboards, or automated QA jobs.
 
 ---
 
