@@ -606,30 +606,22 @@ def generate_multi_bag_summary_csv(
     comparison_data_dir = Path(comparison_data_dir)
     
     # Find all comparison CSV files
-    comparison_files = sorted(comparison_data_dir.glob("*_raw_comparison.csv"))
-    
-    if not comparison_files:
-        print(f"No comparison CSV files found in {comparison_data_dir}")
-        return None
-    
-    print(f"\n=== GENERATING MULTI-BAG SUMMARY CSV ===\n")
-    print(f"Found {len(comparison_files)} bags to process\n")
-    
-    # Set default output path
-    if output_path is None:
-        output_path = comparison_data_dir / "bag_summary.csv"
-    else:
-        output_path = Path(output_path)
-    
-    all_rows = []
-    
+    comparison_files = []
+    seen_paths = {}
+    for pattern in ("*_raw_comparison.csv", "*_full_comparison.csv"):
+        for file_path in comparison_data_dir.glob(pattern):
+            if file_path.name.startswith("._"):
+                continue
+            resolved = file_path.resolve()
+            seen_paths[resolved] = file_path
+    comparison_files = sorted(seen_paths.values())
+    print(f"Found {len(comparison_files)} comparison files to process")
+
     for csv_path in comparison_files:
-        # Extract bag ID from filename
-        bag_id = csv_path.stem.replace('_raw_comparison', '')
+        bag_id = csv_path.stem.replace("_raw_comparison", "").replace("_full_comparison", "")
         print(f"Processing: {bag_id}")
-        
         try:
-            df = pd.read_csv(csv_path)
+            df = _load_comparison_csv(csv_path)
             df['timestamp'] = pd.to_datetime(df['sync_timestamp'])
             df = df.set_index('timestamp').sort_index()
 
@@ -850,12 +842,12 @@ def generate_multi_bag_summary_csv(
             all_rows.append(row)
             print(f"  ✓ Processed {len(baseline_df)} baseline samples, {len(segments)} stable segments")
             
-        except Exception as e:
-            print(f"  ✗ Error processing {bag_id}: {e}")
+        except Exception as exc:
+            print(f"  ✗ Error processing {bag_id}: {exc}")
             # Add minimal row with error info
             all_rows.append({
                 'bag_id': bag_id,
-                'error': str(e)
+                'error': str(exc)
             })
     
     # Create DataFrame and save
@@ -1507,3 +1499,10 @@ def create_visualizations(df, segments, target_bag, plots_dir, sigma_thresh, out
         print(f"Saved: {save_path.name}")
     
     return figs
+
+
+def _load_comparison_csv(path: Path) -> pd.DataFrame:
+    try:
+        return pd.read_csv(path, parse_dates=["sync_timestamp"])
+    except UnicodeDecodeError:
+        return pd.read_csv(path, parse_dates=["sync_timestamp"], encoding="ISO-8859-1")
