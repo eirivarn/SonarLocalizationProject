@@ -25,20 +25,19 @@ source devel/setup.bash
   rosrun solaqua_tools sonar_live_net_node.py \
     _topic:=/sensor/sonoptix_echo/image \
     _range_max_m:=20.0 \
-    _log_every:=5
+    _log_every:=5 \
+    _log_csv_path:=/home/shared_folder/exports/net_detection_live.csv
   ```
-- Shell D (inspect and optionally log detections):
+- Shell D (inspect; CSV auto-saves to `_log_csv_path`):
   ```bash
   rostopic hz /solaqua/net_detection
   rostopic echo -n5 /solaqua/net_detection
-  # save detections to CSV:
-  rostopic echo -p /solaqua/net_detection > /home/shared_folder/exports/net_detection_live.csv
-  # or record to bag:
+  # optional: also record to bag:
   rosbag record -O /home/shared_folder/exports/net_detection_live.bag /solaqua/net_detection
   ```
   - `rostopic hz` confirms messages are flowing (frequency should match frame rate).
   - `rostopic echo -n5` prints a few messages so you can sanity-check values ([distance_px, angle_deg, distance_m]).
-  - `rostopic echo -p ... > net_detection_live.csv` logs detections to a CSV you can open in pandas/Excel.
+  - `_log_csv_path` auto-saves detections (frame index, timestamp, px/m distances, angle, success flag) to CSV. Set empty to disable.
   - `rosbag record ...` stores detections as a ROS bag for later replay or merging with other topics.
 
 ## Topics

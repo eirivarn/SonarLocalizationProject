@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 import cv2
 import numpy as np
 import pandas as pd
+import re
 
 from utils.config import IMAGE_PROCESSING_CONFIG, TRACKING_CONFIG, EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
 from utils.image_enhancement import preprocess_edges
@@ -40,6 +41,20 @@ class FrameAnalysisResult:
             'tracking_status': self.tracking_status,
             **self.contour_features,
         }
+
+
+def _parse_bag_start_timestamp(bag_id: str) -> Optional[pd.Timestamp]:
+    """
+    Extract the recording start timestamp from a bag_id like '2024-08-22_14-47-39'.
+    Returns a tz-aware UTC timestamp if parsing succeeds, else None.
+    """
+    m = re.match(r"(?P<date>\\d{4}-\\d{2}-\\d{2})[_-](?P<time>\\d{2}-\\d{2}-\\d{2})", bag_id)
+    if not m:
+        return None
+    date_part = m.group("date")
+    time_part = m.group("time")
+    ts = pd.to_datetime(f"{date_part} {time_part}", format="%Y-%m-%d %H-%M-%S", utc=True, errors="coerce")
+    return ts if pd.notna(ts) else None
 
 
 def analyze_npz_sequence(
@@ -87,6 +102,19 @@ def analyze_npz_sequence(
     # Remove all possible suffixes to get clean bag_id
     for suffix in ['_data_cones_video', '_video', '_data_cones', '_cones']:
         bag_id = bag_id.replace(suffix, '')
+
+    # Normalize timestamps using the bag start time when NPZ timestamps are relative
+    bag_start_ts = _parse_bag_start_timestamp(bag_id)
+    timestamps = pd.DatetimeIndex(timestamps)
+    if bag_start_ts is not None and len(timestamps):
+        ts0 = timestamps[0]
+        if ts0.tzinfo is None or ts0.tzinfo.utcoffset(ts0) is None:
+            ts0 = ts0.tz_localize("UTC")
+        # If timestamps look relative (epoch near 1970) or far from bag start, shift them
+        if ts0.year < 2000 or abs(ts0 - bag_start_ts) > pd.Timedelta(hours=12):
+            offsets = timestamps - timestamps[0]
+            timestamps = pd.DatetimeIndex(bag_start_ts + offsets)
+            print(f"Adjusted timestamps using bag start {bag_start_ts.isoformat()}")
     
     frame_indices = list(range(
         max(0, frame_start),

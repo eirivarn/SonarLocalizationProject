@@ -166,21 +166,33 @@ class MultiSystemSynchronizer:
         Returns:
             Synchronized DataFrame with measurements from all systems
         """
-        # Standardize timestamps - handle different column names
-        df_fft_std = df_fft.copy()
-        if 'time' in df_fft_std.columns and 'timestamp' not in df_fft_std.columns:
-            df_fft_std['timestamp'] = pd.to_datetime(df_fft_std['time'], unit='s')
-        df_fft_std = self.standardize_timestamps(df_fft_std)
-        
-        df_sonar_std = self.standardize_timestamps(df_sonar)
-        df_nav_std = self.standardize_timestamps(df_nav)
+        def _prepare(df: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
+            if df is None or df.empty:
+                return None
+            work = df.copy()
+            if 'time' in work.columns and 'timestamp' not in work.columns:
+                work['timestamp'] = pd.to_datetime(work['time'], unit='s', errors='coerce')
+            work = self.standardize_timestamps(work)
+            if 'timestamp' not in work.columns:
+                return None
+            work = work.dropna(subset=['timestamp'])
+            return work if not work.empty else None
+
+        df_fft_std = _prepare(df_fft)
+        df_sonar_std = _prepare(df_sonar)
+        df_nav_std = _prepare(df_nav)
+
+        if df_fft_std is None and df_sonar_std is None and df_nav_std is None:
+            return pd.DataFrame()
         
         # Create unified time grid
-        all_times = pd.concat([
-            df_fft_std['timestamp'].dropna(),
-            df_sonar_std['timestamp'].dropna(),
-            df_nav_std['timestamp'].dropna()
-        ]).sort_values().drop_duplicates()
+        time_cols = []
+        for df_std in (df_fft_std, df_sonar_std, df_nav_std):
+            if df_std is not None and 'timestamp' in df_std.columns:
+                time_cols.append(df_std['timestamp'].dropna())
+        if not time_cols:
+            return pd.DataFrame()
+        all_times = pd.concat(time_cols).sort_values().drop_duplicates()
         
         sync_results = []
         

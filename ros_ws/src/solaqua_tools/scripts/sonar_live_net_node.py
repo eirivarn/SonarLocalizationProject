@@ -18,6 +18,9 @@ from std_msgs.msg import Float32MultiArray, MultiArrayDimension, MultiArrayLayou
 
 from pathlib import Path
 import sys
+import csv
+import os
+import cv2
 
 try:
     from sensors.msg import SonoptixECHO  # type: ignore
@@ -41,6 +44,7 @@ class SonarLiveNetNode:
         self.binary_threshold = int(rospy.get_param("~binary_threshold", IMAGE_PROCESSING_CONFIG.get("binary_threshold", 128)))
         log_every = int(rospy.get_param("~log_every", 30))
         self.log_every = max(1, log_every)
+        self.log_csv_path = rospy.get_param("~log_csv_path", "")
 
         config = {**IMAGE_PROCESSING_CONFIG, **TRACKING_CONFIG}
         config["binary_threshold"] = self.binary_threshold
@@ -51,9 +55,14 @@ class SonarLiveNetNode:
         self.sub = rospy.Subscriber(topic, msg_type, self._cb, queue_size=10)
 
         self.frame_count = 0
+        self.csv_initialized = False
+        if self.log_csv_path:
+            out_dir = Path(self.log_csv_path).expanduser().resolve().parent
+            out_dir.mkdir(parents=True, exist_ok=True)
+
         rospy.loginfo(
             f"[sonar_live_net_node] Listening on {topic}, publishing to /solaqua/net_detection "
-            f"(range_max_m={self.range_max_m}, binary_threshold={self.binary_threshold})"
+            f"(range_max_m={self.range_max_m}, binary_threshold={self.binary_threshold}, log_csv={self.log_csv_path})"
         )
 
     def _publish_result(self, distance_px, angle_deg, distance_m):
@@ -124,6 +133,11 @@ class SonarLiveNetNode:
         distance_m = None
         if distance_px is not None and self.range_max_m:
             distance_m = (distance_px / float(h)) * self.range_max_m
+        # stash contour for logging
+        try:
+            self.tracker.last_contour = best_contour
+        except Exception:
+            pass
 
         if self.frame_count % self.log_every == 0:
             status = self.tracker.get_status()
@@ -133,6 +147,38 @@ class SonarLiveNetNode:
             )
 
         self._publish_result(distance_px, angle_deg, distance_m)
+        self._maybe_log_csv(msg, distance_px, distance_m, angle_deg, best_contour is not None)
+
+    def _maybe_log_csv(self, msg, distance_px, distance_m, angle_deg, detection_success: bool):
+        if not self.log_csv_path:
+            return
+        ts = None
+        if hasattr(msg, "header") and hasattr(msg.header, "stamp"):
+            ts = msg.header.stamp.to_sec()
+        elif SonoptixECHO is not None and isinstance(msg, SonoptixECHO) and hasattr(msg, "header"):
+            ts = msg.header.stamp.to_sec()
+        else:
+            ts = rospy.Time.now().to_sec()
+
+        tracking_status = self.tracker.get_status()
+        area = float(cv2.contourArea(self.tracker.last_contour)) if hasattr(self.tracker, "last_contour") and self.tracker.last_contour is not None else -1.0
+        row = {
+            "frame_index": self.frame_count,
+            "timestamp": ts,
+            "distance_pixels": distance_px if distance_px is not None else -1.0,
+            "distance_meters": distance_m if distance_m is not None else -1.0,
+            "angle_degrees": angle_deg if angle_deg is not None else -1.0,
+            "detection_success": detection_success,
+            "tracking_status": tracking_status,
+            "area": area,
+        }
+        write_header = not self.csv_initialized or (self.log_csv_path and not Path(self.log_csv_path).exists())
+        with open(self.log_csv_path, "a", newline="") as fp:
+            writer = csv.DictWriter(fp, fieldnames=row.keys())
+            if write_header:
+                writer.writeheader()
+                self.csv_initialized = True
+            writer.writerow(row)
 
 
 def main():

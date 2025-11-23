@@ -11,6 +11,33 @@ from matplotlib.colors import to_rgb
 
 from utils.config import EXPORTS_DIR_DEFAULT, EXPORTS_SUBDIRS
 
+
+def _infer_unix_unit(values: pd.Series) -> Optional[str]:
+    """Guess time unit from numeric magnitude."""
+    numeric = pd.to_numeric(values, errors="coerce")
+    numeric = numeric[np.isfinite(numeric)]
+    if numeric.empty:
+        return None
+    max_abs = float(numeric.abs().max())
+    if max_abs > 1e16:
+        return "ns"
+    if max_abs > 1e13:
+        return "us"
+    if max_abs > 1e11:
+        return "ms"
+    return "s"
+
+
+def _parse_timestamp_col(series: pd.Series) -> pd.Series:
+    """
+    Parse a timestamp column that may be ISO strings or Unix epochs (s/ms/us/ns).
+    """
+    unit = _infer_unix_unit(series) if pd.api.types.is_numeric_dtype(series) or pd.api.types.is_integer_dtype(series) else None
+    if unit:
+        return pd.to_datetime(pd.to_numeric(series, errors="coerce"), unit=unit, errors="coerce", utc=True)
+    return pd.to_datetime(series, errors="coerce", utc=True)
+
+
 def _resolve_export_paths(exports_dir: str | Path | None = None) -> Tuple[Path, Path, Path]:
     root = Path(exports_dir) if exports_dir else Path(EXPORTS_DIR_DEFAULT)
     outputs_dir = root / EXPORTS_SUBDIRS.get('outputs', 'outputs')
@@ -46,7 +73,7 @@ def load_sonar_analysis_results(
         df = pd.read_csv(csv_path, encoding="ISO-8859-1")
 
     if "timestamp" in df.columns:
-        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+        df["timestamp"] = _parse_timestamp_col(df["timestamp"])
     else:
         print(f"[load_sonar_analysis_results] ⚠️  'timestamp' column missing in {csv_path.name}")
 
@@ -57,7 +84,7 @@ def load_sonar_analysis_results(
     }
     
     if "timestamp" in df.columns:
-        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+        df["timestamp"] = _parse_timestamp_col(df["timestamp"])
         df = df.dropna(subset=["timestamp"]).sort_values("timestamp")
     
     return df, metadata
@@ -72,7 +99,7 @@ def load_navigation_dataset(
     if nav_path.exists():
         df = pd.read_csv(nav_path)
         timestamp_source = "timestamp" if "timestamp" in df.columns else "ts_utc"
-        df["timestamp"] = pd.to_datetime(df[timestamp_source], errors="coerce")
+        df["timestamp"] = _parse_timestamp_col(df[timestamp_source])
         df = df.sort_values("timestamp")
         return df, {"resolved_path": str(nav_path), "rows": len(df)}
 
@@ -214,12 +241,12 @@ def synchronize_sonar_and_dvl(
         return pd.DataFrame()
 
     sonar = df_sonar.copy()
-    sonar["timestamp"] = pd.to_datetime(sonar["timestamp"], errors="coerce")
+    sonar["timestamp"] = _parse_timestamp_col(sonar["timestamp"])
     sonar = sonar.dropna(subset=["timestamp"]).sort_values("timestamp")
 
     nav = df_nav.copy()
     timestamp_col = "timestamp" if "timestamp" in nav.columns else "ts_utc"
-    nav["timestamp"] = pd.to_datetime(nav[timestamp_col], errors="coerce")
+    nav["timestamp"] = _parse_timestamp_col(nav[timestamp_col])
     nav = nav.dropna(subset=["timestamp"]).sort_values("timestamp")
 
     if nav.empty or sonar.empty:
@@ -383,7 +410,7 @@ def _prepare_fft_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         else:
             prepared["timestamp"] = pd.NaT
     else:
-        prepared["timestamp"] = pd.to_datetime(prepared["timestamp"], errors="coerce")
+        prepared["timestamp"] = _parse_timestamp_col(prepared["timestamp"])
 
     if "distance" in prepared.columns and "distance_m" not in prepared.columns:
         distances = pd.to_numeric(prepared["distance"], errors="coerce")
