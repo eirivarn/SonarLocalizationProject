@@ -1,6 +1,6 @@
-# SOLAQUA — Advanced Sonar Image Analysis for Aquaculture
+# SOLAQUA — Sonar Image Analysis for Aquaculture
 
-This repository contains tools and notebooks for processing Sonoptix-style sonar data, extracting net distance estimates from sonar imagery, and comparing them with navigation/DVL measurements using advanced computer vision techniques.
+This repository contains tools and notebooks for processing sonar data, extracting net distance estimates from sonar imagery, and comparing them with other measurements.
 
 **Key Features:**
 - **Signal-strength independent** image analysis using binary preprocessing
