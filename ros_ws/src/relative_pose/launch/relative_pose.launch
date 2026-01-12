@@ -1,0 +1,9 @@
+<launch>
+    <arg name="use_local_config" default="true" />
+    <group if="$(arg use_local_config)">
+        <rosparam file="$(find relative_pose)/config/relative_pose.yaml" command="load"/>
+    </group>
+
+    <!-- Launch the relative pose node -->
+    <node name="relativePoseNode" pkg="relative_pose" type="relative_pose_node.py" output="screen"/>
+</launch>

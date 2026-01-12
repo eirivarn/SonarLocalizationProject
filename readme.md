@@ -11,149 +11,128 @@ This repository contains tools and notebooks for processing sonar data, extracti
 
 ---
 
-## Quick Start
+## Usage Guide
 
-1. **Setup Environment:**
+### Standard Analysis Workflow
+
+1. **Environment Setup**
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate
+   pip install -r requirements.txt
+   ```
+
+2. **Data Export from ROS Bags**
+   
+   Export sonar, navigation, and sensor data to CSV/NPZ formats:
+   ```bash
+   python3 scripts/solaqua_export.py \
+     --data-dir /path/to/raw_data \
+     --exports-dir /path/to/exports \
+     --all
+   ```
+   
+   Or export specific components:
+   ```bash
+   # Export only NPZ sonar cones
+   python3 scripts/solaqua_export.py --data-dir ./raw_data --npz
+   
+   # Export CSV tables
+   python3 scripts/solaqua_export.py --data-dir ./raw_data --csv
+   
+   # Generate video outputs
+   python3 scripts/solaqua_export.py --data-dir ./raw_data --video
+   ```
+
+3. **Run Analysis Notebooks**
+   
+   Launch Jupyter and open analysis notebooks:
+   ```bash
+   jupyter lab
+   ```
+   
+   Key notebooks:
+   - `06_full_net_analysis.ipynb` — Complete pipeline with net tracking and DVL comparison
+   - `04_image_analysis.ipynb` — Image processing and visualization
+   - `01_Sonar_Visualizer.ipynb` — Interactive sonar data exploration
+
+4. **Generate Distance Measurements**
+   
+   Compute net distance from exported data:
+   ```bash
+   python3 scripts/compute_net_distance.py \
+     --npz-dir exports/npz_cones \
+     --output outputs/net_distance.csv
+   ```
+
+### ROS Integration
+
+**Live ROS1 Streaming** (real-time net detection):
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+# Inside ROS container
+roscore  # Terminal 1
+rosbag play --clock bags/your_bag.bag  # Terminal 2
+rosrun solaqua_tools sonar_live_net_node.py  # Terminal 3
 ```
+See [ros_ws/README_sonar_live.md](ros_ws/README_sonar_live.md) for complete setup.
 
-2. **Export Data from ROS Bags:**
+**ROS2 Container Deployment**:
 ```bash
-# Export CSVs, videos, and NPZ cones into the exports/ directory
-python3 scripts/solaqua_export.py --data-dir /Volumes/LaCie/SOLAQUA/raw_data \
-    --exports-dir /Volumes/LaCie/SOLAQUA/exports --all
+# Build Docker image
+docker build -f Dockerfile -t solaqua-ros2 .
+
+# Run with data mounts
+docker run --rm -it --network host \
+  -v /path/to/raw_data:/workspace/raw_data \
+  -v /path/to/exports:/workspace/exports \
+  solaqua-ros2:latest bash
+
+# Inside container: inspect and play bags
+ros2 bag info /workspace/raw_data/your_bag.bag
+ros2 bag play /workspace/raw_data/your_bag.bag --clock
 ```
-
-3. **Run Image Analysis:**
-```bash
-jupyter lab 06_image_analysis.ipynb
-```
-
-The notebook demonstrates:
-- Loading NPZ sonar data
-- Analyzing net distance over time using computer vision
-- Converting pixel distances to real-world meters
-- Interactive comparison between sonar and DVL measurements
-- Generating synchronized overlay videos
-
----
-
-## Repository Structure
-
-### Core Scripts
-- `scripts/solaqua_export.py` — High-level export tool for CSV/Parquet, MP4, PNG sequences, and NPZ cones
-- `scripts/interactive_kernel_visualizer.py` — Interactive sonar visualization tool
-
-### Analysis Pipeline (`utils/`)
-- `sonar_image_analysis.py` — **Core image analysis pipeline** with binary preprocessing, contour detection, and elliptical tracking
-- `sonar_utils.py` — Sonar enhancement, TVG compensation, and polar→Cartesian rasterization
-- `net_distance_analysis.py` — DVL and navigation data loaders for comparison
-- `sonar_config.py` — Configuration parameters for all processing stages
-- `dataset_export_utils.py` — ROS bag parsing and data export utilities
-
-### Notebooks
-- `06_image_analysis.ipynb` — **Main analysis notebook** with complete pipeline demonstration
-- `01_Sonar_Visualizer.ipynb` — Basic sonar visualization
-- `02_Ping360_Visualizer.ipynb` — Ping360-specific visualization
-- `03_rov_navigation_analysis.ipynb` — Navigation analysis
-- `04_synchronized_sonar_net_distance_analysis.ipynb` — Synchronized analysis
-- `05_LEGACY_video_with_sonar_display.ipynb` — Legacy video generation
-- `07_pipeline_visualization.ipynb` — Pipeline visualization
+See [docs/ros2_container_streaming.md](docs/ros2_container_streaming.md) for detailed ROS2 workflows.
 
 ### Documentation
-- `docs/sonar_pipeline_explanation.md` — **Detailed technical documentation** of the complete analysis pipeline
-- `docs/dataset_runs.md` — Dataset-specific analysis results
-- `README.md` — This file
+
+- **[USAGE_GUIDE.md](docs/USAGE_GUIDE.md)** — Comprehensive command reference and workflow examples
+- **[sonar_pipeline_explanation.md](docs/sonar_pipeline_explanation.md)** — Complete technical documentation of the sonar processing pipeline, algorithms, and implementation
+- **[ANALYSIS_METHODOLOGY.md](docs/ANALYSIS_METHODOLOGY.md)** — Multi-system comparison methodology for FFT, Sonar, and DVL measurements
+- **[dataset_runs.md](docs/dataset_runs.md)** — Dataset catalog with timestamps and experiment descriptions
+- **[ros2_container_streaming.md](docs/ros2_container_streaming.md)** — ROS2 deployment and bag processing guide
+- **[rov_fft_guide.md](docs/rov_fft_guide.md)** — FFT-based relative pose estimation workflow
 
 ---
 
-## Advanced Image Analysis Pipeline
+## Repository Overview
+
+The workspace contains analysis notebooks (numbered), processing scripts in `scripts/`, core utilities in `utils/`, and comprehensive documentation in `docs/`. Raw data and ROS bags are stored in dedicated directories, while processed outputs go to `exports/` and `outputs/`
+
+---
+
+## Technical Details
 
 The SOLAQUA system uses a sophisticated computer vision pipeline for robust net detection:
 
-### 1. Signal-Independent Preprocessing
-- **Binary conversion** eliminates signal strength variability
-- **Adaptive morphological enhancement** detects linear structures
-- **Edge detection** without traditional Canny pipeline
+- **Signal-Independent Preprocessing:** Binary conversion eliminates signal strength variability
+- **Contour Detection & Selection:** Geometric scoring favors elongated structures with temporal consistency
+- **Elliptical AOI Tracking:** Temporal smoothing prevents erratic movement and maintains stable detection
+- **Distance Measurement:** Pixel-to-meter conversion using metadata with stability constraints
+- **DVL Integration:** Timestamp synchronization for comparison with navigation data
 
-### 2. Contour Detection & Selection
-- **Geometric scoring** favors elongated contours typical of nets
-- **AOI overlap requirements** ensure temporal consistency
-- **Spatial penalties** prevent false detections
+Source to `utils/` for implementation details and `docs/` for comprehensive technical documentation.
 
-### 3. Elliptical AOI Tracking
-- **Temporal smoothing** prevents erratic ellipse movement
-- **Movement constraints** limit center jumps between frames
-- **Parameter smoothing** maintains stable ellipse shape
-
-### 4. Distance Measurement
-- **Pixel-to-meter conversion** using NPZ extent metadata
-- **Stability constraints** prevent measurement jumps
-- **Real-time analysis** across video sequences
-
-### 5. DVL Integration
-- **Timestamp synchronization** between sonar and navigation data
-- **Interactive comparison** with Plotly visualizations
-- **Statistical analysis** of sonar vs DVL correlations
-
-**Configuration:** All parameters are tunable in `utils/sonar_config.py`
-
----
-
-## Configuration & Tuning
-
-### Image Processing Parameters (`IMAGE_PROCESSING_CONFIG`)
-```python
-'binary_threshold': 128,              # Binary conversion threshold
-'adaptive_base_radius': 2,            # Base kernel radius for enhancement
-'adaptive_max_elongation': 4,         # Maximum kernel elongation
-'min_contour_area': 100,              # Minimum contour size
-```
-
-### Tracking Parameters (`TRACKING_CONFIG`)
-```python
-'use_elliptical_aoi': True,           # Enable elliptical tracking
-'ellipse_expansion_factor': 0.3,      # AOI expansion (30%)
-'center_smoothing_alpha': 0.1,        # Center smoothing (lower = smoother)
-'ellipse_max_movement_pixels': 2.0,   # Maximum center movement per frame
-```
-
-### Data Directories
-- **Raw Data:** Configure `DATA_DIR` in notebooks or `sonar_config.py`
-- **Exports:** Default to `exports/` with subdirectories for organization
-- **External Drives:** Support for `/Volumes/LaCie/SOLAQUA/` layout
-
----
-
-## Developer Notes
-
-- **Pixel→Meter Conversion:** Uses NPZ extent metadata for geometric accuracy
-- **Temporal Stability:** Elliptical AOI tracking prevents measurement jumps
-- **Signal Independence:** Binary preprocessing works across different sonar conditions
-- **Performance:** Optimized for real-time processing with cached kernels
-
-### Extending the Pipeline
-- Modify `SonarDataProcessor` class for custom analysis
-- Add new contour features in `compute_contour_features()`
-- Tune parameters in `sonar_config.py` for different environments
+**Configuration:** All processing parameters are tunable via the configuration module in `utils/`
 
 ---
 
 ## Dependencies
 
-**Required:**
 - Python 3.10+
-- `numpy`, `pandas`, `opencv-python`
-- `plotly`, `matplotlib`
-- `scipy`, `scikit-image`
-- `rosbags` (ROS bag parsing)
-
-**Optional:**
-- `jupyterlab` (notebooks)
-- `pyarrow` (Parquet support)
+- Core: `numpy`, `pandas`, `opencv-python`, `scipy`, `scikit-image`
+- Visualization: `plotly`, `matplotlib`
+- ROS: `rosbags` for bag parsing
+- Optional: `jupyterlab`, `pyarrow`
 
 Install with: `pip install -r requirements.txt`
 
@@ -161,4 +140,4 @@ Install with: `pip install -r requirements.txt`
 
 ## License
 
-MIT — see `LICENSE` for the full text.
+MIT — see LICENSE for details.

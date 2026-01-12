@@ -402,20 +402,30 @@ def preprocess_edges(frame_u8: np.ndarray, config: Dict) -> Tuple[np.ndarray, np
             linearity_threshold=config.get('adaptive_linearity_threshold', 0.15),
         )
     else:
-        use_dilation = config.get('basic_use_dilation', True)
-        if use_dilation:
-            # Use morphological dilation to grow non-zero pixels into nearby zero pixels
+        # Basic path: morphological opening (denoise without overgrowing) + light blur
+        enhanced = binary_frame
+
+        use_opening = config.get('basic_use_opening', True)
+        if use_opening:
+            kernel_size = config.get('basic_open_kernel_size', config.get('basic_dilation_kernel_size', 3))
+            iterations = config.get('basic_open_iterations', 1)
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+            enhanced = cv2.morphologyEx(enhanced, cv2.MORPH_OPEN, kernel, iterations=iterations)
+        else:
+            # Fallback to legacy dilation if opening is disabled
             kernel_size = config.get('basic_dilation_kernel_size', 3)
             iterations = config.get('basic_dilation_iterations', 1)
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
-            enhanced = cv2.dilate(binary_frame, kernel, iterations=iterations)
-        else:
-            # Fallback to Gaussian blur
-            kernel_size = config.get('basic_gaussian_kernel_size', 3)
-            gaussian_sigma = config.get('basic_gaussian_sigma', 1.0)        
-            enhanced = cv2.GaussianBlur(binary_frame, (kernel_size, kernel_size), gaussian_sigma)
-        enhanced_binary = enhanced
-        enhanced_binary = np.clip(enhanced_binary, 0, 255).astype(np.uint8)
+            enhanced = cv2.dilate(enhanced, kernel, iterations=iterations)
+
+        # Light Gaussian blur to smooth edges / residual speckle
+        kernel_size = config.get('basic_gaussian_kernel_size', 3)
+        if kernel_size % 2 == 0:
+            kernel_size += 1  # OpenCV requires odd kernel
+        gaussian_sigma = config.get('basic_gaussian_sigma', 1.0)
+        enhanced = cv2.GaussianBlur(enhanced, (kernel_size, kernel_size), gaussian_sigma)
+
+        enhanced_binary = np.clip(enhanced, 0, 255).astype(np.uint8)
     
     # STEP 3: Extract edges from enhanced binary frame
     kernel_edge = np.array([[-1, -1, -1], [-1, 8, -1], [-1, -1, -1]], dtype=np.float32)

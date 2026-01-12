@@ -1,0 +1,28 @@
+relative_pose:
+  fft_topic: /fft_data
+  relative_pose_topic: /relative_pose/fft
+  tru_depth_topic: /uw_depth/depth_image
+  relative_pose_tru_depth_topic: /relative_pose/tru_depth
+
+  use_fft: true
+  use_tru_depth: false
+
+camera:
+
+  # Original data
+  fx: 882
+  fy: 821
+  cx: 680
+  cy: 360
+
+  # # Blender data
+  # fx: 855
+  # fy: 855
+  # cx: 643
+  # cy: 356
+
+  # Alphasense data
+  # fx: 466
+  # fy: 466
+  # cx: 362
+  # cy: 370
