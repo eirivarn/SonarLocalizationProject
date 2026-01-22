@@ -2,6 +2,14 @@
 data/
 exports/
 
+# --- Simulation datasets ---
+simulation/datasets/
+simulation/checkpoints/
+simulation/test_*.png
+simulation/debug_*.py
+simulation/*.npy
+simulation/*.png
+
 # --- Python ---
 __pycache__/
 *.py[cod]
@@ -14,6 +22,7 @@ __pycache__/
 dist/
 build/
 *.log
+*.png
 
 # --- Virtual environments ---
 .venv/
