@@ -500,6 +500,55 @@ def generate_random_sonar_position(cage_center, cage_radius, distance_range, ang
 _trajectory_state = {}
 
 
+def polar_to_cartesian(polar_image, range_m=20.0, fov_deg=120.0, output_size=(512, 512)):
+    """
+    Convert polar sonar image to Cartesian representation.
+    
+    Args:
+        polar_image: (range_bins, num_beams) polar sonar image
+        range_m: Maximum range in meters
+        fov_deg: Field of view in degrees
+        output_size: (height, width) of output Cartesian image
+        
+    Returns:
+        Cartesian image with zeros outside sonar cone
+    """
+    num_range_bins, num_beams = polar_image.shape
+    height, width = output_size
+    
+    # Calculate extent
+    x_extent = range_m * np.sin(np.deg2rad(fov_deg / 2)) * 1.05
+    y_extent = range_m
+    
+    # Create coordinate grids for all pixels at once (vectorized)
+    j_grid, i_grid = np.meshgrid(np.arange(width), np.arange(height))
+    
+    # Convert pixels to meters in sonar frame
+    x_m = (j_grid - width/2) * (2 * x_extent / width)
+    y_m = i_grid * (y_extent / height)  # No flip - row 0 is near, row N is far
+    
+    # Convert to polar coordinates
+    r_m = np.sqrt(x_m**2 + y_m**2)
+    theta_rad = np.arctan2(x_m, y_m)
+    
+    # Create mask for points within sonar cone
+    valid_mask = (r_m <= range_m) & (np.abs(theta_rad) <= np.deg2rad(fov_deg/2))
+    
+    # Find corresponding indices in polar image
+    r_idx = ((r_m / range_m) * (num_range_bins - 1)).astype(np.int32)
+    theta_idx = ((theta_rad + np.deg2rad(fov_deg/2)) / np.deg2rad(fov_deg) * (num_beams - 1)).astype(np.int32)
+    
+    # Clamp indices
+    r_idx = np.clip(r_idx, 0, num_range_bins - 1)
+    theta_idx = np.clip(theta_idx, 0, num_beams - 1)
+    
+    # Create output image and fill valid pixels
+    cart_image = np.zeros((height, width), dtype=np.float32)
+    cart_image[valid_mask] = polar_image[r_idx[valid_mask], theta_idx[valid_mask]]
+    
+    return cart_image
+
+
 def generate_sample(scene_id, sample_id):
     """
     Generate a single training sample.
@@ -556,14 +605,22 @@ def generate_sample(scene_id, sample_id):
     )
     
     # Capture image
-    sonar_image = sonar.scan(grid)
+    sonar_image_polar = sonar.scan(grid)
     
     # Process image if needed
     if DATA_GEN_CONFIG['log_scale']:
-        sonar_image = 10 * np.log10(np.maximum(sonar_image, 1e-10))
+        sonar_image_polar = 10 * np.log10(np.maximum(sonar_image_polar, 1e-10))
     
     if DATA_GEN_CONFIG['normalize']:
-        sonar_image = np.clip((sonar_image + 60) / 60, 0, 1)
+        sonar_image_polar = np.clip((sonar_image_polar + 60) / 60, 0, 1)
+    
+    # Convert to Cartesian representation
+    sonar_image = polar_to_cartesian(
+        sonar_image_polar,
+        range_m=SONAR_CONFIG['range_m'],
+        fov_deg=SONAR_CONFIG['fov_deg'],
+        output_size=(512, 512)
+    )
     
     # Calculate ground truth using ray-segment intersection
     distance, hit_point, hit_segment = find_net_intersection(
@@ -573,9 +630,34 @@ def generate_sample(scene_id, sample_id):
     if distance is not None:
         orientation = get_relative_orientation(hit_segment, direction)
         net_visible = True
+        
+        # Convert to sonar's local coordinate frame
+        # In sonar frame: Y-axis points forward (sonar direction), X-axis points right
+        relative_world = hit_point - position
+        
+        # Create rotation matrix from world to sonar frame
+        # Sonar forward direction becomes Y-axis
+        forward = direction / np.linalg.norm(direction)
+        right = np.array([-forward[1], forward[0]])  # Perpendicular, 90° counter-clockwise
+        
+        # Transform hit point to sonar frame
+        hit_x_sonar = np.dot(relative_world, right)
+        hit_y_sonar = np.dot(relative_world, forward)
+        relative_position = np.array([hit_x_sonar, hit_y_sonar])
+        
+        # Transform net direction to sonar frame
+        x1, y1, x2, y2 = hit_segment
+        net_dir_world = np.array([x2 - x1, y2 - y1])
+        net_dir_world = net_dir_world / np.linalg.norm(net_dir_world)
+        
+        net_x_sonar = np.dot(net_dir_world, right)
+        net_y_sonar = np.dot(net_dir_world, forward)
+        net_direction = np.array([net_x_sonar, net_y_sonar])
     else:
         orientation = None
         net_visible = False
+        relative_position = None
+        net_direction = None
     
     label = {
         'distance_m': float(distance) if distance is not None else None,
@@ -587,6 +669,10 @@ def generate_sample(scene_id, sample_id):
         'sonar_direction': direction.tolist(),
         'cage_center': cage_center.tolist(),
         'cage_radius': float(cage_radius),
+        # Cartesian coordinates
+        'hit_point_world': hit_point.tolist() if hit_point is not None else None,
+        'hit_point_relative': relative_position.tolist() if relative_position is not None else None,
+        'net_direction': net_direction.tolist() if net_direction is not None else None,
     }
     
     return sonar_image.astype(np.float32), label
@@ -594,61 +680,68 @@ def generate_sample(scene_id, sample_id):
 
 def visualize_sample(sonar_image, label, output_path):
     """
-    Visualize a sonar sample with ground truth overlay.
+    Visualize a sonar sample with ground truth overlay in Cartesian coordinates.
     
     Args:
-        sonar_image: (1024, 256) sonar image
+        sonar_image: (height, width) Cartesian sonar image
         label: Ground truth label dict
         output_path: Path to save visualization
     """
-    fig, ax = plt.subplots(1, 1, figsize=(10, 8), subplot_kw={'projection': 'polar'})
+    fig, ax = plt.subplots(1, 1, figsize=(10, 10))
     
-    # Convert image to polar coordinates for display
-    num_range_bins, num_beams = sonar_image.shape
+    height, width = sonar_image.shape
     
-    # Create polar mesh
-    theta = np.linspace(-np.pi/3, np.pi/3, num_beams)  # 120° FOV
-    r = np.linspace(0, 20, num_range_bins)  # 20m range
-    theta_grid, r_grid = np.meshgrid(theta, r)
+    # Set dark grey background
+    ax.set_facecolor('#2a2a2a')
+    fig.patch.set_facecolor('#2a2a2a')
     
     # Display sonar image
-    ax.pcolormesh(theta_grid, r_grid, sonar_image, cmap='gray', shading='auto', vmin=0, vmax=1)
+    # Map image coordinates to world meters
+    # Calculate extent based on FOV: at 20m with 120° FOV, x extends to ±18.2m
+    range_m = 20.0
+    fov_deg = 120.0
+    x_max = range_m * np.sin(np.deg2rad(fov_deg / 2)) * 1.05
+    ax.imshow(sonar_image, cmap='gray', vmin=0, vmax=1, 
+              extent=[-x_max, x_max, 0, range_m], origin='lower', aspect='auto')
     
     # Overlay ground truth (if net is visible)
-    if label.get('net_visible', False) and label['distance_m'] is not None:
-        distance = label['distance_m']
-        orientation_deg = label['orientation_deg'] if label['orientation_deg'] is not None else 0
+    if label.get('net_visible', False) and label.get('hit_point_relative') is not None:
+        hit_rel = np.array(label['hit_point_relative'])
+        net_dir = np.array(label['net_direction']) if label.get('net_direction') is not None else None
         
         # Draw hit point (small red dot)
-        ax.plot(0, distance, 'ro', markersize=4, alpha=0.8)
+        ax.plot(hit_rel[0], hit_rel[1], 'ro', markersize=6, alpha=0.9, zorder=10)
         
-        # Draw the net line at the detected distance and orientation
-        # Net line indicates the orientation relative to sonar
-        net_line_length = 4.0  # meters width of displayed net line
-        angle_span = net_line_length / (2 * distance) if distance > 0 else 0.1
+        # Draw the net line segment
+        if net_dir is not None:
+            net_line_length = 4.0  # meters
+            half_length = net_line_length / 2
+            
+            # Compute endpoints of net line
+            p1 = hit_rel - half_length * net_dir
+            p2 = hit_rel + half_length * net_dir
+            
+            ax.plot([p1[0], p2[0]], [p1[1], p2[1]], 'r-', 
+                   linewidth=2, alpha=0.9, zorder=10)
         
-        # Draw net line at distance (perpendicular view if orientation=0)
-        # Rotate based on relative orientation
-        orient_rad = np.radians(orientation_deg)
-        theta_left = -angle_span * np.cos(orient_rad)
-        theta_right = angle_span * np.cos(orient_rad)
-        
-        ax.plot([theta_left, theta_right], [distance, distance], 'r-', 
-               linewidth=2, alpha=0.8)
-        
+        distance = label.get('distance_m', 0)
+        orientation_deg = label.get('orientation_deg', 0)
         title = f'Sample {label["sample_id"]} | d={distance:.2f}m | θ={orientation_deg:+.0f}°'
     else:
         title = f'Sample {label["sample_id"]} | NO NET'
     
     # Formatting
-    ax.set_theta_zero_location('N')
-    ax.set_ylim(0, 20)
-    ax.set_title(title, fontsize=12, pad=15)
-    ax.grid(True, alpha=0.2, linewidth=0.5)
-    ax.set_theta_direction(-1)
+    ax.set_xlim(-x_max, x_max)
+    ax.set_ylim(0, range_m)
+    ax.set_aspect('equal')
+    ax.set_xlabel('X (m)', color='white', fontsize=10)
+    ax.set_ylabel('Y (m)', color='white', fontsize=10)
+    ax.set_title(title, fontsize=12, pad=15, color='white')
+    ax.grid(True, alpha=0.2, linewidth=0.5, color='white')
+    ax.tick_params(colors='white')
     
     plt.tight_layout()
-    plt.savefig(output_path, dpi=100, bbox_inches='tight')
+    plt.savefig(output_path, dpi=100, bbox_inches='tight', facecolor='#2a2a2a')
     plt.close()
 
 
