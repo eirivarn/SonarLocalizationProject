@@ -10,6 +10,7 @@ from tqdm import tqdm
 import sys
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
+import cv2
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -500,9 +501,99 @@ def generate_random_sonar_position(cage_center, cage_radius, distance_range, ang
 _trajectory_state = {}
 
 
+def meters_to_pixels(py, pz, range_m=20.0, fov_deg=120.0, image_size=(512, 512)):
+    """
+    Convert meter coordinates to pixel coordinates.
+    
+    Args:
+        py: Y coordinate in meters (forward)
+        pz: Z coordinate in meters (lateral)
+        range_m: Maximum range
+        fov_deg: Field of view
+        image_size: (height, width) of image
+        
+    Returns:
+        u, v: Pixel coordinates (u=horizontal, v=vertical)
+    """
+    height, width = image_size
+    z_extent = range_m * np.sin(np.deg2rad(fov_deg / 2)) * 1.05
+    
+    # Convert meters to pixels
+    u = (pz / (2 * z_extent) + 0.5) * width   # z -> horizontal pixel
+    v = (py / range_m) * height                # y -> vertical pixel
+    
+    return u, v
+
+
+def generate_heatmap_target(py, pz, image_size=(512, 512), sigma=3.0, 
+                           range_m=20.0, fov_deg=120.0):
+    """
+    Generate Gaussian heatmap centered at hitpoint.
+    
+    Args:
+        py, pz: Hitpoint in meters
+        image_size: (H, W) 
+        sigma: Gaussian width in pixels
+        range_m: Maximum range
+        fov_deg: Field of view
+        
+    Returns:
+        heatmap: (H, W) with Gaussian peak at hitpoint
+    """
+    height, width = image_size
+    u_star, v_star = meters_to_pixels(py, pz, range_m, fov_deg, image_size)
+    
+    # Create coordinate grids
+    u = np.arange(width)
+    v = np.arange(height)
+    uu, vv = np.meshgrid(u, v)
+    
+    # Gaussian heatmap
+    heatmap = np.exp(-((uu - u_star)**2 + (vv - v_star)**2) / (2 * sigma**2))
+    
+    return heatmap.astype(np.float32)
+
+
+def generate_direction_target(py, pz, ty, tz, image_size=(512, 512), 
+                             radius=10, range_m=20.0, fov_deg=120.0):
+    """
+    Generate direction map with supervision only near hitpoint.
+    
+    Args:
+        py, pz: Hitpoint in meters
+        ty, tz: Direction unit vector
+        image_size: (H, W)
+        radius: Supervision radius in pixels
+        range_m: Maximum range
+        fov_deg: Field of view
+        
+    Returns:
+        direction_map: (2, H, W) - direction at each pixel
+        direction_mask: (H, W) - 1 where supervised, 0 elsewhere
+    """
+    height, width = image_size
+    u_star, v_star = meters_to_pixels(py, pz, range_m, fov_deg, image_size)
+    
+    # Create coordinate grids
+    u = np.arange(width)
+    v = np.arange(height)
+    uu, vv = np.meshgrid(u, v)
+    
+    # Mask: circle around hitpoint
+    dist_sq = (uu - u_star)**2 + (vv - v_star)**2
+    direction_mask = (dist_sq <= radius**2).astype(np.float32)
+    
+    # Direction map (broadcast direction to all supervised pixels)
+    direction_map = np.zeros((2, height, width), dtype=np.float32)
+    direction_map[0] = ty  # y-direction
+    direction_map[1] = tz  # z-direction
+    
+    return direction_map, direction_mask
+
+
 def polar_to_cartesian(polar_image, range_m=20.0, fov_deg=120.0, output_size=(512, 512)):
     """
-    Convert polar sonar image to Cartesian representation.
+    Convert polar sonar image to Cartesian representation with multiple channels.
     
     Args:
         polar_image: (range_bins, num_beams) polar sonar image
@@ -511,7 +602,11 @@ def polar_to_cartesian(polar_image, range_m=20.0, fov_deg=120.0, output_size=(51
         output_size: (height, width) of output Cartesian image
         
     Returns:
-        Cartesian image with zeros outside sonar cone
+        Multi-channel image (4, height, width):
+            [0] intensity: sonar intensity
+            [1] valid_mask: binary mask (1 where valid, 0 outside cone)
+            [2] y_map: y-coordinate in meters for each pixel
+            [3] z_map: z-coordinate in meters for each pixel (x in original frame)
     """
     num_range_bins, num_beams = polar_image.shape
     height, width = output_size
@@ -524,12 +619,12 @@ def polar_to_cartesian(polar_image, range_m=20.0, fov_deg=120.0, output_size=(51
     j_grid, i_grid = np.meshgrid(np.arange(width), np.arange(height))
     
     # Convert pixels to meters in sonar frame
-    x_m = (j_grid - width/2) * (2 * x_extent / width)
+    z_m = (j_grid - width/2) * (2 * x_extent / width)
     y_m = i_grid * (y_extent / height)  # No flip - row 0 is near, row N is far
     
     # Convert to polar coordinates
-    r_m = np.sqrt(x_m**2 + y_m**2)
-    theta_rad = np.arctan2(x_m, y_m)
+    r_m = np.sqrt(z_m**2 + y_m**2)
+    theta_rad = np.arctan2(z_m, y_m)
     
     # Create mask for points within sonar cone
     valid_mask = (r_m <= range_m) & (np.abs(theta_rad) <= np.deg2rad(fov_deg/2))
@@ -542,11 +637,19 @@ def polar_to_cartesian(polar_image, range_m=20.0, fov_deg=120.0, output_size=(51
     r_idx = np.clip(r_idx, 0, num_range_bins - 1)
     theta_idx = np.clip(theta_idx, 0, num_beams - 1)
     
-    # Create output image and fill valid pixels
-    cart_image = np.zeros((height, width), dtype=np.float32)
-    cart_image[valid_mask] = polar_image[r_idx[valid_mask], theta_idx[valid_mask]]
+    # Create multi-channel output
+    intensity = np.zeros((height, width), dtype=np.float32)
+    intensity[valid_mask] = polar_image[r_idx[valid_mask], theta_idx[valid_mask]]
     
-    return cart_image
+    # Stack all channels: [intensity, valid_mask, y_map, z_map]
+    multi_channel = np.stack([
+        intensity,
+        valid_mask.astype(np.float32),
+        y_m,
+        z_m
+    ], axis=0)
+    
+    return multi_channel
 
 
 def generate_sample(scene_id, sample_id):
@@ -632,7 +735,7 @@ def generate_sample(scene_id, sample_id):
         net_visible = True
         
         # Convert to sonar's local coordinate frame
-        # In sonar frame: Y-axis points forward (sonar direction), X-axis points right
+        # In sonar frame: Y-axis points forward (sonar direction), Z-axis points right
         relative_world = hit_point - position
         
         # Create rotation matrix from world to sonar frame
@@ -640,105 +743,263 @@ def generate_sample(scene_id, sample_id):
         forward = direction / np.linalg.norm(direction)
         right = np.array([-forward[1], forward[0]])  # Perpendicular, 90° counter-clockwise
         
-        # Transform hit point to sonar frame
-        hit_x_sonar = np.dot(relative_world, right)
-        hit_y_sonar = np.dot(relative_world, forward)
-        relative_position = np.array([hit_x_sonar, hit_y_sonar])
+        # Transform hit point to sonar frame (py, pz)
+        pz = np.dot(relative_world, right)
+        py = np.dot(relative_world, forward)
         
-        # Transform net direction to sonar frame
+        # Transform net direction to sonar frame (ty, tz) - unit vector
         x1, y1, x2, y2 = hit_segment
         net_dir_world = np.array([x2 - x1, y2 - y1])
         net_dir_world = net_dir_world / np.linalg.norm(net_dir_world)
         
-        net_x_sonar = np.dot(net_dir_world, right)
-        net_y_sonar = np.dot(net_dir_world, forward)
-        net_direction = np.array([net_x_sonar, net_y_sonar])
+        tz = np.dot(net_dir_world, right)
+        ty = np.dot(net_dir_world, forward)
+        
+        # Normalize to ensure unit vector (should already be, but ensure numerical stability)
+        net_norm = np.sqrt(ty**2 + tz**2)
+        ty = ty / net_norm
+        tz = tz / net_norm
     else:
         orientation = None
         net_visible = False
-        relative_position = None
-        net_direction = None
+        py = None
+        pz = None
+        ty = None
+        tz = None
     
-    label = {
+    # Prepare output dictionary
+    output = {
+        'image': sonar_image[0].astype(np.float32),      # Intensity channel (H, W)
+        'valid_mask': sonar_image[1].astype(np.float32), # Valid mask (H, W)
+        'y_map': sonar_image[2].astype(np.float32),      # Y coordinate map (H, W)
+        'z_map': sonar_image[3].astype(np.float32),      # Z coordinate map (H, W)
+        'net_visible': net_visible,
+        'p': np.array([py, pz], dtype=np.float32) if py is not None else None,
+        't': np.array([ty, tz], dtype=np.float32) if ty is not None else None,
+        # Derived metrics for evaluation
         'distance_m': float(distance) if distance is not None else None,
         'orientation_deg': float(orientation) if orientation is not None else None,
-        'net_visible': net_visible,
+        # Metadata
         'scene_id': scene_id,
         'sample_id': sample_id,
-        'sonar_position': position.tolist(),
-        'sonar_direction': direction.tolist(),
-        'cage_center': cage_center.tolist(),
-        'cage_radius': float(cage_radius),
-        # Cartesian coordinates
-        'hit_point_world': hit_point.tolist() if hit_point is not None else None,
-        'hit_point_relative': relative_position.tolist() if relative_position is not None else None,
-        'net_direction': net_direction.tolist() if net_direction is not None else None,
     }
     
-    return sonar_image.astype(np.float32), label
+    return output
 
 
-def visualize_sample(sonar_image, label, output_path):
+def apply_rotation_augmentation(output_dict, angle_deg):
+    """
+    Apply rotation augmentation to image and labels.
+    
+    Args:
+        output_dict: Dictionary from generate_sample() with image, p, t, etc.
+        angle_deg: Rotation angle in degrees (counter-clockwise)
+        
+    Returns:
+        rotated_dict: Updated dictionary with rotated data
+    """
+    if angle_deg == 0:
+        return output_dict.copy()
+    
+    angle_rad = np.deg2rad(angle_deg)
+    cos_a = np.cos(angle_rad)
+    sin_a = np.sin(angle_rad)
+    
+    rotated = output_dict.copy()
+    
+    # Rotate image channels
+    for key in ['image', 'valid_mask', 'y_map', 'z_map']:
+        channel = output_dict[key]
+        h, w = channel.shape
+        M = cv2.getRotationMatrix2D((w/2, h/2), angle_deg, 1.0)
+        rotated[key] = cv2.warpAffine(channel, M, (w, h), flags=cv2.INTER_LINEAR, borderValue=0)
+    
+    # Rotate coordinate map values
+    y_map = rotated['y_map']
+    z_map = rotated['z_map']
+    rotated['y_map'] = y_map * cos_a - z_map * sin_a
+    rotated['z_map'] = y_map * sin_a + z_map * cos_a
+    
+    # Rotate labels if net is visible
+    if output_dict.get('net_visible', False) and output_dict.get('p') is not None:
+        p = output_dict['p']  # [py, pz]
+        t = output_dict['t']  # [ty, tz]
+        
+        py, pz = p[0], p[1]
+        ty, tz = t[0], t[1]
+        
+        # Rotate hit point
+        py_rot = py * cos_a - pz * sin_a
+        pz_rot = py * sin_a + pz * cos_a
+        rotated['p'] = np.array([py_rot, pz_rot], dtype=np.float32)
+        
+        # Rotate net direction
+        ty_rot = ty * cos_a - tz * sin_a
+        tz_rot = ty * sin_a + tz * cos_a
+        rotated['t'] = np.array([ty_rot, tz_rot], dtype=np.float32)
+        
+        # Update derived metrics
+        rotated['distance_m'] = float(np.sqrt(py_rot**2 + pz_rot**2))
+        # Orientation relative to sonar
+        net_normal_angle = np.arctan2(tz_rot, ty_rot)
+        orientation_rad = net_normal_angle - np.pi/2
+        orientation_deg = np.degrees(orientation_rad)
+        while orientation_deg > 90:
+            orientation_deg -= 180
+        while orientation_deg < -90:
+            orientation_deg += 180
+        rotated['orientation_deg'] = float(orientation_deg)
+    
+    return rotated
+
+
+def visualize_sample(sample_data, output_path, show_heatmap=True):
     """
     Visualize a sonar sample with ground truth overlay in Cartesian coordinates.
     
     Args:
-        sonar_image: (height, width) Cartesian sonar image
-        label: Ground truth label dict
+        sample_data: Dictionary or .npz file with image, p, t, etc.
         output_path: Path to save visualization
+        show_heatmap: If True, shows heatmap overlay; if False, only shows line annotation
     """
-    fig, ax = plt.subplots(1, 1, figsize=(10, 10))
+    # Determine number of subplots
+    num_plots = 3 if show_heatmap else 1
+    fig, axes = plt.subplots(1, num_plots, figsize=(10 * num_plots, 10))
+    if num_plots == 1:
+        axes = [axes]
     
-    height, width = sonar_image.shape
+    # Handle both dict and npz formats
+    if isinstance(sample_data, dict):
+        intensity = sample_data.get('image')
+        p = sample_data.get('p')
+        t = sample_data.get('t')
+        net_visible = sample_data.get('net_visible', False)
+        distance_m = sample_data.get('distance_m')
+        orientation_deg = sample_data.get('orientation_deg')
+        sample_id = sample_data.get('sample_id', 0)
+    else:
+        # Assume npz file
+        intensity = sample_data['image']
+        p = sample_data['p'] if sample_data['net_visible'] else None
+        t = sample_data['t'] if sample_data['net_visible'] else None
+        net_visible = sample_data['net_visible']
+        distance_m = sample_data.get('distance_m')
+        orientation_deg = sample_data.get('orientation_deg')
+        sample_id = sample_data.get('sample_id', 0)
+    
+    height, width = intensity.shape
     
     # Set dark grey background
-    ax.set_facecolor('#2a2a2a')
+    for ax in axes:
+        ax.set_facecolor('#2a2a2a')
     fig.patch.set_facecolor('#2a2a2a')
     
-    # Display sonar image
-    # Map image coordinates to world meters
-    # Calculate extent based on FOV: at 20m with 120° FOV, x extends to ±18.2m
+    # Calculate extent based on FOV: at 20m with 120° FOV, z extends to ±18.2m
     range_m = 20.0
     fov_deg = 120.0
-    x_max = range_m * np.sin(np.deg2rad(fov_deg / 2)) * 1.05
-    ax.imshow(sonar_image, cmap='gray', vmin=0, vmax=1, 
-              extent=[-x_max, x_max, 0, range_m], origin='lower', aspect='auto')
+    z_max = range_m * np.sin(np.deg2rad(fov_deg / 2)) * 1.05
+    extent = [-z_max, z_max, 0, range_m]
+    
+    # Generate heatmap if requested
+    heatmap = None
+    if show_heatmap and net_visible and p is not None:
+        heatmap = generate_heatmap_target(
+            p, 
+            image_size=(height, width),
+            sigma_pixels=DATA_GEN_CONFIG['heatmap_sigma_pixels']
+        )
+    
+    # Plot 1: Original image with line annotation
+    ax = axes[0]
+    ax.imshow(intensity, cmap='gray', vmin=0, vmax=1, 
+              extent=extent, origin='lower', aspect='auto')
     
     # Overlay ground truth (if net is visible)
-    if label.get('net_visible', False) and label.get('hit_point_relative') is not None:
-        hit_rel = np.array(label['hit_point_relative'])
-        net_dir = np.array(label['net_direction']) if label.get('net_direction') is not None else None
+    if net_visible and p is not None:
+        py, pz = p[0], p[1]
         
         # Draw hit point (small red dot)
-        ax.plot(hit_rel[0], hit_rel[1], 'ro', markersize=6, alpha=0.9, zorder=10)
+        ax.plot(pz, py, 'ro', markersize=8, alpha=0.9, zorder=10)
         
         # Draw the net line segment
-        if net_dir is not None:
+        if t is not None:
+            ty, tz = t[0], t[1]
             net_line_length = 4.0  # meters
             half_length = net_line_length / 2
             
             # Compute endpoints of net line
-            p1 = hit_rel - half_length * net_dir
-            p2 = hit_rel + half_length * net_dir
+            p1_y = py - half_length * ty
+            p1_z = pz - half_length * tz
+            p2_y = py + half_length * ty
+            p2_z = pz + half_length * tz
             
-            ax.plot([p1[0], p2[0]], [p1[1], p2[1]], 'r-', 
-                   linewidth=2, alpha=0.9, zorder=10)
+            ax.plot([p1_z, p2_z], [p1_y, p2_y], 'r-', 
+                   linewidth=2.5, alpha=0.9, zorder=10, label='Net line')
         
-        distance = label.get('distance_m', 0)
-        orientation_deg = label.get('orientation_deg', 0)
-        title = f'Sample {label["sample_id"]} | d={distance:.2f}m | θ={orientation_deg:+.0f}°'
+        title = f'Original | d={distance_m:.2f}m | θ={orientation_deg:+.0f}°'
     else:
-        title = f'Sample {label["sample_id"]} | NO NET'
+        title = f'Sample {sample_id} | NO NET'
     
-    # Formatting
-    ax.set_xlim(-x_max, x_max)
+    ax.set_xlim(-z_max, z_max)
     ax.set_ylim(0, range_m)
     ax.set_aspect('equal')
-    ax.set_xlabel('X (m)', color='white', fontsize=10)
+    ax.set_xlabel('Z (m)', color='white', fontsize=10)
     ax.set_ylabel('Y (m)', color='white', fontsize=10)
     ax.set_title(title, fontsize=12, pad=15, color='white')
     ax.grid(True, alpha=0.2, linewidth=0.5, color='white')
     ax.tick_params(colors='white')
+    
+    if show_heatmap and heatmap is not None:
+        # Plot 2: Heatmap only
+        ax = axes[1]
+        im = ax.imshow(heatmap, cmap='hot', vmin=0, vmax=1,
+                      extent=extent, origin='lower', aspect='auto')
+        
+        # Mark peak location
+        py, pz = p[0], p[1]
+        ax.plot(pz, py, 'g*', markersize=15, alpha=0.9, zorder=10, label='Peak')
+        
+        ax.set_xlim(-z_max, z_max)
+        ax.set_ylim(0, range_m)
+        ax.set_aspect('equal')
+        ax.set_xlabel('Z (m)', color='white', fontsize=10)
+        ax.set_ylabel('Y (m)', color='white', fontsize=10)
+        ax.set_title(f'Heatmap Target (σ={DATA_GEN_CONFIG["heatmap_sigma_pixels"]:.1f}px)', 
+                    fontsize=12, pad=15, color='white')
+        ax.grid(True, alpha=0.2, linewidth=0.5, color='white')
+        ax.tick_params(colors='white')
+        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        
+        # Plot 3: Overlay
+        ax = axes[2]
+        ax.imshow(intensity, cmap='gray', vmin=0, vmax=1, 
+                 extent=extent, origin='lower', aspect='auto')
+        im = ax.imshow(heatmap, cmap='hot', alpha=0.5, vmin=0, vmax=1,
+                      extent=extent, origin='lower', aspect='auto')
+        
+        # Draw hit point and net line
+        ax.plot(pz, py, 'ro', markersize=8, alpha=0.9, zorder=10, label='Hitpoint')
+        
+        if t is not None:
+            ty, tz = t[0], t[1]
+            net_line_length = 4.0
+            half_length = net_line_length / 2
+            p1_y = py - half_length * ty
+            p1_z = pz - half_length * tz
+            p2_y = py + half_length * ty
+            p2_z = pz + half_length * tz
+            ax.plot([p1_z, p2_z], [p1_y, p2_y], 'r-', 
+                   linewidth=2.5, alpha=0.9, zorder=10, label='Net line')
+        
+        ax.set_xlim(-z_max, z_max)
+        ax.set_ylim(0, range_m)
+        ax.set_aspect('equal')
+        ax.set_xlabel('Z (m)', color='white', fontsize=10)
+        ax.set_ylabel('Y (m)', color='white', fontsize=10)
+        ax.set_title('Overlay (Image + Heatmap)', fontsize=12, pad=15, color='white')
+        ax.grid(True, alpha=0.2, linewidth=0.5, color='white')
+        ax.tick_params(colors='white')
+        ax.legend(loc='upper right', fontsize=9, framealpha=0.8)
     
     plt.tight_layout()
     plt.savefig(output_path, dpi=100, bbox_inches='tight', facecolor='#2a2a2a')
@@ -769,37 +1030,58 @@ def generate_dataset(split='train', num_samples=None):
     
     for i in tqdm(range(num_samples)):
         # Generate sample
-        sonar_image, label = generate_sample(scene_id=i, sample_id=i)
+        sample_data = generate_sample(scene_id=i, sample_id=i)
         
-        # Save image
-        image_path = output_dir / f"sample_{i:06d}.npy"
-        np.save(image_path, sonar_image)
-        
-        # Save label
-        label_path = output_dir / f"sample_{i:06d}.json"
-        with open(label_path, 'w') as f:
-            json.dump(label, f, indent=2)
+        # Save as compressed .npz
+        sample_path = output_dir / f"sample_{i:06d}.npz"
+        np.savez_compressed(sample_path, **sample_data)
         
         # Save visualization for every 10th sample
         if i % 10 == 0:
             viz_path = images_dir / f"sample_{i:06d}.png"
-            visualize_sample(sonar_image, label, viz_path)
+            visualize_sample(sample_data, viz_path)
     
     print(f"✓ Generated {num_samples} samples")
     print(f"✓ Saved {num_samples // 10} visualization images")
     
-    # Save dataset info
-    info = {
-        'split': split,
-        'num_samples': num_samples,
+    # Save dataset metadata
+    save_dataset_metadata(output_dir)
+
+
+def save_dataset_metadata(output_dir):
+    """Save pixel-to-meters mapping and other constants."""
+    range_m = SONAR_CONFIG['range_m']
+    fov_deg = SONAR_CONFIG['fov_deg']
+    image_size = DATA_GEN_CONFIG['image_size']
+    
+    z_extent = range_m * np.sin(np.deg2rad(fov_deg / 2)) * 1.05
+    height, width = image_size
+    
+    metadata = {
+        'image_size': image_size,
+        'range_m': range_m,
+        'fov_deg': fov_deg,
+        'z_extent': z_extent,
+        'pixel_to_meters': {
+            'y': range_m / height,
+            'z': 2 * z_extent / width,
+        },
+        'origin_pixel': {
+            'u': width / 2,  # z=0 is at center horizontally
+            'v': 0,          # y=0 is at bottom
+        },
+        'heatmap_sigma': DATA_GEN_CONFIG['heatmap_sigma_pixels'],
+        'direction_radius': DATA_GEN_CONFIG['direction_radius_pixels'],
         'sonar_config': SONAR_CONFIG,
         'scene_config': SCENE_CONFIG,
         'data_gen_config': DATA_GEN_CONFIG,
     }
     
-    info_path = output_dir / 'dataset_info.json'
-    with open(info_path, 'w') as f:
-        json.dump(info, f, indent=2)
+    metadata_path = output_dir / 'dataset_metadata.json'
+    with open(metadata_path, 'w') as f:
+        json.dump(metadata, f, indent=2)
+    
+    print(f"✓ Saved dataset metadata to {metadata_path}")
 
 
 def main():

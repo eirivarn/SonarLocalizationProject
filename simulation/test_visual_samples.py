@@ -17,40 +17,28 @@ def main():
     
     print(f"Generating {num_samples} samples in scene {scene_id}...")
     
-    inside_count = 0
     visible_count = 0
     distances = []
     
     for i in range(num_samples):
-        img, label = generate_sample(scene_id, i)
+        sample_data = generate_sample(scene_id, i)
         
-        # Check if inside cage
-        pos = np.array(label['sonar_position'])
-        cage_center = np.array(label['cage_center'])
-        cage_radius = label['cage_radius']
-        dist_from_center = np.linalg.norm(pos - cage_center)
-        is_inside = dist_from_center < cage_radius
-        
-        if is_inside:
-            inside_count += 1
-        
-        if label['net_visible']:
+        if sample_data['net_visible']:
             visible_count += 1
-            distances.append(label['distance_m'])
+            distances.append(sample_data['distance_m'])
         
         output_path = f"{output_dir}/sample_{i:03d}.png"
-        visualize_sample(img, label, output_path)
+        visualize_sample(sample_data, output_path)
         
-        status = "✓" if label['net_visible'] else "✗"
-        location = "IN" if is_inside else "OUT"
-        if label['net_visible']:
-            print(f"  Sample {i}: {status} [{location:3s}] Net @ {label['distance_m']:.2f}m, {label['orientation_deg']:+.1f}°")
+        status = "✓" if sample_data['net_visible'] else "✗"
+        if sample_data['net_visible']:
+            py, pz = sample_data['p']
+            print(f"  Sample {i}: {status} Net @ {sample_data['distance_m']:.2f}m, {sample_data['orientation_deg']:+.1f}° | p=({py:.2f}, {pz:.2f})")
         else:
-            print(f"  Sample {i}: {status} [{location:3s}] No net visible")
+            print(f"  Sample {i}: {status} No net visible")
     
     print(f"\nSamples saved to {output_dir}/")
     print(f"\nStatistics:")
-    print(f"  Inside cage: {inside_count}/{num_samples} ({100*inside_count/num_samples:.0f}%)")
     print(f"  Net visible: {visible_count}/{num_samples} ({100*visible_count/num_samples:.0f}%)")
     if distances:
         in_range = sum(1 <= d <= 5 for d in distances)

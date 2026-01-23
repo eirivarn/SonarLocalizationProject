@@ -8,6 +8,7 @@ from pathlib import Path
 # ============================================================================
 SIMULATION_DIR = Path(__file__).parent
 DATASET_DIR = SIMULATION_DIR / "datasets"
+DATASET_PATH = DATASET_DIR  # Alias for compatibility
 MODELS_DIR = SIMULATION_DIR / "models_saved"
 RESULTS_DIR = SIMULATION_DIR / "results"
 
@@ -64,9 +65,14 @@ DATA_GEN_CONFIG = {
     'current_range': [3.0, 10.0],     # Current strength variation
     
     # Output format
-    'save_format': 'npy',              # 'npy' or 'png'
+    'save_format': 'npz',              # 'npz' for heatmap training
     'normalize': True,                 # Normalize images to [0, 1]
     'log_scale': True,                 # Apply log scaling
+    
+    # Heatmap training parameters
+    'image_size': (512, 512),          # Cartesian image size
+    'heatmap_sigma_pixels': 3.0,       # Gaussian width for heatmap
+    'direction_radius_pixels': 10,     # Supervision radius for direction
 }
 
 # ============================================================================

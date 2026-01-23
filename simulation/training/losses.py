@@ -1,162 +1,128 @@
-"""
-Custom loss functions for net detection.
-"""
+"""Loss functions for heatmap-based net detection."""
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
-class NetDetectionLoss(nn.Module):
-    """
-    Combined loss for distance and orientation prediction.
+class FocalLoss(nn.Module):
+    """Focal Loss for heatmap prediction."""
     
-    Loss = w_dist * MSE(distance) + w_orient * CircularLoss(orientation)
-    """
-    
-    def __init__(self, distance_weight=1.0, orientation_weight=1.0):
+    def __init__(self, alpha=0.25, gamma=2.0):
         super().__init__()
-        self.distance_weight = distance_weight
-        self.orientation_weight = orientation_weight
+        self.alpha = alpha
+        self.gamma = gamma
     
     def forward(self, pred, target):
         """
         Args:
-            pred: dict with 'distance' (B,) and 'orientation' (B, 2) [sin, cos]
-            target: dict with 'distance' (B,), 'orientation_sin' (B,), 'orientation_cos' (B,)
-            
-        Returns:
-            loss: scalar tensor
-            metrics: dict with individual loss components
+            pred: (B, 1, H, W) predicted logits
+            target: (B, 1, H, W) target heatmap [0, 1]
         """
-        # Distance loss (MSE)
-        distance_loss = F.mse_loss(pred['distance'], target['distance'])
+        pred = pred.sigmoid()
         
-        # Orientation loss (circular MSE on sin/cos)
-        pred_sin = pred['orientation'][:, 0]
-        pred_cos = pred['orientation'][:, 1]
+        # Focal weight
+        pt = torch.where(target == 1, pred, 1 - pred)
+        focal_weight = (1 - pt).pow(self.gamma)
         
-        target_sin = target['orientation_sin']
-        target_cos = target['orientation_cos']
+        # BCE
+        bce = F.binary_cross_entropy(pred, target, reduction='none')
         
-        # MSE on both sin and cos
-        orientation_loss = F.mse_loss(pred_sin, target_sin) + F.mse_loss(pred_cos, target_cos)
+        # Focal loss
+        loss = self.alpha * focal_weight * bce
         
-        # Combined loss
+        return loss.mean()
+
+
+class CosineDirectionLoss(nn.Module):
+    """Cosine-based loss for direction prediction with masking."""
+    
+    def __init__(self, norm_penalty=0.1):
+        super().__init__()
+        self.norm_penalty = norm_penalty
+    
+    def forward(self, pred, target, mask):
+        """
+        Args:
+            pred: (B, 2, H, W) predicted direction
+            target: (B, 2, H, W) target direction
+            mask: (B, H, W) supervision mask
+        """
+        # Only compute loss where mask is 1
+        mask = mask.unsqueeze(1)  # (B, 1, H, W)
+        
+        if mask.sum() == 0:
+            return torch.tensor(0.0, device=pred.device)
+        
+        # Normalize predictions
+        pred_norm = torch.sqrt((pred ** 2).sum(dim=1, keepdim=True) + 1e-6)
+        pred_normalized = pred / pred_norm
+        
+        # Cosine similarity
+        cosine_sim = (pred_normalized * target).sum(dim=1, keepdim=True)  # (B, 1, H, W)
+        
+        # Cosine loss (1 - similarity)
+        cosine_loss = (1 - cosine_sim) * mask
+        cosine_loss = cosine_loss.sum() / mask.sum()
+        
+        # Unit norm penalty
+        norm_loss = ((pred_norm - 1) ** 2) * mask
+        norm_loss = norm_loss.sum() / mask.sum()
+        
+        return cosine_loss + self.norm_penalty * norm_loss
+
+
+class NetDetectionLoss(nn.Module):
+    """Combined loss for heatmap + direction + visibility."""
+    
+    def __init__(self, 
+                 heatmap_weight=1.0,
+                 direction_weight=0.5,
+                 visibility_weight=0.2,
+                 focal_alpha=0.25,
+                 focal_gamma=2.0):
+        super().__init__()
+        self.heatmap_weight = heatmap_weight
+        self.direction_weight = direction_weight
+        self.visibility_weight = visibility_weight
+        
+        self.heatmap_loss_fn = FocalLoss(alpha=focal_alpha, gamma=focal_gamma)
+        self.direction_loss_fn = CosineDirectionLoss(norm_penalty=0.1)
+        self.visibility_loss_fn = nn.BCEWithLogitsLoss()
+    
+    def forward(self, pred, target):
+        """
+        Args:
+            pred: dict with 'heatmap', 'direction', 'visibility'
+            target: dict with 'heatmap', 'direction', 'direction_mask', 'net_visible'
+        """
+        # Heatmap loss
+        heatmap_loss = self.heatmap_loss_fn(pred['heatmap'], target['heatmap'])
+        
+        # Direction loss (masked)
+        direction_loss = self.direction_loss_fn(
+            pred['direction'], 
+            target['direction'], 
+            target['direction_mask']
+        )
+        
+        # Visibility loss
+        visibility_loss = self.visibility_loss_fn(
+            pred['visibility'].squeeze(-1),
+            target['net_visible']
+        )
+        
+        # Total loss
         total_loss = (
-            self.distance_weight * distance_loss +
-            self.orientation_weight * orientation_loss
+            self.heatmap_weight * heatmap_loss +
+            self.direction_weight * direction_loss +
+            self.visibility_weight * visibility_loss
         )
         
         metrics = {
             'loss': total_loss.item(),
-            'distance_loss': distance_loss.item(),
-            'orientation_loss': orientation_loss.item(),
+            'heatmap_loss': heatmap_loss.item(),
+            'direction_loss': direction_loss.item(),
+            'visibility_loss': visibility_loss.item(),
         }
         
         return total_loss, metrics
-
-
-def compute_orientation_error(pred_sin, pred_cos, target_sin, target_cos):
-    """
-    Compute angular error in degrees.
-    
-    Args:
-        pred_sin, pred_cos: Predicted sin/cos (B,)
-        target_sin, target_cos: Target sin/cos (B,)
-        
-    Returns:
-        errors: Angular errors in degrees (B,)
-    """
-    # Compute predicted and target angles
-    pred_angle = torch.atan2(pred_sin, pred_cos)
-    target_angle = torch.atan2(target_sin, target_cos)
-    
-    # Compute angular difference (handle wraparound)
-    diff = pred_angle - target_angle
-    diff = torch.atan2(torch.sin(diff), torch.cos(diff))
-    
-    # Convert to degrees
-    errors = torch.abs(torch.rad2deg(diff))
-    
-    return errors
-
-
-def compute_metrics(pred, target):
-    """
-    Compute evaluation metrics.
-    
-    Args:
-        pred: dict with 'distance' and 'orientation' [sin, cos]
-        target: dict with 'distance', 'orientation_sin', 'orientation_cos'
-        
-    Returns:
-        metrics: dict with MAE for distance and orientation
-    """
-    # Distance MAE
-    distance_mae = torch.mean(torch.abs(pred['distance'] - target['distance']))
-    
-    # Orientation MAE
-    orientation_errors = compute_orientation_error(
-        pred['orientation'][:, 0],
-        pred['orientation'][:, 1],
-        target['orientation_sin'],
-        target['orientation_cos']
-    )
-    orientation_mae = torch.mean(orientation_errors)
-    
-    metrics = {
-        'distance_mae': distance_mae.item(),
-        'orientation_mae': orientation_mae.item(),
-    }
-    
-    return metrics
-
-
-if __name__ == '__main__':
-    """Test loss functions."""
-    
-    # Create dummy predictions and targets
-    batch_size = 4
-    
-    pred = {
-        'distance': torch.tensor([1.5, 2.0, 3.5, 1.0]),
-        'orientation': torch.tensor([
-            [0.0, 1.0],   # 0°
-            [0.707, 0.707],  # 45°
-            [1.0, 0.0],   # 90°
-            [-0.707, 0.707], # 135°
-        ])
-    }
-    
-    target = {
-        'distance': torch.tensor([1.6, 2.1, 3.4, 0.9]),
-        'orientation_sin': torch.tensor([0.0, 0.707, 1.0, -0.707]),
-        'orientation_cos': torch.tensor([1.0, 0.707, 0.0, 0.707]),
-    }
-    
-    # Test loss
-    criterion = NetDetectionLoss(distance_weight=1.0, orientation_weight=1.0)
-    loss, loss_metrics = criterion(pred, target)
-    
-    print("Loss Metrics:")
-    print(f"  Total loss: {loss:.4f}")
-    print(f"  Distance loss: {loss_metrics['distance_loss']:.4f}")
-    print(f"  Orientation loss: {loss_metrics['orientation_loss']:.4f}")
-    
-    # Test metrics
-    metrics = compute_metrics(pred, target)
-    
-    print("\nEvaluation Metrics:")
-    print(f"  Distance MAE: {metrics['distance_mae']:.4f}m")
-    print(f"  Orientation MAE: {metrics['orientation_mae']:.4f}°")
-    
-    # Test orientation error computation
-    errors = compute_orientation_error(
-        pred['orientation'][:, 0],
-        pred['orientation'][:, 1],
-        target['orientation_sin'],
-        target['orientation_cos']
-    )
-    print(f"\nIndividual orientation errors: {errors}")
-    
-    print("\n✓ Loss functions work!")
