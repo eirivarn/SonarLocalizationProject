@@ -13,10 +13,10 @@ import matplotlib.patches as patches
 import cv2
 
 # Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from simulation import VoxelGrid, VoxelSonar, Material, EMPTY, NET, ROPE, FISH, BIOMASS
-from config import (
+from .simulation import VoxelGrid, VoxelSonar, Material, EMPTY, NET, ROPE, FISH, BIOMASS
+from .config import (
     SONAR_CONFIG, SCENE_CONFIG, DATA_GEN_CONFIG, DATASET_DIR
 )
 

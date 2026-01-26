@@ -11,12 +11,12 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import sys
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from simulation import FISH, NET, ROPE, BIOMASS
-from config import SONAR_CONFIG, SCENE_CONFIG, DATA_GEN_CONFIG, DATASET_DIR
-from data_generator import create_random_scene, generate_random_sonar_position, polar_to_cartesian, _trajectory_state
-from semantic_segmentation import (
+from core import FISH, NET, ROPE, BIOMASS
+from core import SONAR_CONFIG, SCENE_CONFIG, DATA_GEN_CONFIG, DATASET_DIR
+from core import create_random_scene, generate_random_sonar_position, polar_to_cartesian, _trajectory_state
+from core import (
     VoxelGridWithMaterials, VoxelSonarWithSegmentation, 
     MATERIAL_IDS, MATERIAL_COLORS, create_semantic_visualization
 )

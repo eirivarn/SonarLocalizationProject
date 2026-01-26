@@ -10,11 +10,11 @@ import matplotlib.patches as patches
 from pathlib import Path
 import sys
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from simulation import VoxelGrid, VoxelSonar, Material, EMPTY, NET, ROPE, FISH, BIOMASS, DEBRIS_LIGHT, DEBRIS_MEDIUM, DEBRIS_HEAVY
-from config import SONAR_CONFIG, SCENE_CONFIG, DATA_GEN_CONFIG
-from data_generator import create_random_scene, generate_random_sonar_position, polar_to_cartesian, _trajectory_state
+from .simulation import VoxelGrid, VoxelSonar, Material, EMPTY, NET, ROPE, FISH, BIOMASS, DEBRIS_LIGHT, DEBRIS_MEDIUM, DEBRIS_HEAVY
+from .config import SONAR_CONFIG, SCENE_CONFIG, DATA_GEN_CONFIG
+from .data_generator import create_random_scene, generate_random_sonar_position, polar_to_cartesian, _trajectory_state
 
 
 # Material ID mapping

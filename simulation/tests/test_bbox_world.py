@@ -18,16 +18,19 @@ Integration with data_generator.py:
 import numpy as np
 from pathlib import Path
 from tqdm import tqdm
+import sys
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 # Import real simulation world
-from data_generator import generate_random_sonar_position, polar_to_cartesian
-from config import SONAR_CONFIG, DATA_GEN_CONFIG, SCENE_CONFIG
-from semantic_segmentation import VoxelSonarWithSegmentation, VoxelGridWithMaterials
-from bbox_from_segmentation import (
+from core import generate_random_sonar_position, polar_to_cartesian
+from core import SONAR_CONFIG, DATA_GEN_CONFIG, SCENE_CONFIG
+from core import VoxelSonarWithSegmentation, VoxelGridWithMaterials
+from bbox.bbox_from_segmentation import (
     compute_bbox_from_segmentation, polar_to_cartesian_segmentation,
     visualize_bbox_sample, MATERIAL_IDS
 )
-from simulation import NET, ROPE, FISH, BIOMASS, DEBRIS_LIGHT, DEBRIS_MEDIUM, DEBRIS_HEAVY
+from core import NET, ROPE, FISH, BIOMASS, DEBRIS_LIGHT, DEBRIS_MEDIUM, DEBRIS_HEAVY
 
 
 def create_realistic_scene_with_materials(seed=None):
