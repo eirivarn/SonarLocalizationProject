@@ -225,17 +225,11 @@ def generate_sample_with_bbox(scene_id, sample_id):
     
     polar_intensity, polar_segmentation = sonar.scan_with_segmentation(grid)
     
-    print(f"DEBUG: polar_intensity shape: {polar_intensity.shape}")
-    print(f"DEBUG: polar_segmentation shape: {polar_segmentation.shape}")
-    
     # Convert to Cartesian
     cart_intensity = polar_to_cartesian(polar_intensity)
     
     # Convert segmentation separately (no interpolation, preserve integer labels)
     cart_segmentation = polar_to_cartesian_segmentation(polar_segmentation)
-    
-    print(f"DEBUG: cart_intensity shape: {cart_intensity.shape}")
-    print(f"DEBUG: cart_segmentation shape: {cart_segmentation.shape}")
     
     # Compute bounding box from segmentation
     bbox = compute_bbox_from_segmentation(cart_segmentation, material_id=MATERIAL_IDS['net'])
@@ -252,8 +246,6 @@ def generate_sample_with_bbox(scene_id, sample_id):
         'scene_id': scene_id,
         'sample_id': sample_id,
     }
-    
-    print(f"DEBUG: Before return, output['segmentation'] shape: {output['segmentation'].shape}")
     
     return output
 
