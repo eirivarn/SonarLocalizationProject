@@ -20,6 +20,10 @@ from utils.config import IMAGE_PROCESSING_CONFIG, TRACKING_CONFIG
 from utils.image_enhancement import adaptive_linear_momentum_merge_fast
 from utils.sonar_tracking import NetTracker
 
+# Import simulation config
+sys.path.insert(0, str(Path(__file__).parent))
+from config import MATERIAL_CONFIG
+
 
 @dataclass
 class Material:
@@ -30,16 +34,32 @@ class Material:
     absorption: float       # 0-1: how much energy is absorbed per meter
     
 
-# Material library
+# Material library - load from config
 EMPTY = Material("empty", 0.0, 0.0, 0.0)
-NET = Material("net", 0.3, 0.2, 0.15)  # Light absorption - nets are thin and sparse
-ROPE = Material("rope", 0.8, 0.4, 0.8)  # Strong absorption
-FISH = Material("fish", 0.7, 0.5, 0.6)  # Fish cast shadows
-WALL = Material("wall", 1.0, 0.5, 1.0)
-BIOMASS = Material("biomass", 0.9, 0.7, 0.4)  # Algae/fouling - very bright, moderate shadow
-DEBRIS_LIGHT = Material("debris_light", 0.8, 0.6, 0.3)  # Light debris - bright
-DEBRIS_MEDIUM = Material("debris_medium", 0.9, 0.7, 0.7)  # Medium debris - brighter
-DEBRIS_HEAVY = Material("debris_heavy", 1.0, 0.8, 1.2)  # Heavy debris - very bright
+NET = Material("net", MATERIAL_CONFIG['net']['reflectivity'], 
+               MATERIAL_CONFIG['net']['scattering'], 
+               MATERIAL_CONFIG['net']['absorption'])
+ROPE = Material("rope", MATERIAL_CONFIG['rope']['reflectivity'], 
+                MATERIAL_CONFIG['rope']['scattering'], 
+                MATERIAL_CONFIG['rope']['absorption'])
+FISH = Material("fish", MATERIAL_CONFIG['fish']['reflectivity'], 
+                MATERIAL_CONFIG['fish']['scattering'], 
+                MATERIAL_CONFIG['fish']['absorption'])
+WALL = Material("wall", MATERIAL_CONFIG['wall']['reflectivity'], 
+                MATERIAL_CONFIG['wall']['scattering'], 
+                MATERIAL_CONFIG['wall']['absorption'])
+BIOMASS = Material("biomass", MATERIAL_CONFIG['biomass']['reflectivity'], 
+                   MATERIAL_CONFIG['biomass']['scattering'], 
+                   MATERIAL_CONFIG['biomass']['absorption'])
+DEBRIS_LIGHT = Material("debris_light", MATERIAL_CONFIG['debris_light']['reflectivity'], 
+                        MATERIAL_CONFIG['debris_light']['scattering'], 
+                        MATERIAL_CONFIG['debris_light']['absorption'])
+DEBRIS_MEDIUM = Material("debris_medium", MATERIAL_CONFIG['debris_medium']['reflectivity'], 
+                         MATERIAL_CONFIG['debris_medium']['scattering'], 
+                         MATERIAL_CONFIG['debris_medium']['absorption'])
+DEBRIS_HEAVY = Material("debris_heavy", MATERIAL_CONFIG['debris_heavy']['reflectivity'], 
+                        MATERIAL_CONFIG['debris_heavy']['scattering'], 
+                        MATERIAL_CONFIG['debris_heavy']['absorption'])
 
 
 class VoxelGrid:

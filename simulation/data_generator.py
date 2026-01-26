@@ -501,20 +501,28 @@ def generate_random_sonar_position(cage_center, cage_radius, distance_range, ang
 _trajectory_state = {}
 
 
-def meters_to_pixels(py, pz, range_m=20.0, fov_deg=120.0, image_size=(512, 512)):
+def meters_to_pixels(py, pz, range_m=None, fov_deg=None, image_size=None):
     """
     Convert meter coordinates to pixel coordinates.
+    Uses config defaults if not specified.
     
     Args:
         py: Y coordinate in meters (forward)
         pz: Z coordinate in meters (lateral)
-        range_m: Maximum range
-        fov_deg: Field of view
-        image_size: (height, width) of image
+        range_m: Maximum range (default: from config)
+        fov_deg: Field of view (default: from config)
+        image_size: (height, width) of image (default: from config)
         
     Returns:
         u, v: Pixel coordinates (u=horizontal, v=vertical)
     """
+    if range_m is None:
+        range_m = SONAR_CONFIG['range_m']
+    if fov_deg is None:
+        fov_deg = SONAR_CONFIG['fov_deg']
+    if image_size is None:
+        image_size = DATA_GEN_CONFIG['image_size']
+    
     height, width = image_size
     z_extent = range_m * np.sin(np.deg2rad(fov_deg / 2)) * 1.05
     
@@ -525,21 +533,31 @@ def meters_to_pixels(py, pz, range_m=20.0, fov_deg=120.0, image_size=(512, 512))
     return u, v
 
 
-def generate_heatmap_target(py, pz, image_size=(512, 512), sigma=3.0, 
-                           range_m=20.0, fov_deg=120.0):
+def generate_heatmap_target(py, pz, image_size=None, sigma=None, 
+                           range_m=None, fov_deg=None):
     """
     Generate Gaussian heatmap centered at hitpoint.
+    Uses config defaults if not specified.
     
     Args:
         py, pz: Hitpoint in meters
-        image_size: (H, W) 
-        sigma: Gaussian width in pixels
-        range_m: Maximum range
-        fov_deg: Field of view
+        image_size: (H, W) (default: from config)
+        sigma: Gaussian width in pixels (default: from config)
+        range_m: Maximum range (default: from config)
+        fov_deg: Field of view (default: from config)
         
     Returns:
         heatmap: (H, W) with Gaussian peak at hitpoint
     """
+    if image_size is None:
+        image_size = DATA_GEN_CONFIG['image_size']
+    if sigma is None:
+        sigma = DATA_GEN_CONFIG['heatmap_sigma_pixels']
+    if range_m is None:
+        range_m = SONAR_CONFIG['range_m']
+    if fov_deg is None:
+        fov_deg = SONAR_CONFIG['fov_deg']
+    
     height, width = image_size
     u_star, v_star = meters_to_pixels(py, pz, range_m, fov_deg, image_size)
     
@@ -554,23 +572,33 @@ def generate_heatmap_target(py, pz, image_size=(512, 512), sigma=3.0,
     return heatmap.astype(np.float32)
 
 
-def generate_direction_target(py, pz, ty, tz, image_size=(512, 512), 
-                             radius=10, range_m=20.0, fov_deg=120.0):
+def generate_direction_target(py, pz, ty, tz, image_size=None, 
+                             radius=None, range_m=None, fov_deg=None):
     """
     Generate direction map with supervision only near hitpoint.
+    Uses config defaults if not specified.
     
     Args:
         py, pz: Hitpoint in meters
         ty, tz: Direction unit vector
-        image_size: (H, W)
-        radius: Supervision radius in pixels
-        range_m: Maximum range
-        fov_deg: Field of view
+        image_size: (H, W) (default: from config)
+        radius: Supervision radius in pixels (default: from config)
+        range_m: Maximum range (default: from config)
+        fov_deg: Field of view (default: from config)
         
     Returns:
         direction_map: (2, H, W) - direction at each pixel
         direction_mask: (H, W) - 1 where supervised, 0 elsewhere
     """
+    if image_size is None:
+        image_size = DATA_GEN_CONFIG['image_size']
+    if radius is None:
+        radius = DATA_GEN_CONFIG['direction_radius_pixels']
+    if range_m is None:
+        range_m = SONAR_CONFIG['range_m']
+    if fov_deg is None:
+        fov_deg = SONAR_CONFIG['fov_deg']
+    
     height, width = image_size
     u_star, v_star = meters_to_pixels(py, pz, range_m, fov_deg, image_size)
     
@@ -591,15 +619,16 @@ def generate_direction_target(py, pz, ty, tz, image_size=(512, 512),
     return direction_map, direction_mask
 
 
-def polar_to_cartesian(polar_image, range_m=20.0, fov_deg=120.0, output_size=(512, 512)):
+def polar_to_cartesian(polar_image, range_m=None, fov_deg=None, output_size=None):
     """
     Convert polar sonar image to Cartesian representation with multiple channels.
+    Uses config defaults if not specified.
     
     Args:
         polar_image: (range_bins, num_beams) polar sonar image
-        range_m: Maximum range in meters
-        fov_deg: Field of view in degrees
-        output_size: (height, width) of output Cartesian image
+        range_m: Maximum range in meters (default: from config)
+        fov_deg: Field of view in degrees (default: from config)
+        output_size: (height, width) of output Cartesian image (default: from config)
         
     Returns:
         Multi-channel image (4, height, width):
@@ -608,6 +637,13 @@ def polar_to_cartesian(polar_image, range_m=20.0, fov_deg=120.0, output_size=(51
             [2] y_map: y-coordinate in meters for each pixel
             [3] z_map: z-coordinate in meters for each pixel (x in original frame)
     """
+    if range_m is None:
+        range_m = SONAR_CONFIG['range_m']
+    if fov_deg is None:
+        fov_deg = SONAR_CONFIG['fov_deg']
+    if output_size is None:
+        output_size = DATA_GEN_CONFIG['image_size']
+    
     num_range_bins, num_beams = polar_image.shape
     height, width = output_size
     
@@ -853,20 +889,15 @@ def apply_rotation_augmentation(output_dict, angle_deg):
     return rotated
 
 
-def visualize_sample(sample_data, output_path, show_heatmap=True):
+def visualize_sample(sample_data, output_path):
     """
     Visualize a sonar sample with ground truth overlay in Cartesian coordinates.
     
     Args:
         sample_data: Dictionary or .npz file with image, p, t, etc.
         output_path: Path to save visualization
-        show_heatmap: If True, shows heatmap overlay; if False, only shows line annotation
     """
-    # Determine number of subplots
-    num_plots = 3 if show_heatmap else 1
-    fig, axes = plt.subplots(1, num_plots, figsize=(10 * num_plots, 10))
-    if num_plots == 1:
-        axes = [axes]
+    fig, ax = plt.subplots(1, 1, figsize=(10, 10))
     
     # Handle both dict and npz formats
     if isinstance(sample_data, dict):
@@ -887,30 +918,17 @@ def visualize_sample(sample_data, output_path, show_heatmap=True):
         orientation_deg = sample_data.get('orientation_deg')
         sample_id = sample_data.get('sample_id', 0)
     
-    height, width = intensity.shape
-    
     # Set dark grey background
-    for ax in axes:
-        ax.set_facecolor('#2a2a2a')
+    ax.set_facecolor('#2a2a2a')
     fig.patch.set_facecolor('#2a2a2a')
     
-    # Calculate extent based on FOV: at 20m with 120° FOV, z extends to ±18.2m
-    range_m = 20.0
-    fov_deg = 120.0
+    # Calculate extent based on FOV (use config values)
+    range_m = SONAR_CONFIG['range_m']
+    fov_deg = SONAR_CONFIG['fov_deg']
     z_max = range_m * np.sin(np.deg2rad(fov_deg / 2)) * 1.05
     extent = [-z_max, z_max, 0, range_m]
     
-    # Generate heatmap if requested
-    heatmap = None
-    if show_heatmap and net_visible and p is not None:
-        heatmap = generate_heatmap_target(
-            p, 
-            image_size=(height, width),
-            sigma_pixels=DATA_GEN_CONFIG['heatmap_sigma_pixels']
-        )
-    
-    # Plot 1: Original image with line annotation
-    ax = axes[0]
+    # Plot image with annotation
     ax.imshow(intensity, cmap='gray', vmin=0, vmax=1, 
               extent=extent, origin='lower', aspect='auto')
     
@@ -936,7 +954,7 @@ def visualize_sample(sample_data, output_path, show_heatmap=True):
             ax.plot([p1_z, p2_z], [p1_y, p2_y], 'r-', 
                    linewidth=2.5, alpha=0.9, zorder=10, label='Net line')
         
-        title = f'Original | d={distance_m:.2f}m | θ={orientation_deg:+.0f}°'
+        title = f'Sample {sample_id} | d={distance_m:.2f}m | θ={orientation_deg:+.0f}°'
     else:
         title = f'Sample {sample_id} | NO NET'
     
@@ -948,57 +966,7 @@ def visualize_sample(sample_data, output_path, show_heatmap=True):
     ax.set_title(title, fontsize=12, pad=15, color='white')
     ax.grid(True, alpha=0.2, linewidth=0.5, color='white')
     ax.tick_params(colors='white')
-    
-    if show_heatmap and heatmap is not None:
-        # Plot 2: Heatmap only
-        ax = axes[1]
-        im = ax.imshow(heatmap, cmap='hot', vmin=0, vmax=1,
-                      extent=extent, origin='lower', aspect='auto')
-        
-        # Mark peak location
-        py, pz = p[0], p[1]
-        ax.plot(pz, py, 'g*', markersize=15, alpha=0.9, zorder=10, label='Peak')
-        
-        ax.set_xlim(-z_max, z_max)
-        ax.set_ylim(0, range_m)
-        ax.set_aspect('equal')
-        ax.set_xlabel('Z (m)', color='white', fontsize=10)
-        ax.set_ylabel('Y (m)', color='white', fontsize=10)
-        ax.set_title(f'Heatmap Target (σ={DATA_GEN_CONFIG["heatmap_sigma_pixels"]:.1f}px)', 
-                    fontsize=12, pad=15, color='white')
-        ax.grid(True, alpha=0.2, linewidth=0.5, color='white')
-        ax.tick_params(colors='white')
-        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-        
-        # Plot 3: Overlay
-        ax = axes[2]
-        ax.imshow(intensity, cmap='gray', vmin=0, vmax=1, 
-                 extent=extent, origin='lower', aspect='auto')
-        im = ax.imshow(heatmap, cmap='hot', alpha=0.5, vmin=0, vmax=1,
-                      extent=extent, origin='lower', aspect='auto')
-        
-        # Draw hit point and net line
-        ax.plot(pz, py, 'ro', markersize=8, alpha=0.9, zorder=10, label='Hitpoint')
-        
-        if t is not None:
-            ty, tz = t[0], t[1]
-            net_line_length = 4.0
-            half_length = net_line_length / 2
-            p1_y = py - half_length * ty
-            p1_z = pz - half_length * tz
-            p2_y = py + half_length * ty
-            p2_z = pz + half_length * tz
-            ax.plot([p1_z, p2_z], [p1_y, p2_y], 'r-', 
-                   linewidth=2.5, alpha=0.9, zorder=10, label='Net line')
-        
-        ax.set_xlim(-z_max, z_max)
-        ax.set_ylim(0, range_m)
-        ax.set_aspect('equal')
-        ax.set_xlabel('Z (m)', color='white', fontsize=10)
-        ax.set_ylabel('Y (m)', color='white', fontsize=10)
-        ax.set_title('Overlay (Image + Heatmap)', fontsize=12, pad=15, color='white')
-        ax.grid(True, alpha=0.2, linewidth=0.5, color='white')
-        ax.tick_params(colors='white')
+    if net_visible:
         ax.legend(loc='upper right', fontsize=9, framealpha=0.8)
     
     plt.tight_layout()
@@ -1021,12 +989,19 @@ def generate_dataset(split='train', num_samples=None):
     output_dir.mkdir(parents=True, exist_ok=True)
     
     # Create images subdirectory for visualizations
-    images_dir = output_dir / 'images'
-    images_dir.mkdir(exist_ok=True)
+    viz_interval = DATA_GEN_CONFIG.get('viz_interval', 10)
     
-    print(f"\nGenerating {num_samples} {split} samples...")
-    print(f"Output directory: {output_dir}")
-    print(f"Saving visualizations every 10th sample to: {images_dir}")
+    if viz_interval > 0:
+        images_dir = output_dir / 'images'
+        images_dir.mkdir(exist_ok=True)
+        print(f"\nGenerating {num_samples} {split} samples...")
+        print(f"Output directory: {output_dir}")
+        print(f"Saving visualizations every {viz_interval} samples to: {images_dir}")
+    else:
+        images_dir = None
+        print(f"\nGenerating {num_samples} {split} samples...")
+        print(f"Output directory: {output_dir}")
+        print(f"Visualizations disabled")
     
     for i in tqdm(range(num_samples)):
         # Generate sample
@@ -1036,13 +1011,14 @@ def generate_dataset(split='train', num_samples=None):
         sample_path = output_dir / f"sample_{i:06d}.npz"
         np.savez_compressed(sample_path, **sample_data)
         
-        # Save visualization for every 10th sample
-        if i % 10 == 0:
+        # Save visualization if enabled and on interval
+        if viz_interval > 0 and i % viz_interval == 0:
             viz_path = images_dir / f"sample_{i:06d}.png"
             visualize_sample(sample_data, viz_path)
     
     print(f"✓ Generated {num_samples} samples")
-    print(f"✓ Saved {num_samples // 10} visualization images")
+    if viz_interval > 0:
+        print(f"✓ Saved {num_samples // viz_interval} visualization images")
     
     # Save dataset metadata
     save_dataset_metadata(output_dir)
@@ -1070,8 +1046,6 @@ def save_dataset_metadata(output_dir):
             'u': width / 2,  # z=0 is at center horizontally
             'v': 0,          # y=0 is at bottom
         },
-        'heatmap_sigma': DATA_GEN_CONFIG['heatmap_sigma_pixels'],
-        'direction_radius': DATA_GEN_CONFIG['direction_radius_pixels'],
         'sonar_config': SONAR_CONFIG,
         'scene_config': SCENE_CONFIG,
         'data_gen_config': DATA_GEN_CONFIG,

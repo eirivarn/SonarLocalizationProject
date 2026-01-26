@@ -45,6 +45,57 @@ SCENE_CONFIG = {
 }
 
 # ============================================================================
+# MATERIAL PROPERTIES (Sonar Physics)
+# ============================================================================
+MATERIAL_CONFIG = {
+    # Each material: [reflectivity, scattering, absorption]
+    # reflectivity: 0-1, how bright the object appears
+    # scattering: 0-1, how much energy scatters
+    # absorption: 0-1, how much energy is absorbed (controls shadow strength)
+    
+    'net': {
+        'reflectivity': 0.4,
+        'scattering': 0.2,
+        'absorption': 0.1,    # Light shadow - nets are thin/sparse
+    },
+    'rope': {
+        'reflectivity': 0.8,
+        'scattering': 0.4,
+        'absorption': 0.4,     # Strong shadow
+    },
+    'fish': {
+        'reflectivity': 0.7,
+        'scattering': 0.5,
+        'absorption': 0.2,     # Moderate shadow
+    },
+    'biomass': {
+        'reflectivity': 0.9,
+        'scattering': 0.7,
+        'absorption': 0.1,     # Light shadow - algae/fouling
+    },
+    'wall': {
+        'reflectivity': 1.0,
+        'scattering': 0.5,
+        'absorption': 1.0,     # Strong shadow
+    },
+    'debris_light': {
+        'reflectivity': 0.8,
+        'scattering': 0.6,
+        'absorption': 0.1,
+    },
+    'debris_medium': {
+        'reflectivity': 0.9,
+        'scattering': 0.7,
+        'absorption': 0.2,
+    },
+    'debris_heavy': {
+        'reflectivity': 1.0,
+        'scattering': 0.8,
+        'absorption': 0.3,
+    },
+}
+
+# ============================================================================
 # DATA GENERATION PARAMETERS
 # ============================================================================
 DATA_GEN_CONFIG = {
@@ -54,9 +105,12 @@ DATA_GEN_CONFIG = {
     'height_range': [0.5, 3.0],        # Height variation (meters)
     
     # Dataset sizes
-    'num_train': 10000,
-    'num_val': 2000,
+    'num_train': 100000,
+    'num_val': 1000,
     'num_test': 1000,
+    
+    # Visualization settings
+    'viz_interval': 1000,                # Save visualization every N samples (set to 0 to disable)
     
     # Randomization
     'randomize_fish': True,
@@ -65,14 +119,10 @@ DATA_GEN_CONFIG = {
     'current_range': [3.0, 10.0],     # Current strength variation
     
     # Output format
-    'save_format': 'npz',              # 'npz' for heatmap training
+    'save_format': 'npz',              # Save as compressed .npz files
     'normalize': True,                 # Normalize images to [0, 1]
     'log_scale': True,                 # Apply log scaling
-    
-    # Heatmap training parameters
     'image_size': (512, 512),          # Cartesian image size
-    'heatmap_sigma_pixels': 3.0,       # Gaussian width for heatmap
-    'direction_radius_pixels': 10,     # Supervision radius for direction
 }
 
 # ============================================================================
@@ -165,7 +215,7 @@ EVAL_CONFIG = {
     'metrics': ['mae', 'rmse', 'r2'],
     
     # Thresholds for "good" predictions
-    'distance_threshold_m': 0.3,      # < 30cm is good
+    'distance_threshold_m': 0.1,      # < 10cm is good
     'orientation_threshold_deg': 10.0,  # < 10° is good
     
     # Visualization
